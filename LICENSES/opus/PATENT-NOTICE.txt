@@ -1,0 +1,11 @@
+Opus is specified by the IETF and includes royalty-free patent licensing terms
+through IETF IPR declarations and BCP 78 / BCP 79 processes.
+
+References:
+- https://opus-codec.org/license/
+- https://datatracker.ietf.org/ipr/1524/
+- https://datatracker.ietf.org/ipr/1914/
+- https://datatracker.ietf.org/ipr/1526/
+
+This file is provided as notice guidance for downstream distributions.
+For legal review in your product context, consult your legal counsel.

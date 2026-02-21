@@ -1,0 +1,18 @@
+{
+  "name": "IncomUdon Relay PWA Client",
+  "short_name": "IncomUdon",
+  "description": "Browser bridge client for IncomUdon UDP relay server",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#dce8ef",
+  "theme_color": "#142126",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

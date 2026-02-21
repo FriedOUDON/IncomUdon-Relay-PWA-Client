@@ -1,0 +1,26 @@
+services:
+  pwa_client:
+    build:
+      context: .
+    image: incomudon-pwa-client:latest
+    command:
+      - -listen
+      - :8080
+      - -base-path
+      - /
+    restart: unless-stopped
+    expose:
+      - "8080"
+
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      - pwa_client
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./deploy/nginx/certs:/etc/nginx/certs:ro

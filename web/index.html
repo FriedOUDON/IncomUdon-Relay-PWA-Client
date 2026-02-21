@@ -1,0 +1,222 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#142126">
+  <title>IncomUdon Relay PWA Client</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body
+  data-base-path="{{.BasePath}}"
+  data-fixed-relay-enabled="{{if .FixedRelayEnabled}}1{{else}}0{{end}}"
+  data-fixed-relay-host="{{.FixedRelayHost}}"
+  data-fixed-relay-port="{{.FixedRelayPort}}"
+  data-ws-token-required="{{if .WSTokenRequired}}1{{else}}0{{end}}"
+  data-auth-mode="{{.AuthMode}}">
+  <div class="backdrop" aria-hidden="true"></div>
+  <main class="layout">
+    <header class="hero">
+      <div class="hero-head">
+        <div>
+          <p class="kicker">IncomUdon</p>
+          <h1 id="titleMain">Relay PWA Client</h1>
+        </div>
+        <div class="hero-actions">
+          <label class="lang-picker" for="languageSelect">
+            <span id="labelLanguage">Language</span>
+            <select id="languageSelect" aria-label="Language">
+              <option value="en">English</option>
+              <option value="ja">日本語</option>
+            </select>
+          </label>
+          <button id="logoutBtn" class="ghost logout-btn" type="button" hidden>Logout</button>
+        </div>
+      </div>
+    </header>
+
+    <section class="card">
+      <form id="connectForm" class="grid">
+        <label>
+          <span id="labelRelayHost">Relay Host</span>
+          <input id="relayHost" type="text" value="" autocomplete="off" spellcheck="false">
+        </label>
+        <label>
+          <span id="labelRelayPort">Relay Port</span>
+          <input id="relayPort" type="number" value="50000" min="1" max="65535">
+        </label>
+        <label>
+          <span id="labelChannelId">Channel ID</span>
+          <input id="channelId" type="number" value="1" min="1">
+        </label>
+        <label>
+          <span id="labelSenderId">Sender ID (random if empty)</span>
+          <input id="senderId" type="number" min="1" max="2147483647">
+        </label>
+        <label>
+          <span id="labelPassword">Password</span>
+          <input id="password" type="password" autocomplete="current-password">
+        </label>
+        <label>
+          <span id="labelCryptoMode">Crypto Mode</span>
+          <select id="cryptoMode">
+            <option value="aes-gcm" selected>aes-gcm</option>
+            <option value="legacy-xor">legacy-xor</option>
+            <option value="no-crypto">no-crypto</option>
+          </select>
+        </label>
+        <label>
+          <span id="labelCodecMode">Codec2 Bitrate</span>
+          <select id="codecMode">
+            <option value="3200">3200</option>
+            <option value="2400" selected>2400</option>
+            <option value="1600">1600</option>
+            <option value="700">700</option>
+            <option value="450">450</option>
+          </select>
+        </label>
+        <label>
+          <span id="labelBrowserCodec">Browser Codec</span>
+          <select id="browserCodec">
+            <option id="optionBrowserCodecPcm" value="pcm" selected>pcm</option>
+            <option id="optionBrowserCodecOpus" value="opus">opus (optional)</option>
+          </select>
+        </label>
+        <label class="checkbox-row">
+          <input id="pcmOnly" type="checkbox" checked>
+          <span id="labelPcmOnly">PCM only (no Web-side encode)</span>
+        </label>
+      </form>
+      <input id="codec2Lib" type="hidden" value="">
+      <input id="opusLib" type="hidden" value="">
+
+      <div class="actions">
+        <button id="connectBtn" class="btn btn-primary" type="button">Connect</button>
+        <button id="disconnectBtn" class="btn" type="button" disabled>Disconnect</button>
+      </div>
+    </section>
+
+    <section class="card control-card">
+      <div class="status-grid">
+        <div>
+          <p id="labelConnection" class="status-label">Connection</p>
+          <p id="connectionStatus" class="status-value">Offline</p>
+        </div>
+        <div>
+          <p id="labelTalker" class="status-label">Talker</p>
+          <p id="talkerStatus" class="status-value">None</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="log-head">
+        <h2 id="headingCueSounds">Cue Sounds</h2>
+      </div>
+      <div class="cue-list">
+        <div class="cue-item">
+          <label class="checkbox-row cue-enable">
+            <input id="cuePttOnEnabled" type="checkbox">
+            <span id="labelCuePttOn">PTT ON Cue</span>
+          </label>
+          <label>
+            <span id="labelCuePttOnUrl">Audio URL</span>
+            <input id="cuePttOnUrl" type="text" value="sfx/ptt_on.wav" autocomplete="off" spellcheck="false">
+          </label>
+          <label>
+            <span id="labelCuePttOnFile">Local File (session only)</span>
+            <input id="cuePttOnFile" type="file" accept=".wav,audio/*">
+          </label>
+          <div class="cue-actions">
+            <button id="cuePttOnTest" class="ghost" type="button">Test</button>
+            <button id="cuePttOnReset" class="ghost" type="button">Default</button>
+          </div>
+        </div>
+
+        <div class="cue-item">
+          <label class="checkbox-row cue-enable">
+            <input id="cuePttOffEnabled" type="checkbox" checked>
+            <span id="labelCuePttOff">PTT OFF Cue</span>
+          </label>
+          <label>
+            <span id="labelCuePttOffUrl">Audio URL</span>
+            <input id="cuePttOffUrl" type="text" value="sfx/ptt_off.wav" autocomplete="off" spellcheck="false">
+          </label>
+          <label>
+            <span id="labelCuePttOffFile">Local File (session only)</span>
+            <input id="cuePttOffFile" type="file" accept=".wav,audio/*">
+          </label>
+          <div class="cue-actions">
+            <button id="cuePttOffTest" class="ghost" type="button">Test</button>
+            <button id="cuePttOffReset" class="ghost" type="button">Default</button>
+          </div>
+        </div>
+
+        <div class="cue-item">
+          <label class="checkbox-row cue-enable">
+            <input id="cueCarrierEnabled" type="checkbox" checked>
+            <span id="labelCueCarrier">Carrier Sense Cue</span>
+          </label>
+          <label>
+            <span id="labelCueCarrierUrl">Audio URL</span>
+            <input id="cueCarrierUrl" type="text" value="sfx/carrier_sense.wav" autocomplete="off" spellcheck="false">
+          </label>
+          <label>
+            <span id="labelCueCarrierFile">Local File (session only)</span>
+            <input id="cueCarrierFile" type="file" accept=".wav,audio/*">
+          </label>
+          <div class="cue-actions">
+            <button id="cueCarrierTest" class="ghost" type="button">Test</button>
+            <button id="cueCarrierReset" class="ghost" type="button">Default</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="log-head">
+        <h2 id="headingEvents">Events</h2>
+        <button id="clearLogBtn" class="ghost" type="button">Clear</button>
+      </div>
+      <pre id="logBox" class="log" aria-live="polite"></pre>
+    </section>
+  </main>
+  <div class="ptt-dock">
+    <button id="pttButton" class="ptt" type="button" disabled>
+      <span id="labelPttButton">Hold to Talk (Space)</span>
+    </button>
+  </div>
+
+  <script src="app.js"></script>
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        const basePath = document.body.dataset.basePath || "";
+        const authMode = String(document.body.dataset.authMode || "none").toLowerCase();
+        if (authMode !== "none") {
+          navigator.serviceWorker.getRegistrations()
+            .then((regs) => Promise.all(regs.map((reg) => reg.unregister())))
+            .catch(() => {});
+          if ("caches" in window) {
+            caches.keys()
+              .then((keys) =>
+                Promise.all(
+                  keys
+                    .filter((key) => key.startsWith("incomudon-pwa-"))
+                    .map((key) => caches.delete(key)),
+                ),
+              )
+              .catch(() => {});
+          }
+          return;
+        }
+        const swPath = basePath ? `${basePath}/sw.js` : "/sw.js";
+        const scope = basePath ? `${basePath}/` : "/";
+        navigator.serviceWorker.register(swPath, { scope }).catch(() => {});
+      });
+    }
+  </script>
+</body>
+</html>
