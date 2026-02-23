@@ -1,4 +1,4 @@
-const CACHE_NAME = "incomudon-pwa-v33";
+const CACHE_NAME = "incomudon-pwa-v39";
 const APP_SHELL = [
   "./",
   "./index.html",

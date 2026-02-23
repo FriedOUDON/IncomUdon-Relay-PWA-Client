@@ -38,64 +38,73 @@
     </header>
 
     <section class="card">
-      <form id="connectForm" class="grid">
-        <label>
-          <span id="labelRelayHost">Relay Host</span>
-          <input id="relayHost" type="text" value="" autocomplete="off" spellcheck="false">
-        </label>
-        <label>
-          <span id="labelRelayPort">Relay Port</span>
-          <input id="relayPort" type="number" value="50000" min="1" max="65535">
-        </label>
-        <label>
-          <span id="labelChannelId">Channel ID</span>
-          <input id="channelId" type="number" value="1" min="1">
-        </label>
-        <label>
-          <span id="labelSenderId">Sender ID (random if empty)</span>
-          <input id="senderId" type="number" min="1" max="2147483647">
-        </label>
-        <label>
-          <span id="labelPassword">Password</span>
-          <input id="password" type="password" autocomplete="current-password">
-        </label>
-        <label>
-          <span id="labelCryptoMode">Crypto Mode</span>
-          <select id="cryptoMode">
-            <option value="aes-gcm" selected>aes-gcm</option>
-            <option value="legacy-xor">legacy-xor</option>
-            <option value="no-crypto">no-crypto</option>
-          </select>
-        </label>
-        <label>
-          <span id="labelCodecMode">Codec2 Bitrate</span>
-          <select id="codecMode">
-            <option value="3200">3200</option>
-            <option value="2400" selected>2400</option>
-            <option value="1600">1600</option>
-            <option value="700">700</option>
-            <option value="450">450</option>
-          </select>
-        </label>
-        <label>
-          <span id="labelBrowserCodec">Browser Codec</span>
-          <select id="browserCodec">
-            <option id="optionBrowserCodecPcm" value="pcm" selected>pcm</option>
-            <option id="optionBrowserCodecOpus" value="opus">opus (optional)</option>
-          </select>
-        </label>
-        <label class="checkbox-row">
-          <input id="pcmOnly" type="checkbox" checked>
-          <span id="labelPcmOnly">PCM only (no Web-side encode)</span>
-        </label>
-      </form>
+      <div class="connect-groups">
+        <div class="connect-group">
+          <form id="connectForm" class="connect-grid connect-grid-main">
+            <label>
+              <span id="labelChannelId">Channel ID</span>
+              <input id="channelId" class="input-emphasis" type="number" value="1" min="1">
+            </label>
+            <label>
+              <span id="labelPassword">Password</span>
+              <input id="password" class="input-emphasis" type="password" autocomplete="current-password">
+            </label>
+          </form>
+          <div class="actions connect-actions">
+            <button id="connectBtn" class="btn btn-primary" type="button">Connect</button>
+            <button id="disconnectBtn" class="btn" type="button" disabled>Disconnect</button>
+          </div>
+        </div>
+
+        <div class="connect-group">
+          <div class="connect-grid connect-grid-advanced">
+            <label>
+              <span id="labelRelayHost">Relay Host</span>
+              <input id="relayHost" type="text" value="" autocomplete="off" spellcheck="false">
+            </label>
+            <label>
+              <span id="labelRelayPort">Relay Port</span>
+              <input id="relayPort" type="number" value="50000" min="1" max="65535">
+            </label>
+            <label>
+              <span id="labelSenderId">Sender ID (random if empty)</span>
+              <input id="senderId" type="number" min="1" max="2147483647">
+            </label>
+            <label>
+              <span id="labelCryptoMode">Crypto Mode</span>
+              <select id="cryptoMode">
+                <option value="aes-gcm" selected>aes-gcm</option>
+                <option value="legacy-xor">legacy-xor</option>
+                <option value="no-crypto">no-crypto</option>
+              </select>
+            </label>
+            <label>
+              <span id="labelCodecMode">Codec2 Bitrate</span>
+              <select id="codecMode">
+                <option value="3200">3200</option>
+                <option value="2400">2400</option>
+                <option value="1600" selected>1600</option>
+                <option value="700">700</option>
+                <option value="450">450</option>
+              </select>
+            </label>
+            <label>
+              <span id="labelBrowserCodec">Browser Codec</span>
+              <select id="browserCodec">
+                <option id="optionBrowserCodecPcm" value="pcm">pcm</option>
+                <option id="optionBrowserCodecOpus" value="opus" selected>opus (optional)</option>
+              </select>
+            </label>
+            <label class="checkbox-row">
+              <input id="pcmOnly" type="checkbox" checked>
+              <span id="labelPcmOnly">PCM only (no Web-side encode)</span>
+            </label>
+          </div>
+        </div>
+      </div>
+
       <input id="codec2Lib" type="hidden" value="">
       <input id="opusLib" type="hidden" value="">
-
-      <div class="actions">
-        <button id="connectBtn" class="btn btn-primary" type="button">Connect</button>
-        <button id="disconnectBtn" class="btn" type="button" disabled>Disconnect</button>
-      </div>
     </section>
 
     <section class="card control-card">
@@ -112,67 +121,84 @@
     </section>
 
     <section class="card">
-      <div class="log-head">
-        <h2 id="headingCueSounds">Cue Sounds</h2>
-      </div>
-      <div class="cue-list">
-        <div class="cue-item">
-          <label class="checkbox-row cue-enable">
-            <input id="cuePttOnEnabled" type="checkbox">
-            <span id="labelCuePttOn">PTT ON Cue</span>
-          </label>
-          <label>
-            <span id="labelCuePttOnUrl">Audio URL</span>
-            <input id="cuePttOnUrl" type="text" value="sfx/ptt_on.wav" autocomplete="off" spellcheck="false">
-          </label>
-          <label>
-            <span id="labelCuePttOnFile">Local File (session only)</span>
-            <input id="cuePttOnFile" type="file" accept=".wav,audio/*">
-          </label>
-          <div class="cue-actions">
-            <button id="cuePttOnTest" class="ghost" type="button">Test</button>
-            <button id="cuePttOnReset" class="ghost" type="button">Default</button>
+      <details class="cue-details">
+        <summary class="log-head cue-summary">
+          <h2 id="headingCueSounds">Cue Sounds</h2>
+        </summary>
+        <div class="cue-list">
+          <div class="cue-item">
+            <label class="checkbox-row cue-enable">
+              <input id="cuePttOnEnabled" type="checkbox">
+              <span id="labelCuePttOn">PTT ON Cue</span>
+            </label>
+            <label>
+              <span id="labelCuePttOnUrl">Audio URL</span>
+              <input id="cuePttOnUrl" type="text" value="sfx/ptt_on.wav" autocomplete="off" spellcheck="false">
+            </label>
+            <label>
+              <span id="labelCuePttOnFile">Local File (session only)</span>
+              <input id="cuePttOnFile" type="file" accept=".wav,audio/*">
+            </label>
+            <div class="cue-actions">
+              <button id="cuePttOnTest" class="ghost" type="button">Test</button>
+              <button id="cuePttOnReset" class="ghost" type="button">Default</button>
+            </div>
           </div>
-        </div>
 
-        <div class="cue-item">
-          <label class="checkbox-row cue-enable">
-            <input id="cuePttOffEnabled" type="checkbox" checked>
-            <span id="labelCuePttOff">PTT OFF Cue</span>
-          </label>
-          <label>
-            <span id="labelCuePttOffUrl">Audio URL</span>
-            <input id="cuePttOffUrl" type="text" value="sfx/ptt_off.wav" autocomplete="off" spellcheck="false">
-          </label>
-          <label>
-            <span id="labelCuePttOffFile">Local File (session only)</span>
-            <input id="cuePttOffFile" type="file" accept=".wav,audio/*">
-          </label>
-          <div class="cue-actions">
-            <button id="cuePttOffTest" class="ghost" type="button">Test</button>
-            <button id="cuePttOffReset" class="ghost" type="button">Default</button>
+          <div class="cue-item">
+            <label class="checkbox-row cue-enable">
+              <input id="cuePttOffEnabled" type="checkbox" checked>
+              <span id="labelCuePttOff">PTT OFF Cue</span>
+            </label>
+            <label>
+              <span id="labelCuePttOffUrl">Audio URL</span>
+              <input id="cuePttOffUrl" type="text" value="sfx/ptt_off.wav" autocomplete="off" spellcheck="false">
+            </label>
+            <label>
+              <span id="labelCuePttOffFile">Local File (session only)</span>
+              <input id="cuePttOffFile" type="file" accept=".wav,audio/*">
+            </label>
+            <div class="cue-actions">
+              <button id="cuePttOffTest" class="ghost" type="button">Test</button>
+              <button id="cuePttOffReset" class="ghost" type="button">Default</button>
+            </div>
           </div>
-        </div>
 
-        <div class="cue-item">
-          <label class="checkbox-row cue-enable">
-            <input id="cueCarrierEnabled" type="checkbox" checked>
-            <span id="labelCueCarrier">Carrier Sense Cue</span>
-          </label>
-          <label>
-            <span id="labelCueCarrierUrl">Audio URL</span>
-            <input id="cueCarrierUrl" type="text" value="sfx/carrier_sense.wav" autocomplete="off" spellcheck="false">
-          </label>
-          <label>
-            <span id="labelCueCarrierFile">Local File (session only)</span>
-            <input id="cueCarrierFile" type="file" accept=".wav,audio/*">
-          </label>
-          <div class="cue-actions">
-            <button id="cueCarrierTest" class="ghost" type="button">Test</button>
-            <button id="cueCarrierReset" class="ghost" type="button">Default</button>
+          <div class="cue-item">
+            <label class="checkbox-row cue-enable">
+              <input id="cueCarrierEnabled" type="checkbox" checked>
+              <span id="labelCueCarrier">Carrier Sense Cue</span>
+            </label>
+            <label>
+              <span id="labelCueCarrierUrl">Audio URL</span>
+              <input id="cueCarrierUrl" type="text" value="sfx/carrier_sense.wav" autocomplete="off" spellcheck="false">
+            </label>
+            <label>
+              <span id="labelCueCarrierFile">Local File (session only)</span>
+              <input id="cueCarrierFile" type="file" accept=".wav,audio/*">
+            </label>
+            <div class="cue-actions">
+              <button id="cueCarrierTest" class="ghost" type="button">Test</button>
+              <button id="cueCarrierReset" class="ghost" type="button">Default</button>
+            </div>
           </div>
         </div>
-      </div>
+      </details>
+    </section>
+
+    <section class="card">
+      <details class="cue-details">
+        <summary class="log-head cue-summary">
+          <h2 id="headingAudioTx">Audio File TX</h2>
+        </summary>
+        <div class="audio-tx-config">
+          <label>
+            <span id="labelAudioTxSlotCount">Preset Slots</span>
+            <input id="audioTxSlotCount" type="text" value="3" inputmode="numeric" autocomplete="off" spellcheck="false">
+          </label>
+        </div>
+        <div id="audioTxSlots" class="audio-tx-slots"></div>
+      </details>
     </section>
 
     <section class="card">

@@ -1,3 +1,4 @@
 # Keep directory placeholder, but do not track user-provided codec2 binaries.
 /third_party/libcodec2/linux-x86_64/*
 !/third_party/libcodec2/linux-x86_64/.gitkeep
+incomudon-pwa-client.exe

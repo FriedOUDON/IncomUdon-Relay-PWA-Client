@@ -86,6 +86,8 @@ const (
 	oidcStateCookieName   = "incomudon_oidc_state"
 )
 
+const oidcSessionRefreshLeeway = 30 * time.Second
+
 type oidcRuntime struct {
 	issuer        string
 	oauth2Config  oauth2.Config
@@ -101,10 +103,16 @@ type oidcStateCookie struct {
 }
 
 type oidcSessionCookie struct {
+	SID   string `json:"sid,omitempty"`
 	Sub   string `json:"sub"`
 	Email string `json:"email,omitempty"`
 	Name  string `json:"name,omitempty"`
 	Exp   int64  `json:"exp"`
+}
+
+type oidcRefreshTokenEntry struct {
+	Token string
+	Exp   int64
 }
 
 type appServer struct {
@@ -121,6 +129,8 @@ type appServer struct {
 	basicUser         string
 	basicPass         string
 	oidc              *oidcRuntime
+	oidcRefreshMu     sync.Mutex
+	oidcRefreshTokens map[string]oidcRefreshTokenEntry
 
 	upgrader websocket.Upgrader
 }
@@ -203,6 +213,7 @@ func main() {
 		basicUser:         basicUser,
 		basicPass:         basicPass,
 		oidc:              oidcRT,
+		oidcRefreshTokens: make(map[string]oidcRefreshTokenEntry),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
@@ -788,7 +799,7 @@ func (a *appServer) authorizeOIDC(w http.ResponseWriter, r *http.Request, websoc
 		return false
 	}
 
-	if _, ok := a.readOIDCSession(r); ok {
+	if _, ok := a.ensureOIDCSession(w, r); ok {
 		return true
 	}
 
@@ -925,36 +936,32 @@ func (a *appServer) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionExp := claims.Exp
-	if sessionExp <= 0 {
-		if !oauthToken.Expiry.IsZero() {
-			sessionExp = oauthToken.Expiry.Unix()
-		} else {
-			sessionExp = time.Now().Add(8 * time.Hour).Unix()
-		}
+	sessionExp := normalizeOIDCSessionExpiry(claims.Exp, oauthToken.Expiry)
+
+	if previousSession, ok := a.readOIDCSessionRaw(r); ok && previousSession.SID != "" {
+		a.deleteOIDCRefreshToken(previousSession.SID)
 	}
-	if sessionExp <= time.Now().Unix() {
-		sessionExp = time.Now().Add(5 * time.Minute).Unix()
+
+	sessionID, err := randomToken(24)
+	if err != nil {
+		a.clearCookie(w, r, oidcStateCookieName, true)
+		http.Error(w, "failed to create session id", http.StatusInternalServerError)
+		return
 	}
 
 	sessionPayload := oidcSessionCookie{
+		SID:   sessionID,
 		Sub:   claims.Sub,
 		Email: claims.Email,
 		Name:  claims.Name,
 		Exp:   sessionExp,
 	}
-	ttl := time.Until(time.Unix(sessionExp, 0))
-	if ttl < time.Minute {
-		ttl = time.Minute
-	}
-	if ttl > 7*24*time.Hour {
-		ttl = 7 * 24 * time.Hour
-	}
-	if err := a.setSignedCookie(w, r, oidcSessionCookieName, sessionPayload, ttl, true); err != nil {
+	if err := a.setSignedCookie(w, r, oidcSessionCookieName, sessionPayload, oidcSessionTTLFromExp(sessionExp), true); err != nil {
 		a.clearCookie(w, r, oidcStateCookieName, true)
 		http.Error(w, "failed to persist session", http.StatusInternalServerError)
 		return
 	}
+	a.storeOIDCRefreshToken(sessionID, oauthToken.RefreshToken, sessionExp)
 
 	a.clearCookie(w, r, oidcStateCookieName, true)
 	http.Redirect(w, r, sanitizeNextPath(stateCookie.Next, a.basePath), http.StatusFound)
@@ -964,6 +971,9 @@ func (a *appServer) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	switch a.authMode {
 	case authModeOIDC:
 		if a.oidc != nil {
+			if payload, ok := a.readOIDCSessionRaw(r); ok && payload.SID != "" {
+				a.deleteOIDCRefreshToken(payload.SID)
+			}
 			a.clearCookie(w, r, oidcSessionCookieName, true)
 			a.clearCookie(w, r, oidcStateCookieName, true)
 		}
@@ -989,7 +999,7 @@ func (a *appServer) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("WWW-Authenticate", `Basic realm="IncomUdon Relay PWA Client"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	case authModeOIDC:
-		if _, ok := a.readOIDCSession(r); ok {
+		if _, ok := a.ensureOIDCSession(w, r); ok {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -1026,7 +1036,7 @@ func (a *appServer) oidcRedirectURL(r *http.Request) string {
 	return fmt.Sprintf("%s://%s%s", scheme, host, a.routePath("/auth/callback"))
 }
 
-func (a *appServer) readOIDCSession(r *http.Request) (oidcSessionCookie, bool) {
+func (a *appServer) readOIDCSessionRaw(r *http.Request) (oidcSessionCookie, bool) {
 	var payload oidcSessionCookie
 	if a.oidc == nil {
 		return payload, false
@@ -1034,10 +1044,185 @@ func (a *appServer) readOIDCSession(r *http.Request) (oidcSessionCookie, bool) {
 	if err := a.readSignedCookie(r, oidcSessionCookieName, &payload); err != nil {
 		return payload, false
 	}
+	return payload, true
+}
+
+func (a *appServer) readOIDCSession(r *http.Request) (oidcSessionCookie, bool) {
+	payload, ok := a.readOIDCSessionRaw(r)
+	if !ok {
+		return payload, false
+	}
 	if payload.Sub == "" || payload.Exp <= time.Now().Unix() {
 		return payload, false
 	}
 	return payload, true
+}
+
+func normalizeOIDCSessionExpiry(exp int64, fallback time.Time) int64 {
+	now := time.Now()
+	sessionExp := exp
+	if sessionExp <= 0 {
+		if !fallback.IsZero() {
+			sessionExp = fallback.Unix()
+		} else {
+			sessionExp = now.Add(8 * time.Hour).Unix()
+		}
+	}
+	if sessionExp <= now.Unix() {
+		sessionExp = now.Add(5 * time.Minute).Unix()
+	}
+	return sessionExp
+}
+
+func oidcSessionTTLFromExp(exp int64) time.Duration {
+	ttl := time.Until(time.Unix(exp, 0))
+	if ttl < time.Minute {
+		ttl = time.Minute
+	}
+	if ttl > 7*24*time.Hour {
+		ttl = 7 * 24 * time.Hour
+	}
+	return ttl
+}
+
+func (a *appServer) ensureOIDCSession(w http.ResponseWriter, r *http.Request) (oidcSessionCookie, bool) {
+	payload, ok := a.readOIDCSessionRaw(r)
+	if !ok || payload.Sub == "" {
+		return payload, false
+	}
+
+	threshold := time.Now().Add(oidcSessionRefreshLeeway).Unix()
+	if payload.Exp > threshold {
+		return payload, true
+	}
+
+	refreshed, ok := a.refreshOIDCSession(w, r, payload)
+	if ok {
+		return refreshed, true
+	}
+
+	if payload.SID != "" {
+		a.deleteOIDCRefreshToken(payload.SID)
+	}
+	a.clearCookie(w, r, oidcSessionCookieName, true)
+	return payload, false
+}
+
+func (a *appServer) refreshOIDCSession(
+	w http.ResponseWriter,
+	r *http.Request,
+	payload oidcSessionCookie,
+) (oidcSessionCookie, bool) {
+	if a.oidc == nil {
+		return payload, false
+	}
+	if payload.SID == "" {
+		return payload, false
+	}
+
+	refreshToken, ok := a.loadOIDCRefreshToken(payload.SID)
+	if !ok || strings.TrimSpace(refreshToken) == "" {
+		return payload, false
+	}
+
+	oauthCfg := a.oidc.oauth2Config
+	oauthCfg.RedirectURL = a.oidcRedirectURL(r)
+
+	base := &oauth2.Token{
+		RefreshToken: refreshToken,
+		Expiry:       time.Unix(payload.Exp, 0),
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	nextToken, err := oauthCfg.TokenSource(ctx, base).Token()
+	if err != nil {
+		return payload, false
+	}
+
+	nextPayload := payload
+	nextExp := normalizeOIDCSessionExpiry(payload.Exp, nextToken.Expiry)
+
+	rawIDToken, _ := nextToken.Extra("id_token").(string)
+	if strings.TrimSpace(rawIDToken) != "" {
+		idToken, err := a.oidc.verifier.Verify(ctx, rawIDToken)
+		if err != nil {
+			return payload, false
+		}
+
+		claims := struct {
+			Sub   string `json:"sub"`
+			Email string `json:"email"`
+			Name  string `json:"name"`
+			Exp   int64  `json:"exp"`
+		}{}
+		if err := idToken.Claims(&claims); err != nil {
+			return payload, false
+		}
+		if claims.Sub == "" || !secureStringEqual(claims.Sub, payload.Sub) {
+			return payload, false
+		}
+		nextPayload.Sub = claims.Sub
+		nextPayload.Email = claims.Email
+		nextPayload.Name = claims.Name
+		nextExp = normalizeOIDCSessionExpiry(claims.Exp, nextToken.Expiry)
+	}
+
+	nextPayload.Exp = nextExp
+	if err := a.setSignedCookie(w, r, oidcSessionCookieName, nextPayload, oidcSessionTTLFromExp(nextExp), true); err != nil {
+		return payload, false
+	}
+
+	updatedRefreshToken := strings.TrimSpace(nextToken.RefreshToken)
+	if updatedRefreshToken == "" {
+		updatedRefreshToken = refreshToken
+	}
+	a.storeOIDCRefreshToken(payload.SID, updatedRefreshToken, nextExp)
+	return nextPayload, true
+}
+
+func (a *appServer) storeOIDCRefreshToken(sessionID string, token string, exp int64) {
+	sessionID = strings.TrimSpace(sessionID)
+	token = strings.TrimSpace(token)
+	if sessionID == "" || token == "" {
+		return
+	}
+	a.oidcRefreshMu.Lock()
+	a.oidcRefreshTokens[sessionID] = oidcRefreshTokenEntry{
+		Token: token,
+		Exp:   exp,
+	}
+	a.oidcRefreshMu.Unlock()
+}
+
+func (a *appServer) loadOIDCRefreshToken(sessionID string) (string, bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return "", false
+	}
+	a.oidcRefreshMu.Lock()
+	defer a.oidcRefreshMu.Unlock()
+
+	entry, ok := a.oidcRefreshTokens[sessionID]
+	if !ok || strings.TrimSpace(entry.Token) == "" {
+		return "", false
+	}
+	// Best-effort cleanup for stale refresh entries.
+	if entry.Exp > 0 && entry.Exp <= time.Now().Add(-24*time.Hour).Unix() {
+		delete(a.oidcRefreshTokens, sessionID)
+		return "", false
+	}
+	return entry.Token, true
+}
+
+func (a *appServer) deleteOIDCRefreshToken(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	a.oidcRefreshMu.Lock()
+	delete(a.oidcRefreshTokens, sessionID)
+	a.oidcRefreshMu.Unlock()
 }
 
 func (a *appServer) setSignedCookie(

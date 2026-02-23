@@ -43,6 +43,8 @@
     cuePttOnReset: document.getElementById("cuePttOnReset"),
     cuePttOffReset: document.getElementById("cuePttOffReset"),
     cueCarrierReset: document.getElementById("cueCarrierReset"),
+    audioTxSlotCount: document.getElementById("audioTxSlotCount"),
+    audioTxSlots: document.getElementById("audioTxSlots"),
     logoutBtn: document.getElementById("logoutBtn"),
   };
 
@@ -78,6 +80,14 @@
     cue_carrier: "Carrier Sense Cue",
     cue_audio_url: "Audio URL",
     cue_local_file: "Local File (session only)",
+    audio_tx_files: "Audio File TX",
+    audio_tx_slot_count: "Preset Slots",
+    audio_tx_slot: "Slot {index}",
+    audio_tx_slot_empty: "No file selected",
+    audio_tx_send: "Send",
+    audio_tx_stop: "Stop",
+    audio_tx_select_file: "Select File",
+    audio_tx_delete: "Delete",
     test: "Test",
     default: "Default",
     events: "Events",
@@ -110,6 +120,16 @@
     log_cue_play_failed: "cue play failed ({label}): {error}",
     log_cue_local_selected: "cue local file selected ({label}): {name}",
     log_cue_reset_default: "cue reset to default ({label})",
+    log_audio_tx_not_connected: "audio file TX requires an active connection",
+    log_audio_tx_busy: "audio file TX is already running",
+    log_audio_tx_missing_file: "audio file is not selected (slot {index})",
+    log_audio_tx_slot_selected: "audio file selected (slot {index}): {name}",
+    log_audio_tx_slot_cleared: "audio file cleared (slot {index})",
+    log_audio_tx_start: "audio file TX started (slot {index}): {name}",
+    log_audio_tx_completed: "audio file TX completed (slot {index}): {name}",
+    log_audio_tx_aborted: "audio file TX aborted",
+    log_audio_tx_failed: "audio file TX failed (slot {index}): {error}",
+    log_audio_tx_ptt_active: "audio file TX is blocked while PTT is active",
     mic_insecure_context: "microphone API is unavailable on insecure context (use HTTPS or localhost)",
     mic_not_supported: "microphone API is not supported by this browser",
     opus_decoder_not_supported: "WebCodecs AudioDecoder is not supported for Opus downlink",
@@ -159,6 +179,8 @@
       pttOff: null,
       carrier: null,
     },
+    audioTxSlots: [],
+    audioTxTask: null,
     lastCarrierCueMs: 0,
     selfSenderId: 0,
     talkerId: 0,
@@ -169,10 +191,13 @@
       port: 0,
     },
   };
+  const senderIDMin = 1;
+  const senderIDMax = 0x7fffffff;
 
   applyInitialFormSettings();
   bindFormPersistence();
   bindCueControls();
+  bindAudioTxControls();
   configureAuthUI();
   initI18n();
 
@@ -182,6 +207,52 @@
 
   function sendOpusFrame(frame) {
     enqueueUplinkPacket(0x02, frame);
+  }
+
+  function normalizeSenderID(raw, randomIfInvalid = true) {
+    const text = String(raw || "").trim();
+    if (!text) {
+      return randomIfInvalid ? randomSenderID() : senderIDMin;
+    }
+
+    const value = Number(text);
+    if (!Number.isFinite(value)) {
+      return randomIfInvalid ? randomSenderID() : senderIDMin;
+    }
+
+    if (!Number.isSafeInteger(value)) {
+      return randomIfInvalid ? randomSenderID() : senderIDMin;
+    }
+
+    const id = Math.trunc(value);
+    if (id < senderIDMin) {
+      return randomIfInvalid ? randomSenderID() : senderIDMin;
+    }
+    if (id > senderIDMax) {
+      return randomIfInvalid ? randomSenderID() : senderIDMin;
+    }
+    return id;
+  }
+
+  function canonicalizeSenderIDField() {
+    if (!ui.senderId) {
+      return senderIDMin;
+    }
+    const normalized = normalizeSenderID(ui.senderId.value, true);
+    ui.senderId.value = String(normalized);
+    return normalized;
+  }
+
+  function transmitUplinkFrame(frame) {
+    if (!frame || frame.length < 2) {
+      return;
+    }
+    const shaped = shapeTxFrame(frame);
+    if (state.uplinkCodec === "opus" && state.opusEncoder) {
+      state.opusEncoder.encodeFrame(shaped);
+      return;
+    }
+    sendPcmFrame(shaped);
   }
 
   function enqueueUplinkPacket(type, frame) {
@@ -467,12 +538,15 @@
         }
       }
 
+      const safeSenderID = canonicalizeSenderIDField();
+      persistFormSettings();
+
       sendCommand({
         type: "connect",
         relayHost: fixedRelayEnabled ? effectiveFixedRelayHost() : ui.relayHost.value.trim(),
         relayPort: fixedRelayEnabled ? effectiveFixedRelayPort() : Number(ui.relayPort.value),
         channelId: Number(ui.channelId.value),
-        senderId: Number(ui.senderId.value || 0),
+        senderId: safeSenderID,
         password: ui.password.value,
         cryptoMode: ui.cryptoMode.value,
         codecMode: Number(ui.codecMode.value),
@@ -626,6 +700,7 @@
       }
       persistFormSettings();
       refreshPTTAvailability();
+      refreshAudioTxSlotsUI();
       setConnectionView({ kind: "connected", level: "ok", host: event.relayHost, port: event.relayPort });
       appendLog(t("log_connected_summary", {
         channel: event.channelId,
@@ -695,6 +770,7 @@
 
   function applyDisconnectedState() {
     state.connected = false;
+    cancelAudioTxTask(false);
     setPTT(false, false);
     state.txQueue = [];
     stopTxLoop();
@@ -728,6 +804,7 @@
     ui.connectBtn.disabled = false;
     ui.disconnectBtn.disabled = true;
     refreshPTTAvailability();
+    refreshAudioTxSlotsUI();
     updateTalkerStatus(0, false);
     setConnectionView({ kind: "offline", level: "warn" });
   }
@@ -740,8 +817,8 @@
       senderId: String(randomSenderID()),
       password: "",
       cryptoMode: "aes-gcm",
-      codecMode: "2400",
-      browserCodec: "pcm",
+      codecMode: "1600",
+      browserCodec: "opus",
       codec2Lib: "",
       opusLib: "",
       pcmOnly: true,
@@ -751,6 +828,7 @@
       cuePttOnUrl: cueDefaults.pttOnUrl,
       cuePttOffUrl: cueDefaults.pttOffUrl,
       cueCarrierUrl: cueDefaults.carrierUrl,
+      audioTxSlotCount: "3",
     };
     if (fixedRelayEnabled) {
       defaults.relayHost = effectiveFixedRelayHost();
@@ -766,9 +844,7 @@
     if (!merged.relayHost || !String(merged.relayHost).trim()) {
       merged.relayHost = defaults.relayHost;
     }
-    if (!merged.senderId || Number(merged.senderId) <= 0) {
-      merged.senderId = defaults.senderId;
-    }
+    merged.senderId = String(normalizeSenderID(merged.senderId, true));
     if (!merged.codecMode) {
       merged.codecMode = defaults.codecMode;
     }
@@ -783,6 +859,9 @@
     }
     if (!merged.cueCarrierUrl || !String(merged.cueCarrierUrl).trim()) {
       merged.cueCarrierUrl = cueDefaults.carrierUrl;
+    }
+    if (!merged.audioTxSlotCount) {
+      merged.audioTxSlotCount = defaults.audioTxSlotCount;
     }
     if (fixedRelayEnabled) {
       merged.relayHost = defaults.relayHost;
@@ -806,6 +885,8 @@
     ui.cuePttOnUrl.value = String(merged.cuePttOnUrl);
     ui.cuePttOffUrl.value = String(merged.cuePttOffUrl);
     ui.cueCarrierUrl.value = String(merged.cueCarrierUrl);
+    ui.audioTxSlotCount.value = String(normalizeAudioTxSlotCount(merged.audioTxSlotCount));
+    setAudioTxSlotCount(merged.audioTxSlotCount, false);
     applyFixedRelayUIState();
 
     persistFormSettings();
@@ -830,6 +911,7 @@
       ui.cuePttOnUrl,
       ui.cuePttOffUrl,
       ui.cueCarrierUrl,
+      ui.audioTxSlotCount,
     ];
 
     persistTargets.forEach((element) => {
@@ -839,6 +921,14 @@
       element.addEventListener("input", persistFormSettings);
       element.addEventListener("change", persistFormSettings);
     });
+
+    if (ui.senderId && !ui.senderId.dataset.normalizeBound) {
+      ui.senderId.dataset.normalizeBound = "1";
+      ui.senderId.addEventListener("blur", () => {
+        canonicalizeSenderIDField();
+        persistFormSettings();
+      });
+    }
   }
 
   function readStoredSettings() {
@@ -876,6 +966,7 @@
       cuePttOnUrl: ui.cuePttOnUrl.value.trim(),
       cuePttOffUrl: ui.cuePttOffUrl.value.trim(),
       cueCarrierUrl: ui.cueCarrierUrl.value.trim(),
+      audioTxSlotCount: String(normalizeAudioTxSlotCount(ui.audioTxSlotCount ? ui.audioTxSlotCount.value : 3)),
     };
     try {
       localStorage.setItem(settingsStorageKey, JSON.stringify(settings));
@@ -904,6 +995,18 @@
     ui.cueCarrierReset.addEventListener("click", () => resetCueToDefault("carrier"));
 
     window.addEventListener("beforeunload", cleanupCueFiles);
+  }
+
+  function bindAudioTxControls() {
+    if (!ui.audioTxSlotCount) {
+      return;
+    }
+    const applySlotCount = () => {
+      setAudioTxSlotCount(ui.audioTxSlotCount.value, true);
+      persistFormSettings();
+    };
+    ui.audioTxSlotCount.addEventListener("change", applySlotCount);
+    ui.audioTxSlotCount.addEventListener("blur", applySlotCount);
   }
 
   function cueControls(kind) {
@@ -1024,6 +1127,348 @@
     clearCueFile("carrier");
   }
 
+  function normalizeAudioTxSlotCount(value) {
+    const parsed = Number.parseInt(String(value || "").trim(), 10);
+    if (!Number.isFinite(parsed)) {
+      return 3;
+    }
+    return Math.max(1, Math.min(12, parsed));
+  }
+
+  function createAudioTxSlotState() {
+    return { file: null };
+  }
+
+  function setAudioTxSlotCount(value, preserveExisting) {
+    const count = normalizeAudioTxSlotCount(value);
+    const keepExisting = preserveExisting !== false;
+    const next = [];
+    for (let i = 0; i < count; i += 1) {
+      if (keepExisting && state.audioTxSlots[i]) {
+        next.push(state.audioTxSlots[i]);
+      } else {
+        next.push(createAudioTxSlotState());
+      }
+    }
+    state.audioTxSlots = next;
+    if (ui.audioTxSlotCount) {
+      ui.audioTxSlotCount.value = String(count);
+    }
+    refreshAudioTxSlotsUI();
+  }
+
+  function refreshAudioTxSlotsUI() {
+    if (!ui.audioTxSlots) {
+      return;
+    }
+    renderAudioTxSlots();
+  }
+
+  function renderAudioTxSlots() {
+    if (!ui.audioTxSlots) {
+      return;
+    }
+    ui.audioTxSlots.textContent = "";
+
+    const activeTask = state.audioTxTask;
+    const hasActiveTask = !!activeTask;
+    const pttBusy = state.pttPressed && !hasActiveTask;
+
+    for (let i = 0; i < state.audioTxSlots.length; i += 1) {
+      const slot = state.audioTxSlots[i] || createAudioTxSlotState();
+      const row = document.createElement("div");
+      row.className = "audio-tx-slot";
+      if (activeTask && activeTask.slotIndex === i) {
+        row.classList.add("active");
+      }
+
+      const head = document.createElement("div");
+      head.className = "audio-tx-slot-head";
+
+      const title = document.createElement("p");
+      title.className = "audio-tx-slot-title";
+      title.textContent = t("audio_tx_slot", { index: i + 1 });
+      head.appendChild(title);
+
+      const name = document.createElement("p");
+      name.className = "audio-tx-slot-file";
+      name.textContent = slot.file ? slot.file.name : t("audio_tx_slot_empty");
+      head.appendChild(name);
+      row.appendChild(head);
+
+      const hiddenInput = document.createElement("input");
+      hiddenInput.type = "file";
+      hiddenInput.accept = "audio/*,.wav";
+      hiddenInput.className = "audio-tx-file-input";
+      hiddenInput.disabled = hasActiveTask;
+      hiddenInput.addEventListener("change", () => {
+        setAudioTxSlotFile(i, hiddenInput.files && hiddenInput.files[0]);
+        hiddenInput.value = "";
+      });
+      row.appendChild(hiddenInput);
+
+      const actions = document.createElement("div");
+      actions.className = "audio-tx-slot-actions";
+
+      const sendBtn = document.createElement("button");
+      const isActiveSlot = !!(activeTask && activeTask.slotIndex === i);
+      sendBtn.type = "button";
+      sendBtn.className = "btn";
+      sendBtn.textContent = isActiveSlot ? t("audio_tx_stop") : t("audio_tx_send");
+      sendBtn.disabled = isActiveSlot ? false : (!state.connected || !slot.file || hasActiveTask || pttBusy);
+      sendBtn.addEventListener("click", () => {
+        if (isActiveSlot) {
+          cancelAudioTxTask(true);
+          return;
+        }
+        startAudioTxFromSlot(i).catch((err) => {
+          appendLog(t("log_audio_tx_failed", { index: i + 1, error: err && err.message ? err.message : String(err) }), "error");
+          cancelAudioTxTask(false);
+        });
+      });
+      actions.appendChild(sendBtn);
+
+      const selectBtn = document.createElement("button");
+      selectBtn.type = "button";
+      selectBtn.className = "ghost";
+      selectBtn.textContent = t("audio_tx_select_file");
+      selectBtn.disabled = hasActiveTask;
+      selectBtn.addEventListener("click", () => {
+        if (!hiddenInput.disabled) {
+          hiddenInput.click();
+        }
+      });
+      actions.appendChild(selectBtn);
+
+      const deleteBtn = document.createElement("button");
+      deleteBtn.type = "button";
+      deleteBtn.className = "ghost";
+      deleteBtn.textContent = t("audio_tx_delete");
+      deleteBtn.disabled = hasActiveTask || !slot.file;
+      deleteBtn.addEventListener("click", () => {
+        clearAudioTxSlotFile(i, true);
+      });
+      actions.appendChild(deleteBtn);
+
+      row.appendChild(actions);
+      ui.audioTxSlots.appendChild(row);
+    }
+  }
+
+  function setAudioTxSlotFile(index, file) {
+    if (index < 0 || index >= state.audioTxSlots.length) {
+      return;
+    }
+    const slot = state.audioTxSlots[index] || createAudioTxSlotState();
+    slot.file = file || null;
+    state.audioTxSlots[index] = slot;
+    persistFormSettings();
+    if (file) {
+      appendLog(t("log_audio_tx_slot_selected", { index: index + 1, name: file.name }), "info");
+    }
+    refreshAudioTxSlotsUI();
+  }
+
+  function clearAudioTxSlotFile(index, emitLog) {
+    if (index < 0 || index >= state.audioTxSlots.length) {
+      return;
+    }
+    const slot = state.audioTxSlots[index];
+    if (!slot) {
+      return;
+    }
+    const hadFile = !!slot.file;
+    slot.file = null;
+    state.audioTxSlots[index] = slot;
+    persistFormSettings();
+    if (emitLog && hadFile) {
+      appendLog(t("log_audio_tx_slot_cleared", { index: index + 1 }), "info");
+    }
+    refreshAudioTxSlotsUI();
+  }
+
+  async function startAudioTxFromSlot(index) {
+    if (state.audioTxTask) {
+      appendLog(t("log_audio_tx_busy"), "warn");
+      return;
+    }
+    if (!state.connected || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
+      appendLog(t("log_audio_tx_not_connected"), "warn");
+      return;
+    }
+    if (state.pttPressed) {
+      appendLog(t("log_audio_tx_ptt_active"), "warn");
+      return;
+    }
+    const slot = state.audioTxSlots[index];
+    if (!slot || !slot.file) {
+      appendLog(t("log_audio_tx_missing_file", { index: index + 1 }), "warn");
+      return;
+    }
+
+    const frames = await decodeAudioFileToFrames(slot.file);
+    if (!frames || frames.length === 0) {
+      throw new Error("decoded audio is empty");
+    }
+    startAudioTxTask(index, slot.file.name, frames);
+  }
+
+  async function decodeAudioFileToFrames(file) {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass || typeof OfflineAudioContext === "undefined") {
+      throw new Error(t("mic_not_supported"));
+    }
+    const sourceBytes = await file.arrayBuffer();
+    const decodeContext = new AudioContextClass();
+    try {
+      const decoded = await decodeContext.decodeAudioData(sourceBytes.slice(0));
+      const targetSamples = Math.max(1, Math.ceil(decoded.duration * 8000));
+      const offline = new OfflineAudioContext(1, targetSamples, 8000);
+      const src = offline.createBufferSource();
+      src.buffer = decoded;
+      src.connect(offline.destination);
+      src.start(0);
+      const rendered = await offline.startRendering();
+      const mono = rendered.getChannelData(0);
+      if (!mono || mono.length === 0) {
+        return [];
+      }
+
+      const frameCount = Math.ceil(mono.length / 160);
+      const frames = new Array(frameCount);
+      let offset = 0;
+      for (let i = 0; i < frameCount; i += 1) {
+        const pcm = new Int16Array(160);
+        const remain = Math.min(160, mono.length - offset);
+        for (let j = 0; j < remain; j += 1) {
+          pcm[j] = floatToInt16(mono[offset + j]);
+        }
+        offset += remain;
+        frames[i] = int16ToPCMBytes(pcm);
+      }
+      return frames;
+    } finally {
+      decodeContext.close().catch(() => {});
+    }
+  }
+
+  function startAudioTxTask(slotIndex, name, frames) {
+    cancelAudioTxTask(false);
+    state.txFrameIndex = 0;
+    state.audioTxTask = {
+      slotIndex,
+      name,
+      frames,
+      next: 0,
+      timer: null,
+      finishing: false,
+    };
+    state.pttPressed = true;
+    ui.pttButton.classList.add("active");
+    sendCommand({ type: "ptt", pressed: true });
+    playCue("pttOn");
+    refreshPTTAvailability();
+    refreshAudioTxSlotsUI();
+    appendLog(t("log_audio_tx_start", { index: slotIndex + 1, name }), "info");
+
+    tickAudioTxTask();
+    const task = state.audioTxTask;
+    if (task) {
+      task.timer = window.setInterval(tickAudioTxTask, 20);
+    }
+  }
+
+  function tickAudioTxTask() {
+    const task = state.audioTxTask;
+    if (!task || task.finishing) {
+      return;
+    }
+    if (!state.connected || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
+      task.finishing = true;
+      cancelAudioTxTask(false);
+      return;
+    }
+    if (task.next >= task.frames.length) {
+      task.finishing = true;
+      finishAudioTxTask("log_audio_tx_completed", { index: task.slotIndex + 1, name: task.name }, "info");
+      return;
+    }
+
+    const frame = task.frames[task.next];
+    task.next += 1;
+    transmitUplinkFrame(frame);
+  }
+
+  async function finishAudioTxTask(logKey, params, level) {
+    const task = state.audioTxTask;
+    if (!task) {
+      return;
+    }
+    if (task.timer) {
+      window.clearInterval(task.timer);
+      task.timer = null;
+    }
+    await flushAudioTxPipeline();
+
+    if (state.pttPressed) {
+      sendCommand({ type: "ptt", pressed: false });
+      playCue("pttOff");
+    }
+    state.pttPressed = false;
+    ui.pttButton.classList.remove("active");
+    state.txQueue = [];
+    stopTxLoop();
+    state.txFrameIndex = 0;
+    state.audioTxTask = null;
+    refreshPTTAvailability();
+    refreshAudioTxSlotsUI();
+
+    if (logKey) {
+      appendLog(t(logKey, params || {}), level || "info");
+    }
+  }
+
+  async function flushAudioTxPipeline() {
+    if (state.uplinkCodec === "opus" && state.opusEncoder) {
+      try {
+        await state.opusEncoder.flush();
+      } catch (_) {
+        // Ignore encoder flush errors.
+      }
+    }
+
+    const deadline = Date.now() + 1600;
+    while (state.txQueue.length > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 20));
+    }
+  }
+
+  function cancelAudioTxTask(emitLog) {
+    const task = state.audioTxTask;
+    if (!task) {
+      return;
+    }
+    if (task.timer) {
+      window.clearInterval(task.timer);
+      task.timer = null;
+    }
+    if (state.pttPressed) {
+      sendCommand({ type: "ptt", pressed: false });
+      playCue("pttOff");
+    }
+    state.audioTxTask = null;
+    state.pttPressed = false;
+    ui.pttButton.classList.remove("active");
+    state.txQueue = [];
+    stopTxLoop();
+    state.txFrameIndex = 0;
+    refreshPTTAvailability();
+    refreshAudioTxSlotsUI();
+    if (emitLog) {
+      appendLog(t("log_audio_tx_aborted"), "warn");
+    }
+  }
+
   function t(key, params) {
     const source = i18n.strings[key] || englishFallbackStrings[key] || key;
     return source.replace(/\{(\w+)\}/g, (_, name) => {
@@ -1120,11 +1565,14 @@
     setText("cuePttOnReset", t("default"));
     setText("cuePttOffReset", t("default"));
     setText("cueCarrierReset", t("default"));
+    setText("headingAudioTx", t("audio_tx_files"));
+    setText("labelAudioTxSlotCount", t("audio_tx_slot_count"));
     setText("headingEvents", t("events"));
     setText("clearLogBtn", t("clear"));
 
     updateTalkerStatus(state.talkerId, state.talkAllowed);
     applyConnectionView();
+    refreshAudioTxSlotsUI();
   }
 
   function normalizeLocale(raw) {
@@ -1257,7 +1705,7 @@
   }
 
   function refreshPTTAvailability() {
-    ui.pttButton.disabled = !state.connected || state.micPermissionDenied;
+    ui.pttButton.disabled = !state.connected || state.micPermissionDenied || !!state.audioTxTask;
   }
 
   function normalizeBrowserCodec(value) {
@@ -1472,6 +1920,9 @@
   }
 
   async function setPTT(pressed, emitCue = true) {
+    if (state.audioTxTask) {
+      return;
+    }
     if (pressed && state.micPermissionDenied) {
       return;
     }
@@ -1805,6 +2256,13 @@
       this.encoder.encode(audioData);
       audioData.close();
       this.timestampUs += Math.round((frameSamples * 1000000) / this.sampleRate);
+    }
+
+    async flush() {
+      if (!this.encoder) {
+        return;
+      }
+      await this.encoder.flush();
     }
 
     close() {
@@ -2371,12 +2829,10 @@
     if (!state.connected || !state.pttPressed || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
       return;
     }
-    const shaped = shapeTxFrame(frame);
-    if (state.uplinkCodec === "opus" && state.opusEncoder) {
-      state.opusEncoder.encodeFrame(shaped);
+    if (state.audioTxTask) {
       return;
     }
-    sendPcmFrame(shaped);
+    transmitUplinkFrame(frame);
   });
 })();
 
