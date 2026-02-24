@@ -372,6 +372,18 @@
     setPTT(false);
   });
 
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && state.player) {
+      state.player.resumeIfNeeded();
+    }
+  });
+
+  window.addEventListener("pageshow", () => {
+    if (state.player) {
+      state.player.resumeIfNeeded();
+    }
+  });
+
   function wsURL() {
     const proto = window.location.protocol === "https:" ? "wss" : "ws";
     const path = basePath ? `${basePath}/ws` : "/ws";
@@ -1040,6 +1052,9 @@
   function playCue(kind, force = false) {
     if (!state.cuePlayer) {
       return;
+    }
+    if (state.player) {
+      state.player.resumeIfNeeded();
     }
 
     const controls = cueControls(kind);
@@ -2444,16 +2459,69 @@
       this.streamPrimed = false;
       this.streamHoldSample = 0;
       this.streamUnderrunBlocks = 0;
+      this.keepAliveSource = null;
+      this.keepAliveGain = null;
+      this.lastResumeAttemptMs = 0;
     }
 
     async resume() {
       if (!this.ctx) {
         this.ctx = new (window.AudioContext || window.webkitAudioContext)();
       }
-      if (this.ctx.state === "suspended") {
+      if (this.ctx.state !== "running") {
         await this.ctx.resume();
       }
+      this.ensureKeepAliveSource();
       await this.ensureStreamOutput();
+    }
+
+    ensureKeepAliveSource() {
+      if (!this.ctx || this.keepAliveSource) {
+        return;
+      }
+      try {
+        const gain = this.ctx.createGain();
+        gain.gain.value = 0;
+        gain.connect(this.ctx.destination);
+
+        if (typeof this.ctx.createConstantSource === "function") {
+          const src = this.ctx.createConstantSource();
+          src.offset.value = 0;
+          src.connect(gain);
+          src.start();
+          this.keepAliveSource = src;
+        } else {
+          const osc = this.ctx.createOscillator();
+          osc.type = "sine";
+          osc.frequency.value = 18;
+          osc.connect(gain);
+          osc.start();
+          this.keepAliveSource = osc;
+        }
+        this.keepAliveGain = gain;
+      } catch (_) {
+        // Keep running even if keep-alive source is unavailable.
+      }
+    }
+
+    resumeIfNeeded() {
+      if (!this.ctx) {
+        return;
+      }
+      const stateName = String(this.ctx.state || "");
+      if (stateName === "running") {
+        return;
+      }
+      const now = Date.now();
+      if (now - this.lastResumeAttemptMs < 1500) {
+        return;
+      }
+      this.lastResumeAttemptMs = now;
+      this.ctx.resume()
+        .then(() => {
+          this.ensureKeepAliveSource();
+        })
+        .catch(() => {});
     }
 
     async ensureStreamOutput() {
@@ -2729,6 +2797,7 @@
       if (!this.ctx) {
         return;
       }
+      this.resumeIfNeeded();
 
       const sampleCount = Math.floor(bytes.length / 2);
       const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
