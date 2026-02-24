@@ -214,6 +214,9 @@ is incompatible.
 
 - `Browser Codec`: `pcm` / `opus (optional)` (shared for uplink/downlink)
 - `TX Codec`: `pcm` / `codec2` / `opus` (PWA -> relay server)
+- `Transmit Bitrate`:
+  - For `codec2`/`pcm`: `450`, `700`, `1600`, `2400`, `3200`
+  - For `opus`: `6000`, `8000`, `12000`, `16000`, `20000`, `64000`, `96000`, `128000`
 - `TX Codec` options are automatically filtered by server runtime library availability.
   - `codec2` is shown only when `libcodec2` is available.
   - `opus` is shown only when `libopus` is available.

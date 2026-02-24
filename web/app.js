@@ -12,6 +12,8 @@
   const txCodecPCM = "pcm";
   const txCodecCodec2 = "codec2";
   const txCodecOpus = "opus";
+  const codec2BitrateOptions = [450, 700, 1600, 2400, 3200];
+  const opusBitrateOptions = [6000, 8000, 12000, 16000, 20000, 64000, 96000, 128000];
 
   const ui = {
     titleMain: document.getElementById("titleMain"),
@@ -74,7 +76,7 @@
     sender_id: "Sender ID (random if empty)",
     password: "Password",
     crypto_mode: "Crypto Mode",
-    codec_mode: "Codec2 Bitrate",
+    codec_mode: "Transmit Bitrate",
     browser_codec: "Browser Codec",
     tx_codec: "TX Codec",
     tx_codec_pcm: "pcm",
@@ -725,7 +727,7 @@
         ui.txCodec.value = connectedTxCodec;
       }
       ui.pcmOnly.checked = connectedTxCodec === txCodecPCM;
-      sanitizeSelectedTxCodec();
+      sanitizeSelectedTxCodec(event.codecMode);
       if (event.uplinkCodec === "opus" || event.uplinkCodec === "pcm") {
         state.uplinkCodec = event.uplinkCodec;
       }
@@ -927,14 +929,13 @@
     ui.senderId.value = String(merged.senderId);
     ui.password.value = String(merged.password);
     ui.cryptoMode.value = String(merged.cryptoMode);
-    ui.codecMode.value = String(merged.codecMode);
     ui.browserCodec.value = normalizeBrowserCodec(merged.browserCodec);
     if (ui.txCodec) {
       ui.txCodec.value = normalizeTxCodec(merged.txCodec);
     }
     ui.codec2Lib.value = String(merged.codec2Lib || "");
     ui.opusLib.value = String(merged.opusLib || "");
-    sanitizeSelectedTxCodec();
+    sanitizeSelectedTxCodec(merged.codecMode);
     ui.cuePttOnEnabled.checked = !!merged.cuePttOnEnabled;
     ui.cuePttOffEnabled.checked = !!merged.cuePttOffEnabled;
     ui.cueCarrierEnabled.checked = !!merged.cueCarrierEnabled;
@@ -1788,6 +1789,108 @@
     return txCodecPCM;
   }
 
+  function nearestBitrateOption(options, value) {
+    if (!Array.isArray(options) || options.length === 0) {
+      return 0;
+    }
+    let best = options[0];
+    let bestDiff = Math.abs(value - best);
+    for (let i = 1; i < options.length; i += 1) {
+      const candidate = options[i];
+      const diff = Math.abs(value - candidate);
+      if (diff < bestDiff) {
+        best = candidate;
+        bestDiff = diff;
+      }
+    }
+    return best;
+  }
+
+  function legacyCodec2ModeToOpusBitrate(mode) {
+    if (mode <= 450) {
+      return 6000;
+    }
+    if (mode <= 700) {
+      return 8000;
+    }
+    if (mode <= 1600) {
+      return 12000;
+    }
+    if (mode <= 2400) {
+      return 16000;
+    }
+    return 20000;
+  }
+
+  function opusBitrateToLegacyCodec2Mode(bitrate) {
+    if (bitrate <= 6000) {
+      return 450;
+    }
+    if (bitrate <= 8000) {
+      return 700;
+    }
+    if (bitrate <= 12000) {
+      return 1600;
+    }
+    if (bitrate <= 16000) {
+      return 2400;
+    }
+    return 3200;
+  }
+
+  function bitrateOptionsForTxCodec(txCodec) {
+    return normalizeTxCodec(txCodec) === txCodecOpus
+      ? opusBitrateOptions
+      : codec2BitrateOptions;
+  }
+
+  function normalizeBitrateForTxCodec(rawValue, txCodec) {
+    const normalizedTxCodec = normalizeTxCodec(txCodec);
+    const rawText = rawValue === undefined || rawValue === null ? "" : rawValue;
+    const parsed = Number.parseInt(String(rawText), 10);
+    let value = Number.isFinite(parsed) ? parsed : 0;
+
+    if (normalizedTxCodec === txCodecOpus) {
+      if (value < opusBitrateOptions[0]) {
+        value = legacyCodec2ModeToOpusBitrate(value);
+      }
+      return nearestBitrateOption(opusBitrateOptions, value);
+    }
+
+    if (value >= opusBitrateOptions[0]) {
+      value = opusBitrateToLegacyCodec2Mode(value);
+    }
+    return nearestBitrateOption(codec2BitrateOptions, value);
+  }
+
+  function syncCodecModeOptions(preferredValue) {
+    if (!ui.codecMode) {
+      return;
+    }
+
+    const selectedTxCodec = normalizeTxCodec(ui.txCodec ? ui.txCodec.value : state.txCodec);
+    const options = bitrateOptionsForTxCodec(selectedTxCodec);
+    const currentValue = preferredValue !== undefined ? preferredValue : ui.codecMode.value;
+    const normalizedValue = normalizeBitrateForTxCodec(currentValue, selectedTxCodec);
+
+    const currentOptionValues = Array.from(ui.codecMode.options).map((option) => Number.parseInt(option.value, 10));
+    const optionsUnchanged =
+      currentOptionValues.length === options.length &&
+      currentOptionValues.every((value, index) => value === options[index]);
+
+    if (!optionsUnchanged) {
+      ui.codecMode.innerHTML = "";
+      options.forEach((value) => {
+        const option = document.createElement("option");
+        option.value = String(value);
+        option.textContent = String(value);
+        ui.codecMode.appendChild(option);
+      });
+    }
+
+    ui.codecMode.value = String(normalizedValue);
+  }
+
   function deriveTxCodecFromLegacy(pcmOnly, uplinkCodec) {
     if (pcmOnly) {
       return txCodecPCM;
@@ -1812,7 +1915,7 @@
     sanitizeSelectedTxCodec();
   }
 
-  function sanitizeSelectedTxCodec() {
+  function sanitizeSelectedTxCodec(preferredCodecMode) {
     const codec2Ready = !!(state.codecAvailability && state.codecAvailability.codec2);
     const opusReady = !!(state.codecAvailability && state.codecAvailability.opus);
 
@@ -1832,6 +1935,7 @@
     if (ui.txCodec) {
       ui.txCodec.value = selected;
     }
+    syncCodecModeOptions(preferredCodecMode);
     if (ui.pcmOnly) {
       ui.pcmOnly.checked = selected === txCodecPCM;
     }

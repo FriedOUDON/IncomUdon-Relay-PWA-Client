@@ -406,7 +406,7 @@ func (s *relaySession) UpdateCodec(codecMode int, pcmOnly bool) {
 		forcedPCM = true
 		s.cfg.TxCodec = txCodecPCM
 	}
-	s.cfg.CodecMode = normalizeCodecMode(codecMode)
+	s.cfg.CodecMode = normalizeCodecModeForTxCodec(codecMode, s.cfg.TxCodec)
 	s.cfg.PCMOnly = pcmOnly
 	s.pendingPCM = nil
 	s.pendingOpus = nil
@@ -751,10 +751,10 @@ func (s *relaySession) handleCodecConfig(pkt parsedPacket) {
 	}
 	pcmOnly := (pkt.Payload[0] & 0x01) != 0
 	codecID := normalizeCodecTransportID(codecTransportCodec2, pcmOnly)
-	mode := normalizeCodecMode(int(binary.BigEndian.Uint16(pkt.Payload[1:3])))
+	mode := normalizeCodecModeForTransport(int(binary.BigEndian.Uint16(pkt.Payload[1:3])), codecID, pcmOnly)
 	if len(pkt.Payload) >= 4 {
 		codecID = normalizeCodecTransportID(pkt.Payload[1], pcmOnly)
-		mode = normalizeCodecMode(int(binary.BigEndian.Uint16(pkt.Payload[2:4])))
+		mode = normalizeCodecModeForTransport(int(binary.BigEndian.Uint16(pkt.Payload[2:4])), codecID, pcmOnly)
 	}
 
 	s.mu.Lock()
@@ -854,7 +854,7 @@ func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
 	if len(frame) == pcmBytesPerFrame {
 		s.mu.Lock()
 		s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{
-			Mode:    normalizeCodecMode(s.cfg.CodecMode),
+			Mode:    normalizeCodecModeForTransport(s.cfg.CodecMode, codecTransportPCM, true),
 			PCMOnly: true,
 			CodecID: codecTransportPCM,
 		}
@@ -881,7 +881,7 @@ func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
 	if downlinkCodec == downlinkCodecOpus && s.cb.onOpus != nil {
 		s.mu.Lock()
 		s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{
-			Mode:    normalizeCodecMode(s.cfg.CodecMode),
+			Mode:    normalizeCodecModeForTransport(s.cfg.CodecMode, codecTransportOpus, false),
 			PCMOnly: false,
 			CodecID: codecTransportOpus,
 		}
@@ -895,7 +895,7 @@ func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
 		if err == nil {
 			s.mu.Lock()
 			s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{
-				Mode:    normalizeCodecMode(s.cfg.CodecMode),
+				Mode:    normalizeCodecModeForTransport(s.cfg.CodecMode, codecTransportOpus, false),
 				PCMOnly: false,
 				CodecID: codecTransportOpus,
 			}
@@ -1015,13 +1015,14 @@ func (s *relaySession) sendLegacyHandshake() error {
 
 func (s *relaySession) sendCodecConfig() error {
 	s.mu.Lock()
-	codecMode := normalizeCodecMode(s.cfg.CodecMode)
-	s.cfg.CodecMode = codecMode
 	codecID := s.activeUplinkTransportCodecLocked()
+	pcmOnly := codecID == codecTransportPCM
+	codecMode := normalizeCodecModeForTransport(s.cfg.CodecMode, codecID, pcmOnly)
+	s.cfg.CodecMode = codecMode
 	s.mu.Unlock()
 
 	payload := make([]byte, 4)
-	if codecID == codecTransportPCM {
+	if pcmOnly {
 		payload[0] = 0x01
 	}
 	payload[1] = codecID
@@ -1199,12 +1200,65 @@ func extractAudioFrame(payload []byte) []byte {
 	return append([]byte(nil), frame...)
 }
 
+var codec2ModeOptions = []int{450, 700, 1600, 2400, 3200}
+var opusBitrateOptions = []int{6000, 8000, 12000, 16000, 20000, 64000, 96000, 128000}
+
+func normalizeCodec2Mode(mode int) int {
+	return nearestIntOption(codec2ModeOptions, mode)
+}
+
+// normalizeCodecMode is kept for codec2 helper compatibility.
 func normalizeCodecMode(mode int) int {
-	options := []int{450, 700, 1600, 2400, 3200}
+	return normalizeCodec2Mode(mode)
+}
+
+func normalizeOpusBitrate(mode int) int {
+	target := mode
+	if target < opusBitrateOptions[0] {
+		target = legacyCodec2ModeToOpusBitrate(mode)
+	}
+	return nearestIntOption(opusBitrateOptions, target)
+}
+
+func normalizeCodecModeForTxCodec(mode int, txCodec string) int {
+	if normalizeTxCodec(txCodec) == txCodecOpus {
+		return normalizeOpusBitrate(mode)
+	}
+	return normalizeCodec2Mode(mode)
+}
+
+func normalizeCodecModeForTransport(mode int, codecID uint8, pcmOnly bool) int {
+	switch normalizeCodecTransportID(codecID, pcmOnly) {
+	case codecTransportOpus:
+		return normalizeOpusBitrate(mode)
+	default:
+		return normalizeCodec2Mode(mode)
+	}
+}
+
+func legacyCodec2ModeToOpusBitrate(mode int) int {
+	switch {
+	case mode <= 450:
+		return 6000
+	case mode <= 700:
+		return 8000
+	case mode <= 1600:
+		return 12000
+	case mode <= 2400:
+		return 16000
+	default:
+		return 20000
+	}
+}
+
+func nearestIntOption(options []int, value int) int {
+	if len(options) == 0 {
+		return value
+	}
 	best := options[0]
-	bestDiff := absInt(mode - best)
+	bestDiff := absInt(value - best)
 	for _, candidate := range options[1:] {
-		diff := absInt(mode - candidate)
+		diff := absInt(value - candidate)
 		if diff < bestDiff {
 			bestDiff = diff
 			best = candidate

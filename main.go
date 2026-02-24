@@ -638,7 +638,6 @@ func buildSessionConfig(
 	if codecMode == 0 {
 		codecMode = 2400
 	}
-	codecMode = normalizeCodecMode(codecMode)
 
 	legacyPCMOnly := true
 	if cmd.PCMOnly != nil {
@@ -660,6 +659,7 @@ func buildSessionConfig(
 	default:
 		return sessionConfig{}, fmt.Errorf("unsupported txCodec: %s", cmd.TxCodec)
 	}
+	codecMode = normalizeCodecModeForTxCodec(codecMode, txCodec)
 	pcmOnly := txCodec == txCodecPCM
 
 	codec2LibPath := strings.TrimSpace(cmd.Codec2Lib)

@@ -8,7 +8,7 @@
   "sender_id": "Sender ID (random if empty)",
   "password": "Password",
   "crypto_mode": "Crypto Mode",
-  "codec_mode": "Codec2 Bitrate",
+  "codec_mode": "Transmit Bitrate",
   "browser_codec": "Browser Codec",
   "tx_codec": "TX Codec",
   "tx_codec_pcm": "pcm",

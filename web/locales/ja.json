@@ -8,7 +8,7 @@
   "sender_id": "Sender ID（未入力でランダム）",
   "password": "Password",
   "crypto_mode": "暗号モード",
-  "codec_mode": "Codec2 ビットレート",
+  "codec_mode": "送信ビットレート",
   "browser_codec": "ブラウザCodec",
   "tx_codec": "送信Codec",
   "tx_codec_pcm": "pcm",
