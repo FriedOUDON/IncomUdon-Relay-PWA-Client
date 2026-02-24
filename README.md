@@ -97,7 +97,7 @@ Browser Opus requires `WebCodecs AudioEncoder` (uplink) and `WebCodecs AudioDeco
 - `basic`: HTTP Basic authentication on all pages/assets/WebSocket.
 - `oidc`: OIDC login (Authorization Code flow) with signed session cookie.
 - Logout button is shown in UI when `auth-mode` is `basic` or `oidc`.
-- When `auth-mode` is `basic`/`oidc`, Service Worker cache is automatically disabled to avoid stale-auth issues.
+- When `auth-mode` is `basic`/`oidc`, Service Worker is still registered (for PWA installability), but cache storage is disabled to avoid stale-auth issues.
 
 ### Authentication Methods Summary
 

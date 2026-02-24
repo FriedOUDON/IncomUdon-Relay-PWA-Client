@@ -1,4 +1,8 @@
-const CACHE_NAME = "incomudon-pwa-v40";
+const CACHE_NAME = "incomudon-pwa-v42";
+const CACHE_PREFIX = "incomudon-pwa-";
+const swURL = new URL(self.location.href);
+const authMode = String(swURL.searchParams.get("auth_mode") || "none").toLowerCase();
+const authEnabled = authMode !== "none";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -16,18 +20,24 @@ const APP_SHELL = [
 ];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)),
-  );
+  if (!authEnabled) {
+    event.waitUntil(
+      caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)),
+    );
+  }
   self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {
+  const shouldDelete = authEnabled
+    ? (key) => key.startsWith(CACHE_PREFIX)
+    : (key) => key !== CACHE_NAME;
+
   event.waitUntil(
     caches.keys().then((keys) =>
       Promise.all(
         keys
-          .filter((key) => key !== CACHE_NAME)
+          .filter((key) => shouldDelete(key))
           .map((key) => caches.delete(key)),
       ),
     ),
@@ -42,6 +52,13 @@ self.addEventListener("fetch", (event) => {
 
   const requestURL = new URL(event.request.url);
   if (requestURL.origin !== self.location.origin) {
+    return;
+  }
+
+  if (authEnabled) {
+    event.respondWith(
+      fetch(event.request, { cache: "no-store" }),
+    );
     return;
   }
 

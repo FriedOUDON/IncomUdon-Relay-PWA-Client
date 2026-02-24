@@ -2854,10 +2854,85 @@
   }
 
   class CuePlayer {
+    constructor(player) {
+      this.player = player || null;
+      this.bufferCache = new Map();
+      this.pendingLoads = new Map();
+    }
+
     play(source, onError) {
       if (!source) {
         return;
       }
+      this.playInternal(source, onError).catch((err) => {
+        if (onError) {
+          onError(err && err.message ? err.message : String(err));
+        }
+      });
+    }
+
+    async playInternal(source, onError) {
+      if (await this.tryPlayWebAudio(source)) {
+        return;
+      }
+      this.playHTMLAudio(source, onError);
+    }
+
+    async tryPlayWebAudio(source) {
+      if (!this.player) {
+        return false;
+      }
+      try {
+        await this.player.resume();
+      } catch (_) {
+        this.player.resumeIfNeeded();
+      }
+
+      const ctx = this.player.ctx;
+      if (!ctx || String(ctx.state || "") !== "running") {
+        return false;
+      }
+
+      let buffer = this.bufferCache.get(source);
+      if (!buffer) {
+        buffer = await this.loadBuffer(source, ctx);
+        if (!buffer) {
+          return false;
+        }
+        this.bufferCache.set(source, buffer);
+      }
+
+      const node = ctx.createBufferSource();
+      node.buffer = buffer;
+      node.connect(ctx.destination);
+      node.start();
+      return true;
+    }
+
+    async loadBuffer(source, ctx) {
+      let pending = this.pendingLoads.get(source);
+      if (!pending) {
+        pending = fetch(source)
+          .then((res) => {
+            if (!res || !res.ok) {
+              throw new Error(`failed to fetch cue source: ${res ? res.status : "unknown"}`);
+            }
+            return res.arrayBuffer();
+          })
+          .then((bytes) => new Promise((resolve, reject) => {
+            ctx.decodeAudioData(bytes.slice(0), resolve, reject);
+          }));
+        this.pendingLoads.set(source, pending);
+      }
+
+      try {
+        return await pending;
+      } finally {
+        this.pendingLoads.delete(source);
+      }
+    }
+
+    playHTMLAudio(source, onError) {
       try {
         const audio = new Audio(source);
         audio.preload = "auto";
@@ -2893,7 +2968,7 @@
   }
 
   state.player = new PCMPlayer();
-  state.cuePlayer = new CuePlayer();
+  state.cuePlayer = new CuePlayer(state.player);
   state.mic = new MicCapture((frame) => {
     if (!state.connected || !state.pttPressed || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
       return;
