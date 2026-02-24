@@ -18,6 +18,7 @@ type sessionConfig struct {
 	Password      string
 	CryptoMode    cryptoMode
 	CodecMode     int
+	TxCodec       string
 	PCMOnly       bool
 	Codec2LibPath string
 	OpusLibPath   string
@@ -28,6 +29,10 @@ type sessionConfig struct {
 const (
 	browserCodecPCM  = "pcm"
 	browserCodecOpus = "opus"
+
+	txCodecPCM    = "pcm"
+	txCodecCodec2 = "codec2"
+	txCodecOpus   = "opus"
 
 	uplinkCodecPCM  = browserCodecPCM
 	uplinkCodecOpus = browserCodecOpus
@@ -118,8 +123,10 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 
 	s.cfg.UplinkCodec = normalizeUplinkCodec(s.cfg.UplinkCodec)
 	s.cfg.DownlinkCodec = normalizeDownlinkCodec(s.cfg.DownlinkCodec)
+	s.cfg.TxCodec = normalizeTxCodec(s.cfg.TxCodec)
+	s.cfg.PCMOnly = s.cfg.TxCodec == txCodecPCM
 
-	requiresCodec2Uplink := !s.cfg.PCMOnly && s.cfg.UplinkCodec != uplinkCodecOpus
+	requiresCodec2Uplink := s.cfg.TxCodec == txCodecCodec2
 	codec2Path := strings.TrimSpace(cfg.Codec2LibPath)
 	if codec2Path != "" || requiresCodec2Uplink {
 		engine, loadErr := newCodec2Engine(codec2Path)
@@ -127,27 +134,28 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 			s.startupWarnings = append(s.startupWarnings,
 				fmt.Sprintf("Codec2 disabled: %v", loadErr))
 			if requiresCodec2Uplink {
+				s.cfg.TxCodec = txCodecPCM
 				s.cfg.PCMOnly = true
 				s.startupWarnings = append(s.startupWarnings,
-					"PCM only was forced because codec2 encoder is unavailable")
+					"TX codec was forced to PCM because codec2 encoder is unavailable")
 			}
 		} else {
 			s.codec2 = engine
 		}
 	}
 
-	loadDecoder := s.cfg.UplinkCodec == uplinkCodecOpus || s.cfg.DownlinkCodec == downlinkCodecOpus
-	loadEncoder := s.cfg.UplinkCodec == uplinkCodecOpus || s.cfg.DownlinkCodec == downlinkCodecOpus
+	loadDecoder := s.cfg.UplinkCodec == uplinkCodecOpus || s.cfg.DownlinkCodec == downlinkCodecOpus || s.cfg.TxCodec == txCodecOpus
+	loadEncoder := s.cfg.DownlinkCodec == downlinkCodecOpus || s.cfg.TxCodec == txCodecOpus
 	if loadDecoder {
 		opusPath := strings.TrimSpace(s.cfg.OpusLibPath)
 		engine, loadErr := newOpusDecoderEngine(opusPath, 8000, 1)
 		if loadErr != nil {
 			s.startupWarnings = append(s.startupWarnings,
 				fmt.Sprintf("Opus decoder unavailable: %v", loadErr))
-			if s.cfg.PCMOnly && s.cfg.UplinkCodec == uplinkCodecOpus {
+			if s.cfg.UplinkCodec == uplinkCodecOpus && s.cfg.TxCodec != txCodecOpus {
 				s.cfg.UplinkCodec = uplinkCodecPCM
 				s.startupWarnings = append(s.startupWarnings,
-					"Opus uplink was disabled because PCM transport requires Opus decoder")
+					"Browser uplink opus was disabled because Opus decoder is unavailable")
 			}
 		} else {
 			s.opusDecoder = engine
@@ -159,6 +167,17 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		if loadErr != nil {
 			s.startupWarnings = append(s.startupWarnings,
 				fmt.Sprintf("Opus encoder unavailable: %v", loadErr))
+			if s.cfg.TxCodec == txCodecOpus {
+				s.cfg.TxCodec = txCodecPCM
+				s.cfg.PCMOnly = true
+				s.startupWarnings = append(s.startupWarnings,
+					"TX codec was forced to PCM because Opus encoder is unavailable")
+			}
+			if s.cfg.DownlinkCodec == downlinkCodecOpus {
+				s.cfg.DownlinkCodec = downlinkCodecPCM
+				s.startupWarnings = append(s.startupWarnings,
+					"Browser downlink opus was disabled because Opus encoder is unavailable")
+			}
 		} else {
 			s.opusEncoder = engine
 		}
@@ -370,10 +389,22 @@ func (s *relaySession) UpdateCodec(codecMode int, pcmOnly bool) {
 	forcedPCM := false
 
 	s.mu.Lock()
-	requiresCodec2Uplink := !pcmOnly && s.cfg.UplinkCodec != uplinkCodecOpus
+	if pcmOnly {
+		s.cfg.TxCodec = txCodecPCM
+	} else if s.cfg.TxCodec == txCodecPCM {
+		s.cfg.TxCodec = txCodecCodec2
+	}
+
+	requiresCodec2Uplink := s.cfg.TxCodec == txCodecCodec2
 	if requiresCodec2Uplink && s.codec2 == nil {
 		pcmOnly = true
 		forcedPCM = true
+		s.cfg.TxCodec = txCodecPCM
+	}
+	if s.cfg.TxCodec == txCodecOpus && s.opusEncoder == nil {
+		pcmOnly = true
+		forcedPCM = true
+		s.cfg.TxCodec = txCodecPCM
 	}
 	s.cfg.CodecMode = normalizeCodecMode(codecMode)
 	s.cfg.PCMOnly = pcmOnly
@@ -386,7 +417,7 @@ func (s *relaySession) UpdateCodec(codecMode int, pcmOnly bool) {
 		s.emitEvent(serverEvent{
 			Type:    "status",
 			Level:   "warn",
-			Message: "PCM only was forced because codec2 encoder is unavailable",
+			Message: "TX codec was forced to PCM because selected encoder is unavailable",
 		})
 	}
 
@@ -1190,6 +1221,17 @@ func normalizeDownlinkCodec(value string) string {
 	return normalizeBrowserCodec(value)
 }
 
+func normalizeTxCodec(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case txCodecCodec2:
+		return txCodecCodec2
+	case txCodecOpus:
+		return txCodecOpus
+	default:
+		return txCodecPCM
+	}
+}
+
 func normalizeBrowserCodec(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case browserCodecOpus:
@@ -1200,13 +1242,14 @@ func normalizeBrowserCodec(value string) string {
 }
 
 func (s *relaySession) activeUplinkTransportCodecLocked() uint8 {
-	if s.cfg.PCMOnly {
+	switch normalizeTxCodec(s.cfg.TxCodec) {
+	case txCodecCodec2:
+		return codecTransportCodec2
+	case txCodecOpus:
+		return codecTransportOpus
+	default:
 		return codecTransportPCM
 	}
-	if s.cfg.UplinkCodec == uplinkCodecOpus {
-		return codecTransportOpus
-	}
-	return codecTransportCodec2
 }
 
 func normalizeCodecTransportID(codecID uint8, pcmOnly bool) uint8 {

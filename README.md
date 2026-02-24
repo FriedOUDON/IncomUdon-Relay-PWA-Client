@@ -213,6 +213,10 @@ is incompatible.
 ## Browser Opus (Uplink/Downlink)
 
 - `Browser Codec`: `pcm` / `opus (optional)` (shared for uplink/downlink)
+- `TX Codec`: `pcm` / `codec2` / `opus` (PWA -> relay server)
+- `TX Codec` options are automatically filtered by server runtime library availability.
+  - `codec2` is shown only when `libcodec2` is available.
+  - `opus` is shown only when `libopus` is available.
 
 Behavior:
 

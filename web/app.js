@@ -6,6 +6,12 @@
   const fixedRelayPort = Number.isFinite(fixedRelayPortRaw) && fixedRelayPortRaw > 0 ? fixedRelayPortRaw : 50000;
   const wsTokenRequired = document.body.dataset.wsTokenRequired === "1";
   const authMode = String(document.body.dataset.authMode || "none").trim().toLowerCase();
+  const initialCodec2Ready = document.body.dataset.codec2Ready === "1";
+  const initialOpusReady = document.body.dataset.opusReady === "1";
+
+  const txCodecPCM = "pcm";
+  const txCodecCodec2 = "codec2";
+  const txCodecOpus = "opus";
 
   const ui = {
     titleMain: document.getElementById("titleMain"),
@@ -18,6 +24,10 @@
     cryptoMode: document.getElementById("cryptoMode"),
     codecMode: document.getElementById("codecMode"),
     browserCodec: document.getElementById("browserCodec"),
+    txCodec: document.getElementById("txCodec"),
+    optionTxCodecPcm: document.getElementById("optionTxCodecPcm"),
+    optionTxCodecCodec2: document.getElementById("optionTxCodecCodec2"),
+    optionTxCodecOpus: document.getElementById("optionTxCodecOpus"),
     codec2Lib: document.getElementById("codec2Lib"),
     opusLib: document.getElementById("opusLib"),
     pcmOnly: document.getElementById("pcmOnly"),
@@ -66,6 +76,10 @@
     crypto_mode: "Crypto Mode",
     codec_mode: "Codec2 Bitrate",
     browser_codec: "Browser Codec",
+    tx_codec: "TX Codec",
+    tx_codec_pcm: "pcm",
+    tx_codec_codec2: "codec2",
+    tx_codec_opus: "opus",
     uplink_opus_optional: "opus (optional)",
     pcm_only: "PCM only (no Web-side encode)",
     connect: "Connect",
@@ -161,8 +175,13 @@
     player: null,
     mic: null,
     browserCodec: "pcm",
+    txCodec: txCodecPCM,
     uplinkCodec: "pcm",
     downlinkCodec: "pcm",
+    codecAvailability: {
+      codec2: initialCodec2Ready,
+      opus: initialOpusReady,
+    },
     opusEncoder: null,
     opusDecoder: null,
     downlinkOpusWarned: false,
@@ -551,6 +570,7 @@
       }
 
       const safeSenderID = canonicalizeSenderIDField();
+      const selectedTxCodec = sanitizeSelectedTxCodec();
       persistFormSettings();
 
       sendCommand({
@@ -562,11 +582,12 @@
         password: ui.password.value,
         cryptoMode: ui.cryptoMode.value,
         codecMode: Number(ui.codecMode.value),
+        txCodec: selectedTxCodec,
         codec2Lib: ui.codec2Lib.value.trim(),
         opusLib: ui.opusLib.value.trim(),
         uplinkCodec: state.browserCodec,
         downlinkCodec: state.browserCodec,
-        pcmOnly: ui.pcmOnly.checked,
+        pcmOnly: selectedTxCodec === txCodecPCM,
       });
 
       try {
@@ -688,7 +709,23 @@
       state.connectionView.port = Number(event.relayPort || 0);
       ui.connectBtn.disabled = true;
       ui.disconnectBtn.disabled = false;
-      ui.pcmOnly.checked = !!event.pcmOnly;
+      const hasCodec2Ready = typeof event.codec2Ready === "boolean";
+      const hasOpusReady = typeof event.opusReady === "boolean";
+      if (hasCodec2Ready || hasOpusReady) {
+        applyTxCodecAvailability({
+          codec2: hasCodec2Ready ? event.codec2Ready : state.codecAvailability.codec2,
+          opus: hasOpusReady ? event.opusReady : state.codecAvailability.opus,
+        });
+      }
+      const connectedTxCodec = normalizeTxCodec(
+        event.txCodec || deriveTxCodecFromLegacy(event.pcmOnly, event.uplinkCodec),
+      );
+      state.txCodec = connectedTxCodec;
+      if (ui.txCodec) {
+        ui.txCodec.value = connectedTxCodec;
+      }
+      ui.pcmOnly.checked = connectedTxCodec === txCodecPCM;
+      sanitizeSelectedTxCodec();
       if (event.uplinkCodec === "opus" || event.uplinkCodec === "pcm") {
         state.uplinkCodec = event.uplinkCodec;
       }
@@ -831,6 +868,7 @@
       cryptoMode: "aes-gcm",
       codecMode: "1600",
       browserCodec: "opus",
+      txCodec: txCodecPCM,
       codec2Lib: "",
       opusLib: "",
       pcmOnly: true,
@@ -863,6 +901,9 @@
     if (!merged.browserCodec) {
       merged.browserCodec = deriveBrowserCodec(merged.uplinkCodec, merged.downlinkCodec);
     }
+    if (!merged.txCodec) {
+      merged.txCodec = deriveTxCodecFromLegacy(merged.pcmOnly, merged.uplinkCodec);
+    }
     if (!merged.cuePttOnUrl || !String(merged.cuePttOnUrl).trim()) {
       merged.cuePttOnUrl = cueDefaults.pttOnUrl;
     }
@@ -888,9 +929,12 @@
     ui.cryptoMode.value = String(merged.cryptoMode);
     ui.codecMode.value = String(merged.codecMode);
     ui.browserCodec.value = normalizeBrowserCodec(merged.browserCodec);
+    if (ui.txCodec) {
+      ui.txCodec.value = normalizeTxCodec(merged.txCodec);
+    }
     ui.codec2Lib.value = String(merged.codec2Lib || "");
     ui.opusLib.value = String(merged.opusLib || "");
-    ui.pcmOnly.checked = !!merged.pcmOnly;
+    sanitizeSelectedTxCodec();
     ui.cuePttOnEnabled.checked = !!merged.cuePttOnEnabled;
     ui.cuePttOffEnabled.checked = !!merged.cuePttOffEnabled;
     ui.cueCarrierEnabled.checked = !!merged.cueCarrierEnabled;
@@ -914,9 +958,9 @@
       ui.cryptoMode,
       ui.codecMode,
       ui.browserCodec,
+      ui.txCodec,
       ui.codec2Lib,
       ui.opusLib,
-      ui.pcmOnly,
       ui.cuePttOnEnabled,
       ui.cuePttOffEnabled,
       ui.cueCarrierEnabled,
@@ -960,6 +1004,7 @@
   }
 
   function persistFormSettings() {
+    const selectedTxCodec = sanitizeSelectedTxCodec();
     const settings = {
       relayHost: fixedRelayEnabled ? effectiveFixedRelayHost() : ui.relayHost.value.trim(),
       relayPort: fixedRelayEnabled ? String(effectiveFixedRelayPort()) : ui.relayPort.value,
@@ -969,9 +1014,10 @@
       cryptoMode: ui.cryptoMode.value,
       codecMode: ui.codecMode.value,
       browserCodec: ui.browserCodec.value,
+      txCodec: selectedTxCodec,
       codec2Lib: ui.codec2Lib.value.trim(),
       opusLib: ui.opusLib.value.trim(),
-      pcmOnly: !!ui.pcmOnly.checked,
+      pcmOnly: selectedTxCodec === txCodecPCM,
       cuePttOnEnabled: !!ui.cuePttOnEnabled.checked,
       cuePttOffEnabled: !!ui.cuePttOffEnabled.checked,
       cueCarrierEnabled: !!ui.cueCarrierEnabled.checked,
@@ -1556,6 +1602,10 @@
     setText("labelCryptoMode", t("crypto_mode"));
     setText("labelCodecMode", t("codec_mode"));
     setText("labelBrowserCodec", t("browser_codec"));
+    setText("labelTxCodec", t("tx_codec"));
+    setText("optionTxCodecPcm", t("tx_codec_pcm"));
+    setText("optionTxCodecCodec2", t("tx_codec_codec2"));
+    setText("optionTxCodecOpus", t("tx_codec_opus"));
     setText("optionBrowserCodecOpus", t("uplink_opus_optional"));
     setText("labelPcmOnly", t("pcm_only"));
     setText("connectBtn", t("connect"));
@@ -1725,6 +1775,67 @@
 
   function normalizeBrowserCodec(value) {
     return String(value || "").trim().toLowerCase() === "opus" ? "opus" : "pcm";
+  }
+
+  function normalizeTxCodec(value) {
+    const text = String(value || "").trim().toLowerCase();
+    if (text === txCodecCodec2) {
+      return txCodecCodec2;
+    }
+    if (text === txCodecOpus) {
+      return txCodecOpus;
+    }
+    return txCodecPCM;
+  }
+
+  function deriveTxCodecFromLegacy(pcmOnly, uplinkCodec) {
+    if (pcmOnly) {
+      return txCodecPCM;
+    }
+    return normalizeBrowserCodec(uplinkCodec) === "opus" ? txCodecOpus : txCodecCodec2;
+  }
+
+  function setOptionVisibility(optionElement, visible) {
+    if (!optionElement) {
+      return;
+    }
+    optionElement.hidden = !visible;
+    optionElement.disabled = !visible;
+  }
+
+  function applyTxCodecAvailability(next) {
+    if (!next || typeof next !== "object") {
+      return;
+    }
+    state.codecAvailability.codec2 = !!next.codec2;
+    state.codecAvailability.opus = !!next.opus;
+    sanitizeSelectedTxCodec();
+  }
+
+  function sanitizeSelectedTxCodec() {
+    const codec2Ready = !!(state.codecAvailability && state.codecAvailability.codec2);
+    const opusReady = !!(state.codecAvailability && state.codecAvailability.opus);
+
+    setOptionVisibility(ui.optionTxCodecPcm, true);
+    setOptionVisibility(ui.optionTxCodecCodec2, codec2Ready);
+    setOptionVisibility(ui.optionTxCodecOpus, opusReady);
+
+    let selected = normalizeTxCodec(ui.txCodec ? ui.txCodec.value : state.txCodec);
+    if (selected === txCodecCodec2 && !codec2Ready) {
+      selected = txCodecPCM;
+    }
+    if (selected === txCodecOpus && !opusReady) {
+      selected = txCodecPCM;
+    }
+
+    state.txCodec = selected;
+    if (ui.txCodec) {
+      ui.txCodec.value = selected;
+    }
+    if (ui.pcmOnly) {
+      ui.pcmOnly.checked = selected === txCodecPCM;
+    }
+    return selected;
   }
 
   function deriveBrowserCodec(uplink, downlink) {

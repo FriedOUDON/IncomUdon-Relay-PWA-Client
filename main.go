@@ -45,9 +45,12 @@ type serverEvent struct {
 	RelayPort     int    `json:"relayPort,omitempty"`
 	CryptoMode    string `json:"cryptoMode,omitempty"`
 	CodecMode     int    `json:"codecMode,omitempty"`
+	TxCodec       string `json:"txCodec,omitempty"`
 	PCMOnly       bool   `json:"pcmOnly,omitempty"`
 	UplinkCodec   string `json:"uplinkCodec,omitempty"`
 	DownlinkCodec string `json:"downlinkCodec,omitempty"`
+	Codec2Ready   bool   `json:"codec2Ready,omitempty"`
+	OpusReady     bool   `json:"opusReady,omitempty"`
 }
 
 type clientCommand struct {
@@ -60,6 +63,7 @@ type clientCommand struct {
 	Password      string `json:"password,omitempty"`
 	CryptoMode    string `json:"cryptoMode,omitempty"`
 	CodecMode     int    `json:"codecMode,omitempty"`
+	TxCodec       string `json:"txCodec,omitempty"`
 	Codec2Lib     string `json:"codec2Lib,omitempty"`
 	OpusLib       string `json:"opusLib,omitempty"`
 	UplinkCodec   string `json:"uplinkCodec,omitempty"`
@@ -330,6 +334,8 @@ func (a *appServer) serveIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 
+	codec2Ready, opusReady := detectRuntimeCodecAvailability(a.codec2LibDefault, a.opusLibDefault)
+
 	data := struct {
 		BasePath          string
 		FixedRelayEnabled bool
@@ -337,6 +343,8 @@ func (a *appServer) serveIndex(w http.ResponseWriter, r *http.Request) {
 		FixedRelayPort    int
 		WSTokenRequired   bool
 		AuthMode          string
+		Codec2Ready       bool
+		OpusReady         bool
 	}{
 		BasePath:          a.basePath,
 		FixedRelayEnabled: a.fixedRelayEnabled,
@@ -344,6 +352,8 @@ func (a *appServer) serveIndex(w http.ResponseWriter, r *http.Request) {
 		FixedRelayPort:    a.fixedRelayPort,
 		WSTokenRequired:   strings.TrimSpace(a.wsToken) != "",
 		AuthMode:          string(a.authMode),
+		Codec2Ready:       codec2Ready,
+		OpusReady:         opusReady,
 	}
 	if err := a.indexT.Execute(w, data); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
@@ -532,6 +542,7 @@ func handleClientCommand(
 		}
 		newSession.Start()
 		effective := newSession.EffectiveConfig()
+		codec2Ready, opusReady := detectRuntimeCodecAvailability(effective.Codec2LibPath, effective.OpusLibPath)
 
 		enqueueJSON(serverEvent{
 			Type:          "connected",
@@ -542,9 +553,12 @@ func handleClientCommand(
 			SenderID:      effective.SenderID,
 			CryptoMode:    string(effective.CryptoMode),
 			CodecMode:     effective.CodecMode,
+			TxCodec:       effective.TxCodec,
 			PCMOnly:       effective.PCMOnly,
 			UplinkCodec:   effective.UplinkCodec,
 			DownlinkCodec: effective.DownlinkCodec,
+			Codec2Ready:   codec2Ready,
+			OpusReady:     opusReady,
 		})
 		return newSession, true
 
@@ -626,10 +640,27 @@ func buildSessionConfig(
 	}
 	codecMode = normalizeCodecMode(codecMode)
 
-	pcmOnly := true
+	legacyPCMOnly := true
 	if cmd.PCMOnly != nil {
-		pcmOnly = *cmd.PCMOnly
+		legacyPCMOnly = *cmd.PCMOnly
 	}
+
+	txCodec := strings.ToLower(strings.TrimSpace(cmd.TxCodec))
+	switch txCodec {
+	case "":
+		if legacyPCMOnly {
+			txCodec = txCodecPCM
+		} else if normalizeUplinkCodec(cmd.UplinkCodec) == uplinkCodecOpus {
+			txCodec = txCodecOpus
+		} else {
+			txCodec = txCodecCodec2
+		}
+	case txCodecPCM, txCodecCodec2, txCodecOpus:
+		// keep
+	default:
+		return sessionConfig{}, fmt.Errorf("unsupported txCodec: %s", cmd.TxCodec)
+	}
+	pcmOnly := txCodec == txCodecPCM
 
 	codec2LibPath := strings.TrimSpace(cmd.Codec2Lib)
 	if codec2LibPath == "" {
@@ -648,6 +679,7 @@ func buildSessionConfig(
 		Password:      cmd.Password,
 		CryptoMode:    mode,
 		CodecMode:     codecMode,
+		TxCodec:       txCodec,
 		PCMOnly:       pcmOnly,
 		Codec2LibPath: codec2LibPath,
 		OpusLibPath:   opusLibPath,
@@ -700,6 +732,22 @@ func parseCSV(value string) []string {
 		out = append(out, token)
 	}
 	return out
+}
+
+func detectRuntimeCodecAvailability(codec2LibPath string, opusLibPath string) (bool, bool) {
+	codec2Ready := false
+	if engine, err := newCodec2Engine(strings.TrimSpace(codec2LibPath)); err == nil && engine != nil {
+		codec2Ready = true
+		engine.Close()
+	}
+
+	opusReady := false
+	if engine, err := newOpusEncoderEngine(strings.TrimSpace(opusLibPath), 8000, 1); err == nil && engine != nil {
+		opusReady = true
+		engine.Close()
+	}
+
+	return codec2Ready, opusReady
 }
 
 func ensureOpenIDScope(scopes []string) []string {
