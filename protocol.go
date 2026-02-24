@@ -32,6 +32,10 @@ const (
 	serverBinaryAudio = 0x11
 	serverBinaryOpus  = 0x12
 
+	codecTransportPCM    = 0x00
+	codecTransportCodec2 = 0x01
+	codecTransportOpus   = 0x02
+
 	pcmSamplesPerFrame = 160
 	pcmBytesPerFrame   = pcmSamplesPerFrame * 2
 )

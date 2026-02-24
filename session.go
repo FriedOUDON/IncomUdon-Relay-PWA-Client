@@ -45,6 +45,7 @@ type sessionCallbacks struct {
 type peerCodecConfig struct {
 	Mode    int
 	PCMOnly bool
+	CodecID uint8
 }
 
 type relaySession struct {
@@ -71,6 +72,7 @@ type relaySession struct {
 	joinRetriesLeft int
 	serverLocked    bool
 	pendingPCM      [][]byte
+	pendingOpus     [][]byte
 	txPCMBuffer     []byte
 	downlinkPCM     []byte
 
@@ -114,13 +116,17 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		done:              make(chan struct{}),
 	}
 
+	s.cfg.UplinkCodec = normalizeUplinkCodec(s.cfg.UplinkCodec)
+	s.cfg.DownlinkCodec = normalizeDownlinkCodec(s.cfg.DownlinkCodec)
+
+	requiresCodec2Uplink := !s.cfg.PCMOnly && s.cfg.UplinkCodec != uplinkCodecOpus
 	codec2Path := strings.TrimSpace(cfg.Codec2LibPath)
-	if codec2Path != "" || !s.cfg.PCMOnly {
+	if codec2Path != "" || requiresCodec2Uplink {
 		engine, loadErr := newCodec2Engine(codec2Path)
 		if loadErr != nil {
 			s.startupWarnings = append(s.startupWarnings,
 				fmt.Sprintf("Codec2 disabled: %v", loadErr))
-			if !s.cfg.PCMOnly {
+			if requiresCodec2Uplink {
 				s.cfg.PCMOnly = true
 				s.startupWarnings = append(s.startupWarnings,
 					"PCM only was forced because codec2 encoder is unavailable")
@@ -130,27 +136,29 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		}
 	}
 
-	s.cfg.UplinkCodec = normalizeUplinkCodec(s.cfg.UplinkCodec)
-	s.cfg.DownlinkCodec = normalizeDownlinkCodec(s.cfg.DownlinkCodec)
-
-	if s.cfg.UplinkCodec == uplinkCodecOpus {
+	loadDecoder := s.cfg.UplinkCodec == uplinkCodecOpus || s.cfg.DownlinkCodec == downlinkCodecOpus
+	loadEncoder := s.cfg.UplinkCodec == uplinkCodecOpus || s.cfg.DownlinkCodec == downlinkCodecOpus
+	if loadDecoder {
 		opusPath := strings.TrimSpace(s.cfg.OpusLibPath)
 		engine, loadErr := newOpusDecoderEngine(opusPath, 8000, 1)
 		if loadErr != nil {
-			s.cfg.UplinkCodec = uplinkCodecPCM
 			s.startupWarnings = append(s.startupWarnings,
-				fmt.Sprintf("Opus uplink disabled: %v", loadErr))
+				fmt.Sprintf("Opus decoder unavailable: %v", loadErr))
+			if s.cfg.PCMOnly && s.cfg.UplinkCodec == uplinkCodecOpus {
+				s.cfg.UplinkCodec = uplinkCodecPCM
+				s.startupWarnings = append(s.startupWarnings,
+					"Opus uplink was disabled because PCM transport requires Opus decoder")
+			}
 		} else {
 			s.opusDecoder = engine
 		}
 	}
-	if s.cfg.DownlinkCodec == downlinkCodecOpus {
+	if loadEncoder {
 		opusPath := strings.TrimSpace(s.cfg.OpusLibPath)
 		engine, loadErr := newOpusEncoderEngine(opusPath, 8000, 1)
 		if loadErr != nil {
-			s.cfg.DownlinkCodec = downlinkCodecPCM
 			s.startupWarnings = append(s.startupWarnings,
-				fmt.Sprintf("Opus downlink disabled: %v", loadErr))
+				fmt.Sprintf("Opus encoder unavailable: %v", loadErr))
 		} else {
 			s.opusEncoder = engine
 		}
@@ -247,6 +255,7 @@ func (s *relaySession) Close() {
 	opusEncoder := s.opusEncoder
 	s.opusEncoder = nil
 	s.pendingPCM = nil
+	s.pendingOpus = nil
 	s.txPCMBuffer = nil
 	s.downlinkPCM = nil
 	s.mu.Unlock()
@@ -280,10 +289,16 @@ func (s *relaySession) HandleBrowserBinary(payload []byte) {
 		s.SendPCM(body)
 	case clientBinaryOpus:
 		s.mu.Lock()
+		transportCodec := s.activeUplinkTransportCodecLocked()
 		codec := s.cfg.UplinkCodec
 		decoder := s.opusDecoder
 		warned := s.uplinkOpusWarned
 		s.mu.Unlock()
+
+		if transportCodec == codecTransportOpus {
+			s.SendOpus(body)
+			return
+		}
 
 		if codec != uplinkCodecOpus || decoder == nil {
 			if !warned {
@@ -327,9 +342,11 @@ func (s *relaySession) SetPTT(pressed bool) {
 	s.pttPressed = pressed
 	if pressed {
 		s.txPCMBuffer = nil
+		s.pendingOpus = nil
 		s.talkAllowed = false
 	} else {
 		s.pendingPCM = nil
+		s.pendingOpus = nil
 		s.txPCMBuffer = nil
 		s.talkAllowed = false
 	}
@@ -353,13 +370,15 @@ func (s *relaySession) UpdateCodec(codecMode int, pcmOnly bool) {
 	forcedPCM := false
 
 	s.mu.Lock()
-	if !pcmOnly && s.codec2 == nil {
+	requiresCodec2Uplink := !pcmOnly && s.cfg.UplinkCodec != uplinkCodecOpus
+	if requiresCodec2Uplink && s.codec2 == nil {
 		pcmOnly = true
 		forcedPCM = true
 	}
 	s.cfg.CodecMode = normalizeCodecMode(codecMode)
 	s.cfg.PCMOnly = pcmOnly
 	s.pendingPCM = nil
+	s.pendingOpus = nil
 	s.txPCMBuffer = nil
 	s.mu.Unlock()
 
@@ -405,10 +424,42 @@ func (s *relaySession) SendPCM(frame []byte) {
 	}
 }
 
+func (s *relaySession) SendOpus(packet []byte) {
+	if len(packet) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	pttPressed := s.pttPressed
+	talkAllowed := s.talkAllowed
+	transportCodec := s.activeUplinkTransportCodecLocked()
+	if !pttPressed {
+		s.mu.Unlock()
+		return
+	}
+	if !talkAllowed {
+		copied := append([]byte(nil), packet...)
+		if len(s.pendingOpus) >= 24 {
+			s.pendingOpus = s.pendingOpus[1:]
+		}
+		s.pendingOpus = append(s.pendingOpus, copied)
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+
+	if transportCodec != codecTransportOpus {
+		return
+	}
+	if err := s.sendAudioFrame(packet, codecTransportOpus); err != nil {
+		s.emitError("failed to send opus frame: %v", err)
+	}
+}
+
 func (s *relaySession) pushOutboundPCM(pcm []byte) error {
 	frames := s.collectOutboundPCMFrames(pcm)
 	for _, frame := range frames {
-		if err := s.sendAudioFrame(frame); err != nil {
+		if err := s.sendAudioFrame(frame, codecTransportPCM); err != nil {
 			return err
 		}
 	}
@@ -417,13 +468,13 @@ func (s *relaySession) pushOutboundPCM(pcm []byte) error {
 
 func (s *relaySession) collectOutboundPCMFrames(pcm []byte) [][]byte {
 	s.mu.Lock()
-	pcmOnly := s.cfg.PCMOnly
+	transportCodec := s.activeUplinkTransportCodecLocked()
 	codecMode := s.cfg.CodecMode
 	codec := s.codec2
 	s.mu.Unlock()
 
 	targetBytes := pcmBytesPerFrame
-	if !pcmOnly && codec != nil {
+	if transportCodec == codecTransportCodec2 && codec != nil {
 		if bytesPerFrame, err := codec.PCMBytesForMode(codecMode); err == nil && bytesPerFrame > 0 {
 			targetBytes = bytesPerFrame
 		}
@@ -618,13 +669,18 @@ func (s *relaySession) handleTalkPacket(pkt parsedPacket) {
 		talker = 0
 	}
 
-	var flushFrames [][]byte
+	var flushPCM [][]byte
+	var flushOpus [][]byte
 	s.mu.Lock()
 	s.currentTalker = talker
 	s.talkAllowed = talker != 0 && talker == s.cfg.SenderID
 	if s.talkAllowed && len(s.pendingPCM) > 0 {
-		flushFrames = append(flushFrames, s.pendingPCM...)
+		flushPCM = append(flushPCM, s.pendingPCM...)
 		s.pendingPCM = nil
+	}
+	if s.talkAllowed && len(s.pendingOpus) > 0 {
+		flushOpus = append(flushOpus, s.pendingOpus...)
+		s.pendingOpus = nil
 	}
 	talkAllowed := s.talkAllowed
 	s.mu.Unlock()
@@ -644,9 +700,15 @@ func (s *relaySession) handleTalkPacket(pkt parsedPacket) {
 		})
 	}
 
-	for _, frame := range flushFrames {
+	for _, frame := range flushPCM {
 		if err := s.pushOutboundPCM(frame); err != nil {
 			s.emitError("failed to flush queued audio: %v", err)
+			break
+		}
+	}
+	for _, frame := range flushOpus {
+		if err := s.sendAudioFrame(frame, codecTransportOpus); err != nil {
+			s.emitError("failed to flush queued opus audio: %v", err)
 			break
 		}
 	}
@@ -657,10 +719,19 @@ func (s *relaySession) handleCodecConfig(pkt parsedPacket) {
 		return
 	}
 	pcmOnly := (pkt.Payload[0] & 0x01) != 0
+	codecID := normalizeCodecTransportID(codecTransportCodec2, pcmOnly)
 	mode := normalizeCodecMode(int(binary.BigEndian.Uint16(pkt.Payload[1:3])))
+	if len(pkt.Payload) >= 4 {
+		codecID = normalizeCodecTransportID(pkt.Payload[1], pcmOnly)
+		mode = normalizeCodecMode(int(binary.BigEndian.Uint16(pkt.Payload[2:4])))
+	}
 
 	s.mu.Lock()
-	s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{Mode: mode, PCMOnly: pcmOnly}
+	s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{
+		Mode:    mode,
+		PCMOnly: pcmOnly,
+		CodecID: codecID,
+	}
 	s.mu.Unlock()
 
 	s.emitEvent(serverEvent{
@@ -705,41 +776,105 @@ func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
 		return
 	}
 
+	s.mu.Lock()
+	peerCfg, hasPeer := s.peerCodec[pkt.Header.SenderID]
+	codec := s.codec2
+	opusDecoder := s.opusDecoder
+	downlinkCodec := s.cfg.DownlinkCodec
+	s.mu.Unlock()
+
+	if hasPeer {
+		codecID := normalizeCodecTransportID(peerCfg.CodecID, peerCfg.PCMOnly)
+		switch codecID {
+		case codecTransportPCM:
+			s.emitDownlinkAudio(frame)
+			return
+		case codecTransportOpus:
+			if downlinkCodec == downlinkCodecOpus && s.cb.onOpus != nil {
+				s.cb.onOpus(append([]byte(nil), frame...))
+				return
+			}
+			if opusDecoder == nil {
+				s.emitUnsupportedFrame(pkt.Header.SenderID, len(frame),
+					"opus decoder is unavailable")
+				return
+			}
+			decoded, err := opusDecoder.Decode(frame)
+			if err != nil {
+				s.emitUnsupportedFrame(pkt.Header.SenderID, len(frame), err.Error())
+				return
+			}
+			s.emitDownlinkAudio(decoded)
+			return
+		default:
+			if codec == nil {
+				s.emitUnsupportedFrame(pkt.Header.SenderID, len(frame),
+					"codec2 is unavailable")
+				return
+			}
+			decoded, err := codec.Decode(peerCfg.Mode, frame)
+			if err == nil {
+				s.emitDownlinkAudio(decoded)
+				return
+			}
+		}
+	}
+
 	if len(frame) == pcmBytesPerFrame {
+		s.mu.Lock()
+		s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{
+			Mode:    normalizeCodecMode(s.cfg.CodecMode),
+			PCMOnly: true,
+			CodecID: codecTransportPCM,
+		}
+		s.mu.Unlock()
 		s.emitDownlinkAudio(frame)
 		return
 	}
 
-	s.mu.Lock()
-	peerCfg, hasPeer := s.peerCodec[pkt.Header.SenderID]
-	codec := s.codec2
-	s.mu.Unlock()
-
-	if codec == nil {
-		s.emitUnsupportedFrame(pkt.Header.SenderID, len(frame),
-			"codec2 is unavailable")
-		return
-	}
-
-	if hasPeer && !peerCfg.PCMOnly {
-		decoded, err := codec.Decode(peerCfg.Mode, frame)
+	if codec != nil {
+		decoded, detectedMode, err := codec.DecodeBySize(frame)
 		if err == nil {
+			s.mu.Lock()
+			s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{
+				Mode:    detectedMode,
+				PCMOnly: false,
+				CodecID: codecTransportCodec2,
+			}
+			s.mu.Unlock()
 			s.emitDownlinkAudio(decoded)
 			return
 		}
 	}
 
-	decoded, detectedMode, err := codec.DecodeBySize(frame)
-	if err != nil {
-		s.emitUnsupportedFrame(pkt.Header.SenderID, len(frame), err.Error())
+	if downlinkCodec == downlinkCodecOpus && s.cb.onOpus != nil {
+		s.mu.Lock()
+		s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{
+			Mode:    normalizeCodecMode(s.cfg.CodecMode),
+			PCMOnly: false,
+			CodecID: codecTransportOpus,
+		}
+		s.mu.Unlock()
+		s.cb.onOpus(append([]byte(nil), frame...))
 		return
 	}
 
-	s.mu.Lock()
-	s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{Mode: detectedMode, PCMOnly: false}
-	s.mu.Unlock()
+	if opusDecoder != nil {
+		decoded, err := opusDecoder.Decode(frame)
+		if err == nil {
+			s.mu.Lock()
+			s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{
+				Mode:    normalizeCodecMode(s.cfg.CodecMode),
+				PCMOnly: false,
+				CodecID: codecTransportOpus,
+			}
+			s.mu.Unlock()
+			s.emitDownlinkAudio(decoded)
+			return
+		}
+	}
 
-	s.emitDownlinkAudio(decoded)
+	s.emitUnsupportedFrame(pkt.Header.SenderID, len(frame), "no compatible decoder")
 }
 
 func (s *relaySession) emitUnsupportedFrame(senderID uint32, size int, reason string) {
@@ -849,16 +984,17 @@ func (s *relaySession) sendLegacyHandshake() error {
 
 func (s *relaySession) sendCodecConfig() error {
 	s.mu.Lock()
-	pcmOnly := s.cfg.PCMOnly
 	codecMode := normalizeCodecMode(s.cfg.CodecMode)
 	s.cfg.CodecMode = codecMode
+	codecID := s.activeUplinkTransportCodecLocked()
 	s.mu.Unlock()
 
-	payload := make([]byte, 3)
-	if pcmOnly {
+	payload := make([]byte, 4)
+	if codecID == codecTransportPCM {
 		payload[0] = 0x01
 	}
-	binary.BigEndian.PutUint16(payload[1:3], uint16(codecMode))
+	payload[1] = codecID
+	binary.BigEndian.PutUint16(payload[2:4], uint16(codecMode))
 	return s.sendControlPacket(pktCodecConfig, payload)
 }
 
@@ -896,7 +1032,7 @@ func (s *relaySession) sendControlPacket(pktType uint8, payload []byte) error {
 	return err
 }
 
-func (s *relaySession) sendAudioFrame(frame []byte) error {
+func (s *relaySession) sendAudioFrame(frame []byte, sourceCodecID uint8) error {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
@@ -916,9 +1052,10 @@ func (s *relaySession) sendAudioFrame(frame []byte) error {
 	mode := s.cfg.CryptoMode
 	keyID := s.crypto.keyID
 	addr := s.relayAddr
-	pcmOnly := s.cfg.PCMOnly
 	codecMode := s.cfg.CodecMode
 	codec := s.codec2
+	opusEncoder := s.opusEncoder
+	transportCodec := s.activeUplinkTransportCodecLocked()
 	nonce := uint64(0)
 	if mode != cryptoNoCrypto {
 		nonce = s.crypto.nextNonce()
@@ -929,21 +1066,36 @@ func (s *relaySession) sendAudioFrame(frame []byte) error {
 		return fmt.Errorf("relay address is not set")
 	}
 
-	audioPCM := frame
-	if pcmOnly {
-		audioPCM = normalizePCMFrame(audioPCM)
-	}
-
-	audioFrame := audioPCM
-	if !pcmOnly {
-		if codec == nil {
-			return fmt.Errorf("codec2 encoder is unavailable")
+	var audioFrame []byte
+	if sourceCodecID == codecTransportOpus {
+		if transportCodec != codecTransportOpus {
+			return fmt.Errorf("opus frame rejected because uplink transport is not opus")
 		}
-		encoded, err := codec.Encode(codecMode, audioPCM)
-		if err != nil {
-			return fmt.Errorf("codec2 encode failed: %w", err)
+		audioFrame = append([]byte(nil), frame...)
+	} else {
+		audioPCM := frame
+		switch transportCodec {
+		case codecTransportPCM:
+			audioFrame = normalizePCMFrame(audioPCM)
+		case codecTransportOpus:
+			if opusEncoder == nil {
+				return fmt.Errorf("opus encoder is unavailable")
+			}
+			encoded, err := opusEncoder.Encode(audioPCM)
+			if err != nil {
+				return fmt.Errorf("opus encode failed: %w", err)
+			}
+			audioFrame = encoded
+		default:
+			if codec == nil {
+				return fmt.Errorf("codec2 encoder is unavailable")
+			}
+			encoded, err := codec.Encode(codecMode, audioPCM)
+			if err != nil {
+				return fmt.Errorf("codec2 encode failed: %w", err)
+			}
+			audioFrame = encoded
 		}
-		audioFrame = encoded
 	}
 
 	payload := make([]byte, 2+len(audioFrame))
@@ -1044,6 +1196,28 @@ func normalizeBrowserCodec(value string) string {
 		return browserCodecOpus
 	default:
 		return browserCodecPCM
+	}
+}
+
+func (s *relaySession) activeUplinkTransportCodecLocked() uint8 {
+	if s.cfg.PCMOnly {
+		return codecTransportPCM
+	}
+	if s.cfg.UplinkCodec == uplinkCodecOpus {
+		return codecTransportOpus
+	}
+	return codecTransportCodec2
+}
+
+func normalizeCodecTransportID(codecID uint8, pcmOnly bool) uint8 {
+	if pcmOnly {
+		return codecTransportPCM
+	}
+	switch codecID {
+	case codecTransportPCM, codecTransportCodec2, codecTransportOpus:
+		return codecID
+	default:
+		return codecTransportCodec2
 	}
 }
 
