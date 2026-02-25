@@ -1612,6 +1612,7 @@
     setText("labelChannelId", t("channel_id"));
     setText("labelSenderId", t("sender_id"));
     setText("labelPassword", t("password"));
+    setText("headingAdvancedSettings", t("advanced_settings"));
     setText("labelCryptoMode", t("crypto_mode"));
     setText("labelCodecMode", t("codec_mode"));
     setText("labelBrowserCodec", t("browser_codec"));

@@ -59,56 +59,63 @@
         </div>
 
         <div class="connect-group">
-          <div class="connect-grid connect-grid-advanced">
-            <label>
-              <span id="labelRelayHost">Relay Host</span>
-              <input id="relayHost" type="text" value="" autocomplete="off" spellcheck="false">
-            </label>
-            <label>
-              <span id="labelRelayPort">Relay Port</span>
-              <input id="relayPort" type="number" value="50000" min="1" max="65535">
-            </label>
-            <label>
-              <span id="labelSenderId">Sender ID (random if empty)</span>
-              <input id="senderId" type="number" min="1" max="2147483647">
-            </label>
-            <label>
-              <span id="labelCryptoMode">Crypto Mode</span>
-              <select id="cryptoMode">
-                <option value="aes-gcm" selected>aes-gcm</option>
-                <option value="legacy-xor">legacy-xor</option>
-                <option value="no-crypto">no-crypto</option>
-              </select>
-            </label>
-            <label>
-              <span id="labelCodecMode">TX Bitrate</span>
-              <select id="codecMode">
-                <option value="450">450</option>
-                <option value="700">700</option>
-                <option value="1600" selected>1600</option>
-                <option value="2400">2400</option>
-                <option value="3200">3200</option>
-              </select>
-            </label>
-            <label>
-              <span id="labelBrowserCodec">Browser Codec</span>
-              <select id="browserCodec">
-                <option id="optionBrowserCodecPcm" value="pcm">pcm</option>
-                <option id="optionBrowserCodecOpus" value="opus" selected>opus (optional)</option>
-              </select>
-            </label>
-            <label>
-              <span id="labelTxCodec">TX Codec</span>
-              <select id="txCodec">
-                <option id="optionTxCodecPcm" value="pcm" selected>pcm</option>
-                <option id="optionTxCodecCodec2" value="codec2">codec2</option>
-                <option id="optionTxCodecOpus" value="opus">opus</option>
-              </select>
-            </label>
-            <label class="checkbox-row">
-              <input id="qosEnabled" type="checkbox" checked>
-              <span id="labelQosEnabled">Network QoS (DSCP EF)</span>
-            </label>
+          <div class="settings-group">
+            <div class="connect-grid connect-grid-main">
+              <label>
+                <span id="labelSenderId">Sender ID (random if empty)</span>
+                <input id="senderId" type="number" min="1" max="2147483647">
+              </label>
+              <label>
+                <span id="labelCodecMode">TX Bitrate</span>
+                <select id="codecMode">
+                  <option value="450">450</option>
+                  <option value="700">700</option>
+                  <option value="1600" selected>1600</option>
+                  <option value="2400">2400</option>
+                  <option value="3200">3200</option>
+                </select>
+              </label>
+              <label>
+                <span id="labelTxCodec">TX Codec</span>
+                <select id="txCodec">
+                  <option id="optionTxCodecPcm" value="pcm" selected>pcm</option>
+                  <option id="optionTxCodecCodec2" value="codec2">codec2</option>
+                  <option id="optionTxCodecOpus" value="opus">opus</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div class="settings-group">
+            <h2 id="headingAdvancedSettings" class="settings-group-title">Advanced Settings</h2>
+            <div class="connect-grid connect-grid-advanced">
+              <label>
+                <span id="labelRelayHost">Relay Host</span>
+                <input id="relayHost" type="text" value="" autocomplete="off" spellcheck="false">
+              </label>
+              <label>
+                <span id="labelRelayPort">Relay Port</span>
+                <input id="relayPort" type="number" value="50000" min="1" max="65535">
+              </label>
+              <label>
+                <span id="labelCryptoMode">Crypto Mode</span>
+                <select id="cryptoMode">
+                  <option value="aes-gcm" selected>aes-gcm</option>
+                  <option value="legacy-xor">legacy-xor</option>
+                  <option value="no-crypto">no-crypto</option>
+                </select>
+              </label>
+              <label>
+                <span id="labelBrowserCodec">Browser Codec</span>
+                <select id="browserCodec">
+                  <option id="optionBrowserCodecPcm" value="pcm">pcm</option>
+                  <option id="optionBrowserCodecOpus" value="opus" selected>opus (optional)</option>
+                </select>
+              </label>
+              <label class="checkbox-row">
+                <input id="qosEnabled" type="checkbox" checked>
+                <span id="labelQosEnabled">Network QoS (DSCP EF)</span>
+              </label>
+            </div>
             <input id="pcmOnly" type="checkbox" checked hidden>
           </div>
         </div>

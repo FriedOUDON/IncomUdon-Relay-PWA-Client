@@ -132,6 +132,22 @@ h1 {
   gap: 10px;
 }
 
+.settings-group {
+  border: 1px solid color-mix(in srgb, var(--line) 90%, white 10%);
+  border-radius: 10px;
+  padding: 10px;
+  background: #ffffff;
+  display: grid;
+  gap: 8px;
+}
+
+.settings-group-title {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .connect-grid {
   display: grid;
   gap: 10px;

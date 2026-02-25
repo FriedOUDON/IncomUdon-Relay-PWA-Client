@@ -2,6 +2,7 @@
   "app_title": "IncomUdon リレー PWA クライアント",
   "header_title": "Relay PWA Client",
   "language": "言語",
+  "advanced_settings": "上級者向け設定",
   "relay_host": "Relay Host",
   "relay_port": "Relay Port",
   "channel_id": "Channel ID",
