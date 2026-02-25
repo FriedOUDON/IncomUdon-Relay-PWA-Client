@@ -47,6 +47,7 @@ type serverEvent struct {
 	CodecMode     int    `json:"codecMode,omitempty"`
 	TxCodec       string `json:"txCodec,omitempty"`
 	PCMOnly       bool   `json:"pcmOnly,omitempty"`
+	QosEnabled    *bool  `json:"qosEnabled,omitempty"`
 	UplinkCodec   string `json:"uplinkCodec,omitempty"`
 	DownlinkCodec string `json:"downlinkCodec,omitempty"`
 	Codec2Ready   bool   `json:"codec2Ready,omitempty"`
@@ -68,6 +69,7 @@ type clientCommand struct {
 	OpusLib       string `json:"opusLib,omitempty"`
 	UplinkCodec   string `json:"uplinkCodec,omitempty"`
 	DownlinkCodec string `json:"downlinkCodec,omitempty"`
+	QosEnabled    *bool  `json:"qosEnabled,omitempty"`
 	PCMOnly       *bool  `json:"pcmOnly,omitempty"`
 	Pressed       *bool  `json:"pressed,omitempty"`
 }
@@ -543,6 +545,7 @@ func handleClientCommand(
 		newSession.Start()
 		effective := newSession.EffectiveConfig()
 		codec2Ready, opusReady := detectRuntimeCodecAvailability(effective.Codec2LibPath, effective.OpusLibPath)
+		effectiveQosEnabled := effective.QosEnabled
 
 		enqueueJSON(serverEvent{
 			Type:          "connected",
@@ -555,6 +558,7 @@ func handleClientCommand(
 			CodecMode:     effective.CodecMode,
 			TxCodec:       effective.TxCodec,
 			PCMOnly:       effective.PCMOnly,
+			QosEnabled:    &effectiveQosEnabled,
 			UplinkCodec:   effective.UplinkCodec,
 			DownlinkCodec: effective.DownlinkCodec,
 			Codec2Ready:   codec2Ready,
@@ -644,6 +648,11 @@ func buildSessionConfig(
 		legacyPCMOnly = *cmd.PCMOnly
 	}
 
+	qosEnabled := true
+	if cmd.QosEnabled != nil {
+		qosEnabled = *cmd.QosEnabled
+	}
+
 	txCodec := strings.ToLower(strings.TrimSpace(cmd.TxCodec))
 	switch txCodec {
 	case "":
@@ -681,6 +690,7 @@ func buildSessionConfig(
 		CodecMode:     codecMode,
 		TxCodec:       txCodec,
 		PCMOnly:       pcmOnly,
+		QosEnabled:    qosEnabled,
 		Codec2LibPath: codec2LibPath,
 		OpusLibPath:   opusLibPath,
 		UplinkCodec:   cmd.UplinkCodec,

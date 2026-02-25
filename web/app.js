@@ -27,6 +27,7 @@
     codecMode: document.getElementById("codecMode"),
     browserCodec: document.getElementById("browserCodec"),
     txCodec: document.getElementById("txCodec"),
+    qosEnabled: document.getElementById("qosEnabled"),
     optionTxCodecPcm: document.getElementById("optionTxCodecPcm"),
     optionTxCodecCodec2: document.getElementById("optionTxCodecCodec2"),
     optionTxCodecOpus: document.getElementById("optionTxCodecOpus"),
@@ -82,6 +83,7 @@
     tx_codec_pcm: "pcm",
     tx_codec_codec2: "codec2",
     tx_codec_opus: "opus",
+    qos_enabled: "Network QoS (DSCP EF)",
     uplink_opus_optional: "opus (optional)",
     pcm_only: "PCM only (no Web-side encode)",
     connect: "Connect",
@@ -585,6 +587,7 @@
         cryptoMode: ui.cryptoMode.value,
         codecMode: Number(ui.codecMode.value),
         txCodec: selectedTxCodec,
+        qosEnabled: ui.qosEnabled ? !!ui.qosEnabled.checked : true,
         codec2Lib: ui.codec2Lib.value.trim(),
         opusLib: ui.opusLib.value.trim(),
         uplinkCodec: state.browserCodec,
@@ -725,6 +728,9 @@
       state.txCodec = connectedTxCodec;
       if (ui.txCodec) {
         ui.txCodec.value = connectedTxCodec;
+      }
+      if (typeof event.qosEnabled === "boolean" && ui.qosEnabled) {
+        ui.qosEnabled.checked = event.qosEnabled;
       }
       ui.pcmOnly.checked = connectedTxCodec === txCodecPCM;
       sanitizeSelectedTxCodec(event.codecMode);
@@ -871,6 +877,7 @@
       codecMode: "1600",
       browserCodec: "opus",
       txCodec: txCodecPCM,
+      qosEnabled: true,
       codec2Lib: "",
       opusLib: "",
       pcmOnly: true,
@@ -933,6 +940,9 @@
     if (ui.txCodec) {
       ui.txCodec.value = normalizeTxCodec(merged.txCodec);
     }
+    if (ui.qosEnabled) {
+      ui.qosEnabled.checked = merged.qosEnabled !== false;
+    }
     ui.codec2Lib.value = String(merged.codec2Lib || "");
     ui.opusLib.value = String(merged.opusLib || "");
     sanitizeSelectedTxCodec(merged.codecMode);
@@ -960,6 +970,7 @@
       ui.codecMode,
       ui.browserCodec,
       ui.txCodec,
+      ui.qosEnabled,
       ui.codec2Lib,
       ui.opusLib,
       ui.cuePttOnEnabled,
@@ -1016,6 +1027,7 @@
       codecMode: ui.codecMode.value,
       browserCodec: ui.browserCodec.value,
       txCodec: selectedTxCodec,
+      qosEnabled: ui.qosEnabled ? !!ui.qosEnabled.checked : true,
       codec2Lib: ui.codec2Lib.value.trim(),
       opusLib: ui.opusLib.value.trim(),
       pcmOnly: selectedTxCodec === txCodecPCM,
@@ -1604,6 +1616,7 @@
     setText("labelCodecMode", t("codec_mode"));
     setText("labelBrowserCodec", t("browser_codec"));
     setText("labelTxCodec", t("tx_codec"));
+    setText("labelQosEnabled", t("qos_enabled"));
     setText("optionTxCodecPcm", t("tx_codec_pcm"));
     setText("optionTxCodecCodec2", t("tx_codec_codec2"));
     setText("optionTxCodecOpus", t("tx_codec_opus"));
@@ -1844,6 +1857,15 @@
       : codec2BitrateOptions;
   }
 
+  function bitrateOptionLabel(value, txCodec) {
+    if (normalizeTxCodec(txCodec) !== txCodecOpus) {
+      return String(value);
+    }
+    const kbps = value / 1000;
+    const label = Number.isInteger(kbps) ? String(kbps) : kbps.toFixed(1);
+    return `${label} kbps`;
+  }
+
   function normalizeBitrateForTxCodec(rawValue, txCodec) {
     const normalizedTxCodec = normalizeTxCodec(txCodec);
     const rawText = rawValue === undefined || rawValue === null ? "" : rawValue;
@@ -1883,7 +1905,7 @@
       options.forEach((value) => {
         const option = document.createElement("option");
         option.value = String(value);
-        option.textContent = String(value);
+        option.textContent = bitrateOptionLabel(value, selectedTxCodec);
         ui.codecMode.appendChild(option);
       });
     }

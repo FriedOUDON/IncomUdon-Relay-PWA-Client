@@ -20,6 +20,7 @@ type sessionConfig struct {
 	CodecMode     int
 	TxCodec       string
 	PCMOnly       bool
+	QosEnabled    bool
 	Codec2LibPath string
 	OpusLibPath   string
 	UplinkCodec   string
@@ -84,6 +85,7 @@ type relaySession struct {
 	peerCodec          map[uint32]peerCodecConfig
 	unsupportedFrames  map[string]struct{}
 	startupWarnings    []string
+	qosApplied         bool
 	uplinkOpusWarned   bool
 	downlinkOpusWarned bool
 
@@ -119,6 +121,13 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		peerCodec:         make(map[uint32]peerCodecConfig),
 		unsupportedFrames: make(map[string]struct{}),
 		done:              make(chan struct{}),
+	}
+
+	if err := applyUDPSocketQoS(conn, s.cfg.QosEnabled); err != nil {
+		s.startupWarnings = append(s.startupWarnings,
+			fmt.Sprintf("Network QoS request failed: %v", err))
+	} else {
+		s.qosApplied = true
 	}
 
 	s.cfg.UplinkCodec = normalizeUplinkCodec(s.cfg.UplinkCodec)
@@ -194,6 +203,22 @@ func (s *relaySession) Start() {
 		ChannelID: s.cfg.ChannelID,
 		SenderID:  s.cfg.SenderID,
 	})
+
+	if s.cfg.QosEnabled {
+		if s.qosApplied {
+			s.emitEvent(serverEvent{
+				Type:    "status",
+				Level:   "info",
+				Message: "Network QoS enabled (DSCP EF)",
+			})
+		}
+	} else {
+		s.emitEvent(serverEvent{
+			Type:    "status",
+			Level:   "info",
+			Message: "Network QoS disabled",
+		})
+	}
 
 	if s.codec2 != nil {
 		message := "Codec2 dynamic library loaded"

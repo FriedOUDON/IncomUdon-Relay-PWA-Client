@@ -14,6 +14,7 @@
   "tx_codec_pcm": "pcm",
   "tx_codec_codec2": "codec2",
   "tx_codec_opus": "opus",
+  "qos_enabled": "Network QoS (DSCP EF)",
   "uplink_opus_optional": "opus (optional)",
   "pcm_only": "PCM only (no Web-side encode)",
   "connect": "Connect",

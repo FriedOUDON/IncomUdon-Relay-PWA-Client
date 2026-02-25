@@ -217,6 +217,7 @@ is incompatible.
 - `Transmit Bitrate`:
   - For `codec2`/`pcm`: `450`, `700`, `1600`, `2400`, `3200`
   - For `opus`: `6000`, `8000`, `12000`, `16000`, `20000`, `64000`, `96000`, `128000`
+- `Network QoS (DSCP EF)`: `On` / `Off` (default `On`)
 - `TX Codec` options are automatically filtered by server runtime library availability.
   - `codec2` is shown only when `libcodec2` is available.
   - `opus` is shown only when `libopus` is available.
@@ -225,6 +226,8 @@ Behavior:
 
 - If browser Opus encoder/decoder is unavailable, browser side falls back to `pcm`.
 - If server-side `libopus` cannot be loaded, `pwa_client` falls back to `pcm`.
+- QoS `On` requests DSCP EF marking on the server-side UDP socket (Linux runtime).
+  - If the OS/network does not allow it, a warning is logged and communication continues.
 
 ## Nginx Reverse Proxy (HTTPS)
 
