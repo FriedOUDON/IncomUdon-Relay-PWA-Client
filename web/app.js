@@ -14,6 +14,7 @@
   const txCodecOpus = "opus";
   const codec2BitrateOptions = [450, 700, 1600, 2400, 3200];
   const opusBitrateOptions = [6000, 8000, 12000, 16000, 20000, 64000, 96000, 128000];
+  const settingsReconnectDebounceMs = 350;
 
   const ui = {
     titleMain: document.getElementById("titleMain"),
@@ -148,6 +149,7 @@
     log_audio_tx_aborted: "audio file TX aborted",
     log_audio_tx_failed: "audio file TX failed (slot {index}): {error}",
     log_audio_tx_ptt_active: "audio file TX is blocked while PTT is active",
+    log_reconnecting_settings: "settings changed; reconnecting to apply updates",
     mic_insecure_context: "microphone API is unavailable on insecure context (use HTTPS or localhost)",
     mic_not_supported: "microphone API is not supported by this browser",
     opus_decoder_not_supported: "WebCodecs AudioDecoder is not supported for Opus downlink",
@@ -213,6 +215,7 @@
       host: "",
       port: 0,
     },
+    settingsReconnectTimer: null,
   };
   const senderIDMin = 1;
   const senderIDMax = 0x7fffffff;
@@ -358,6 +361,7 @@
   }
 
   ui.connectBtn.addEventListener("click", () => {
+    clearPendingSettingsReconnect();
     persistFormSettings();
     connectRelay().catch((err) => {
       appendLog(t("log_connect_failed", { error: err.message || err }), "error");
@@ -366,6 +370,7 @@
   });
 
   ui.disconnectBtn.addEventListener("click", () => {
+    clearPendingSettingsReconnect();
     disconnectRelay();
   });
 
@@ -826,6 +831,7 @@
   }
 
   function applyDisconnectedState() {
+    clearPendingSettingsReconnect();
     state.connected = false;
     cancelAudioTxTask(false);
     setPTT(false, false);
@@ -990,6 +996,27 @@
       element.addEventListener("change", persistFormSettings);
     });
 
+    const reconnectTargets = [
+      ui.relayHost,
+      ui.relayPort,
+      ui.channelId,
+      ui.senderId,
+      ui.password,
+      ui.cryptoMode,
+      ui.codecMode,
+      ui.browserCodec,
+      ui.txCodec,
+      ui.qosEnabled,
+      ui.codec2Lib,
+      ui.opusLib,
+    ];
+    reconnectTargets.forEach((element) => {
+      if (!element) {
+        return;
+      }
+      element.addEventListener("change", scheduleSettingsReconnect);
+    });
+
     if (ui.senderId && !ui.senderId.dataset.normalizeBound) {
       ui.senderId.dataset.normalizeBound = "1";
       ui.senderId.addEventListener("blur", () => {
@@ -997,6 +1024,33 @@
         persistFormSettings();
       });
     }
+  }
+
+  function clearPendingSettingsReconnect() {
+    if (!state.settingsReconnectTimer) {
+      return;
+    }
+    window.clearTimeout(state.settingsReconnectTimer);
+    state.settingsReconnectTimer = null;
+  }
+
+  function scheduleSettingsReconnect() {
+    if (!state.connected || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    clearPendingSettingsReconnect();
+    state.settingsReconnectTimer = window.setTimeout(() => {
+      state.settingsReconnectTimer = null;
+      if (!state.connected || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      appendLog(t("log_reconnecting_settings"), "warn");
+      disconnectRelay();
+      connectRelay().catch((err) => {
+        appendLog(t("log_connect_failed", { error: err.message || err }), "error");
+        applyDisconnectedState();
+      });
+    }, settingsReconnectDebounceMs);
   }
 
   function readStoredSettings() {

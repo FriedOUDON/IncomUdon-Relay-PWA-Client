@@ -80,6 +80,7 @@
   "log_audio_tx_aborted": "audio file TX aborted",
   "log_audio_tx_failed": "audio file TX failed (slot {index}): {error}",
   "log_audio_tx_ptt_active": "audio file TX is blocked while PTT is active",
+  "log_reconnecting_settings": "settings changed; reconnecting to apply updates",
   "mic_insecure_context": "microphone API is unavailable on insecure context (use HTTPS or localhost)",
   "mic_not_supported": "microphone API is not supported by this browser",
   "opus_decoder_not_supported": "WebCodecs AudioDecoder is not supported for Opus downlink",

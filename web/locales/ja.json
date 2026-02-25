@@ -80,6 +80,7 @@
   "log_audio_tx_aborted": "音源送信を中断しました",
   "log_audio_tx_failed": "音源送信に失敗しました（スロット {index}）: {error}",
   "log_audio_tx_ptt_active": "PTT送信中のため音源送信を開始できません",
+  "log_reconnecting_settings": "設定変更を反映するため再接続しています",
   "mic_insecure_context": "非セキュアコンテキストではマイク API は使えません（HTTPS または localhost を使用してください）",
   "mic_not_supported": "このブラウザはマイク API に対応していません",
   "opus_decoder_not_supported": "このブラウザは Opus 下りの WebCodecs AudioDecoder に対応していません",
