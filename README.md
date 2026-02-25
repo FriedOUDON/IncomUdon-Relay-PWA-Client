@@ -108,6 +108,18 @@ Browser Opus requires `WebCodecs AudioEncoder` (uplink) and `WebCodecs AudioDeco
 | OIDC | `-auth-mode oidc` + OIDC settings | pages, assets, WebSocket | centralized SSO, user lifecycle control | requires IdP/client setup |
 | WebSocket token (additional gate) | `-ws-token` | WebSocket handshake | easy extra barrier | shared secret model; combine with Basic/OIDC |
 
+## API Specifications
+
+- OpenAPI (HTTP endpoints + WebSocket handshake):
+  - `pwa_client/docs/openapi.yaml`
+- AsyncAPI (WebSocket messages, JSON commands/events, binary audio frames):
+  - `pwa_client/docs/asyncapi.yaml`
+
+Scope split:
+
+- `openapi.yaml` covers HTTP routes (`/auth/*`, `/ws` handshake, `/` entry).
+- `asyncapi.yaml` covers runtime WebSocket payload protocol (`connect/disconnect/ptt/...` and PCM/Opus frame types).
+
 ### Basic Example
 
 ```bash

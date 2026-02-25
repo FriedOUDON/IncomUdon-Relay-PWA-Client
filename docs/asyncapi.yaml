@@ -1,0 +1,374 @@
+asyncapi: 2.6.0
+info:
+  title: IncomUdon Relay PWA Client WebSocket API
+  version: 1.0.0
+  description: |
+    WebSocket message protocol used between browser UI and `pwa_client`.
+
+    - Endpoint: `/ws` (or `{basePath}/ws` when `-base-path` is configured)
+    - Transport: WebSocket text frames (JSON) + binary frames (PCM/Opus audio)
+defaultContentType: application/json
+servers:
+  local:
+    url: localhost:8080{basePath}
+    protocol: ws
+    description: Local development
+    variables:
+      basePath:
+        default: ""
+        description: Use empty for root deployment, e.g. `/incomudon` for prefixed route.
+  production:
+    url: example.com{basePath}
+    protocol: wss
+    description: Reverse-proxy deployment
+    variables:
+      basePath:
+        default: ""
+channels:
+  /ws:
+    description: WebSocket endpoint for command/event and audio frame exchange.
+    bindings:
+      ws:
+        method: GET
+        query:
+          type: object
+          properties:
+            token:
+              type: string
+              description: Optional shared token (`-ws-token`).
+            ws_token:
+              type: string
+              description: Backward-compatible alias of `token`.
+    publish:
+      operationId: browserSend
+      summary: Browser -> pwa_client
+      message:
+        oneOf:
+          - $ref: "#/components/messages/ConnectCommandMessage"
+          - $ref: "#/components/messages/DisconnectCommandMessage"
+          - $ref: "#/components/messages/PTTCommandMessage"
+          - $ref: "#/components/messages/SetCodecCommandMessage"
+          - $ref: "#/components/messages/ClientBinaryPCMMessage"
+          - $ref: "#/components/messages/ClientBinaryOpusMessage"
+    subscribe:
+      operationId: browserReceive
+      summary: pwa_client -> Browser
+      message:
+        oneOf:
+          - $ref: "#/components/messages/ReadyEventMessage"
+          - $ref: "#/components/messages/ConnectedEventMessage"
+          - $ref: "#/components/messages/DisconnectedEventMessage"
+          - $ref: "#/components/messages/TalkerEventMessage"
+          - $ref: "#/components/messages/PeerCodecEventMessage"
+          - $ref: "#/components/messages/StatusEventMessage"
+          - $ref: "#/components/messages/ServerBinaryPCMMessage"
+          - $ref: "#/components/messages/ServerBinaryOpusMessage"
+components:
+  messages:
+    ConnectCommandMessage:
+      name: ConnectCommand
+      title: Connect command
+      payload:
+        $ref: "#/components/schemas/ConnectCommand"
+      examples:
+        - payload:
+            type: connect
+            relayHost: 192.0.2.10
+            relayPort: 50000
+            channelId: 1
+            senderId: 123456789
+            password: ""
+            cryptoMode: aes-gcm
+            codecMode: 1600
+            txCodec: codec2
+            uplinkCodec: opus
+            downlinkCodec: opus
+            qosEnabled: true
+    DisconnectCommandMessage:
+      name: DisconnectCommand
+      title: Disconnect command
+      payload:
+        $ref: "#/components/schemas/DisconnectCommand"
+    PTTCommandMessage:
+      name: PTTCommand
+      title: Push-to-talk command
+      payload:
+        $ref: "#/components/schemas/PTTCommand"
+      examples:
+        - payload:
+            type: ptt
+            pressed: true
+    SetCodecCommandMessage:
+      name: SetCodecCommand
+      title: Runtime codec update command (legacy/optional)
+      payload:
+        $ref: "#/components/schemas/SetCodecCommand"
+    ReadyEventMessage:
+      name: ReadyEvent
+      title: Ready event
+      payload:
+        $ref: "#/components/schemas/ReadyEvent"
+    ConnectedEventMessage:
+      name: ConnectedEvent
+      title: Connected event
+      payload:
+        $ref: "#/components/schemas/ConnectedEvent"
+      examples:
+        - payload:
+            type: connected
+            message: relay session started
+            relayHost: 192.0.2.10
+            relayPort: 50000
+            channelId: 1
+            senderId: 123456789
+            cryptoMode: aes-gcm
+            codecMode: 1600
+            txCodec: codec2
+            uplinkCodec: opus
+            downlinkCodec: opus
+            codec2Ready: true
+            opusReady: true
+    DisconnectedEventMessage:
+      name: DisconnectedEvent
+      title: Disconnected event
+      payload:
+        $ref: "#/components/schemas/DisconnectedEvent"
+    TalkerEventMessage:
+      name: TalkerEvent
+      title: Talker state event
+      payload:
+        $ref: "#/components/schemas/TalkerEvent"
+    PeerCodecEventMessage:
+      name: PeerCodecEvent
+      title: Peer codec event
+      payload:
+        $ref: "#/components/schemas/PeerCodecEvent"
+    StatusEventMessage:
+      name: StatusEvent
+      title: Status/log event
+      payload:
+        $ref: "#/components/schemas/StatusEvent"
+    ClientBinaryPCMMessage:
+      name: ClientBinaryPCM
+      title: Browser PCM binary frame
+      contentType: application/octet-stream
+      payload:
+        type: string
+        format: binary
+        description: |
+          Binary frame format:
+          - Byte 0: `0x01` (`clientBinaryAudio`)
+          - Bytes 1..N: 8kHz mono PCM16 little-endian payload
+    ClientBinaryOpusMessage:
+      name: ClientBinaryOpus
+      title: Browser Opus binary frame
+      contentType: application/octet-stream
+      payload:
+        type: string
+        format: binary
+        description: |
+          Binary frame format:
+          - Byte 0: `0x02` (`clientBinaryOpus`)
+          - Bytes 1..N: Opus packet payload
+    ServerBinaryPCMMessage:
+      name: ServerBinaryPCM
+      title: Server PCM binary frame
+      contentType: application/octet-stream
+      payload:
+        type: string
+        format: binary
+        description: |
+          Binary frame format:
+          - Byte 0: `0x11` (`serverBinaryAudio`)
+          - Bytes 1..N: 8kHz mono PCM16 little-endian payload
+    ServerBinaryOpusMessage:
+      name: ServerBinaryOpus
+      title: Server Opus binary frame
+      contentType: application/octet-stream
+      payload:
+        type: string
+        format: binary
+        description: |
+          Binary frame format:
+          - Byte 0: `0x12` (`serverBinaryOpus`)
+          - Bytes 1..N: Opus packet payload
+  schemas:
+    ConnectCommand:
+      type: object
+      required: [type, channelId]
+      properties:
+        type:
+          type: string
+          enum: [connect]
+        relayHost:
+          type: string
+          description: Ignored when `-fixed-relay` is enabled.
+        relayPort:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        relayAddress:
+          type: string
+          description: Optional `host[:port]`, overrides relayHost/relayPort when provided.
+        channelId:
+          type: integer
+          minimum: 1
+        senderId:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: `0` means auto-generated by server.
+        password:
+          type: string
+        cryptoMode:
+          type: string
+          enum: [aes-gcm, legacy-xor, no-crypto]
+        codecMode:
+          type: integer
+        txCodec:
+          type: string
+          enum: [pcm, codec2, opus]
+        codec2Lib:
+          type: string
+        opusLib:
+          type: string
+        uplinkCodec:
+          type: string
+          enum: [pcm, opus]
+        downlinkCodec:
+          type: string
+          enum: [pcm, opus]
+        qosEnabled:
+          type: boolean
+        pcmOnly:
+          type: boolean
+          deprecated: true
+      additionalProperties: false
+    DisconnectCommand:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [disconnect]
+      additionalProperties: false
+    PTTCommand:
+      type: object
+      required: [type, pressed]
+      properties:
+        type:
+          type: string
+          enum: [ptt]
+        pressed:
+          type: boolean
+      additionalProperties: false
+    SetCodecCommand:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [set_codec]
+        codecMode:
+          type: integer
+        pcmOnly:
+          type: boolean
+      additionalProperties: false
+    ReadyEvent:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [ready]
+        message:
+          type: string
+      additionalProperties: true
+    ConnectedEvent:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [connected]
+        message:
+          type: string
+        relayHost:
+          type: string
+        relayPort:
+          type: integer
+        channelId:
+          type: integer
+        senderId:
+          type: integer
+        cryptoMode:
+          type: string
+        codecMode:
+          type: integer
+        txCodec:
+          type: string
+          enum: [pcm, codec2, opus]
+        pcmOnly:
+          type: boolean
+        qosEnabled:
+          type: boolean
+        uplinkCodec:
+          type: string
+          enum: [pcm, opus]
+        downlinkCodec:
+          type: string
+          enum: [pcm, opus]
+        codec2Ready:
+          type: boolean
+        opusReady:
+          type: boolean
+      additionalProperties: true
+    DisconnectedEvent:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [disconnected]
+        message:
+          type: string
+      additionalProperties: true
+    TalkerEvent:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [talker]
+        talkerId:
+          type: integer
+        talkAllowed:
+          type: boolean
+      additionalProperties: true
+    PeerCodecEvent:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [peer_codec]
+        senderId:
+          type: integer
+        codecMode:
+          type: integer
+        pcmOnly:
+          type: boolean
+      additionalProperties: true
+    StatusEvent:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [status]
+        level:
+          type: string
+          enum: [info, warn, error]
+        message:
+          type: string
+      additionalProperties: true

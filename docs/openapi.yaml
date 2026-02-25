@@ -1,0 +1,350 @@
+openapi: 3.1.0
+info:
+  title: IncomUdon Relay PWA Client HTTP API
+  version: 1.0.0
+  description: |
+    HTTP and WebSocket handshake endpoints exposed by `pwa_client`.
+
+    Notes:
+    - If `-base-path` is configured, all routes are served under that prefix.
+      Example: `/auth/check` -> `/incomudon/auth/check`.
+    - WebSocket message payloads are specified in `docs/asyncapi.yaml`.
+servers:
+  - url: https://example.com{basePath}
+    description: Reverse-proxy deployment
+    variables:
+      basePath:
+        default: /
+        description: |
+          Base path configured by `-base-path`.
+          Use `/` for root deployment, or `/incomudon` style for prefixed deployment.
+  - url: http://localhost:8080{basePath}
+    description: Local development
+    variables:
+      basePath:
+        default: /
+tags:
+  - name: UI
+  - name: Authentication
+  - name: WebSocket
+paths:
+  /:
+    get:
+      tags: [UI]
+      summary: PWA entry point
+      description: |
+        Serves `index.html` (or static assets if a specific file path is requested).
+        Access control depends on `-auth-mode`.
+      responses:
+        "200":
+          description: HTML response
+          content:
+            text/html:
+              schema:
+                type: string
+        "401":
+          description: Unauthorized (Basic/OIDC session required)
+        "500":
+          description: Template rendering error
+  /ws:
+    get:
+      tags: [WebSocket]
+      summary: WebSocket endpoint
+      description: |
+        Upgrades to WebSocket. Browser/client commands and events are exchanged on this socket.
+
+        Optional token gate (`-ws-token`) accepts token from:
+        - query `token`
+        - query `ws_token`
+        - header `X-Incomudon-WS-Token`
+        - header `Authorization: Bearer <token>`
+
+        Message-level protocol is defined in `docs/asyncapi.yaml`.
+      parameters:
+        - name: token
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Preferred query parameter for `-ws-token`.
+        - name: ws_token
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Backward-compatible query parameter for `-ws-token`.
+        - name: X-Incomudon-WS-Token
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Alternative header for `-ws-token`.
+      responses:
+        "101":
+          description: Switching Protocols (WebSocket established)
+        "401":
+          description: Unauthorized (auth mode and/or ws token mismatch)
+  /auth/check:
+    get:
+      tags: [Authentication]
+      summary: Check current authentication session
+      description: |
+        Returns `204` when current request is authorized under configured `-auth-mode`.
+      responses:
+        "204":
+          description: Authorized
+        "401":
+          description: Unauthorized
+  /auth/logout:
+    get:
+      tags: [Authentication]
+      summary: Logout current user/session
+      description: |
+        Behavior depends on `-auth-mode`:
+        - `none`: redirects to home.
+        - `basic`: responds `401` with `WWW-Authenticate` to force re-auth.
+        - `oidc`: clears signed cookies and redirects to home.
+      responses:
+        "302":
+          description: Redirect to home (`none` / `oidc`)
+        "401":
+          description: Basic-auth logout response
+  /auth/login:
+    get:
+      tags: [Authentication]
+      summary: Start OIDC login flow
+      description: |
+        OIDC only (`-auth-mode oidc`).
+        Generates state/nonce cookie then redirects to IdP authorization endpoint.
+      parameters:
+        - name: next
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Post-login redirect target path (sanitized server-side).
+      responses:
+        "302":
+          description: Redirect to IdP authorization endpoint
+        "404":
+          description: Not available when auth mode is not OIDC
+        "405":
+          description: Method not allowed
+        "500":
+          description: Failed to create/persist OIDC state
+  /auth/callback:
+    get:
+      tags: [Authentication]
+      summary: OIDC callback endpoint
+      description: |
+        OIDC only (`-auth-mode oidc`).
+        Exchanges authorization code, verifies ID token, then sets signed session cookie.
+      parameters:
+        - name: code
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: error
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "302":
+          description: Authentication succeeded and redirected to app path
+        "401":
+          description: OIDC validation/exchange failure
+        "404":
+          description: Not available when auth mode is not OIDC
+        "405":
+          description: Method not allowed
+        "500":
+          description: Session persistence/internal error
+components:
+  schemas:
+    ClientCommand:
+      description: JSON command sent from browser to `/ws`.
+      oneOf:
+        - $ref: "#/components/schemas/ConnectCommand"
+        - $ref: "#/components/schemas/DisconnectCommand"
+        - $ref: "#/components/schemas/PTTCommand"
+        - $ref: "#/components/schemas/SetCodecCommand"
+    ConnectCommand:
+      type: object
+      required: [type, channelId]
+      properties:
+        type:
+          type: string
+          enum: [connect]
+        relayHost:
+          type: string
+          description: Ignored when `-fixed-relay` is enabled.
+          default: 127.0.0.1
+        relayPort:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          default: 50000
+        relayAddress:
+          type: string
+          description: Optional `host[:port]`. Overrides relayHost/relayPort when provided.
+        channelId:
+          type: integer
+          minimum: 1
+        senderId:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: `0` means auto-generated by server.
+        password:
+          type: string
+        cryptoMode:
+          type: string
+          enum: [aes-gcm, legacy-xor, no-crypto]
+          default: aes-gcm
+        codecMode:
+          type: integer
+          description: |
+            Codec2 mode or Opus bitrate, interpreted by `txCodec`.
+            Defaults to 2400 when omitted/0.
+        txCodec:
+          type: string
+          enum: [pcm, codec2, opus]
+        codec2Lib:
+          type: string
+          description: Optional server-side dynamic library path.
+        opusLib:
+          type: string
+          description: Optional server-side dynamic library path.
+        uplinkCodec:
+          type: string
+          enum: [pcm, opus]
+          description: Browser -> server transport codec.
+        downlinkCodec:
+          type: string
+          enum: [pcm, opus]
+          description: Server -> browser transport codec.
+        qosEnabled:
+          type: boolean
+          default: true
+        pcmOnly:
+          type: boolean
+          deprecated: true
+          description: Legacy compatibility flag.
+      additionalProperties: false
+    DisconnectCommand:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [disconnect]
+      additionalProperties: false
+    PTTCommand:
+      type: object
+      required: [type, pressed]
+      properties:
+        type:
+          type: string
+          enum: [ptt]
+        pressed:
+          type: boolean
+      additionalProperties: false
+    SetCodecCommand:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [set_codec]
+        codecMode:
+          type: integer
+        pcmOnly:
+          type: boolean
+      additionalProperties: false
+    ServerEvent:
+      description: JSON event sent from server to browser on `/ws`.
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [ready, connected, disconnected, talker, peer_codec, status]
+        level:
+          type: string
+          enum: [info, warn, error]
+        message:
+          type: string
+        channelId:
+          type: integer
+        senderId:
+          type: integer
+        talkerId:
+          type: integer
+        talkAllowed:
+          type: boolean
+        relayHost:
+          type: string
+        relayPort:
+          type: integer
+        cryptoMode:
+          type: string
+        codecMode:
+          type: integer
+        txCodec:
+          type: string
+          enum: [pcm, codec2, opus]
+        pcmOnly:
+          type: boolean
+        qosEnabled:
+          type: boolean
+        uplinkCodec:
+          type: string
+          enum: [pcm, opus]
+        downlinkCodec:
+          type: string
+          enum: [pcm, opus]
+        codec2Ready:
+          type: boolean
+        opusReady:
+          type: boolean
+  examples:
+    ConnectCommandExample:
+      summary: Connect command
+      value:
+        type: connect
+        relayHost: 192.0.2.10
+        relayPort: 50000
+        channelId: 1
+        senderId: 123456789
+        password: ""
+        cryptoMode: aes-gcm
+        codecMode: 1600
+        txCodec: codec2
+        uplinkCodec: opus
+        downlinkCodec: opus
+        qosEnabled: true
+    ConnectedEventExample:
+      summary: Connected event
+      value:
+        type: connected
+        message: relay session started
+        relayHost: 192.0.2.10
+        relayPort: 50000
+        channelId: 1
+        senderId: 123456789
+        cryptoMode: aes-gcm
+        codecMode: 1600
+        txCodec: codec2
+        pcmOnly: false
+        qosEnabled: true
+        uplinkCodec: opus
+        downlinkCodec: opus
+        codec2Ready: true
+        opusReady: true
