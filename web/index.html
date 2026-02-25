@@ -86,36 +86,40 @@
             </div>
           </div>
           <div class="settings-group">
-            <h2 id="headingAdvancedSettings" class="settings-group-title">Advanced Settings</h2>
-            <div class="connect-grid connect-grid-advanced">
-              <label>
-                <span id="labelRelayHost">Relay Host</span>
-                <input id="relayHost" type="text" value="" autocomplete="off" spellcheck="false">
-              </label>
-              <label>
-                <span id="labelRelayPort">Relay Port</span>
-                <input id="relayPort" type="number" value="50000" min="1" max="65535">
-              </label>
-              <label>
-                <span id="labelCryptoMode">Crypto Mode</span>
-                <select id="cryptoMode">
-                  <option value="aes-gcm" selected>aes-gcm</option>
-                  <option value="legacy-xor">legacy-xor</option>
-                  <option value="no-crypto">no-crypto</option>
-                </select>
-              </label>
-              <label>
-                <span id="labelBrowserCodec">Browser Codec</span>
-                <select id="browserCodec">
-                  <option id="optionBrowserCodecPcm" value="pcm">pcm</option>
-                  <option id="optionBrowserCodecOpus" value="opus" selected>opus (optional)</option>
-                </select>
-              </label>
-              <label class="checkbox-row">
-                <input id="qosEnabled" type="checkbox" checked>
-                <span id="labelQosEnabled">Network QoS (DSCP EF)</span>
-              </label>
-            </div>
+            <details class="settings-details">
+              <summary class="settings-summary">
+                <h2 id="headingAdvancedSettings" class="settings-group-title">Advanced Settings</h2>
+              </summary>
+              <div class="connect-grid connect-grid-advanced">
+                <label>
+                  <span id="labelRelayHost">Relay Host</span>
+                  <input id="relayHost" type="text" value="" autocomplete="off" spellcheck="false">
+                </label>
+                <label>
+                  <span id="labelRelayPort">Relay Port</span>
+                  <input id="relayPort" type="number" value="50000" min="1" max="65535">
+                </label>
+                <label>
+                  <span id="labelCryptoMode">Crypto Mode</span>
+                  <select id="cryptoMode">
+                    <option value="aes-gcm" selected>aes-gcm</option>
+                    <option value="legacy-xor">legacy-xor</option>
+                    <option value="no-crypto">no-crypto</option>
+                  </select>
+                </label>
+                <label>
+                  <span id="labelBrowserCodec">Browser Codec</span>
+                  <select id="browserCodec">
+                    <option id="optionBrowserCodecPcm" value="pcm">pcm</option>
+                    <option id="optionBrowserCodecOpus" value="opus" selected>opus (optional)</option>
+                  </select>
+                </label>
+                <label class="checkbox-row">
+                  <input id="qosEnabled" type="checkbox" checked>
+                  <span id="labelQosEnabled">Network QoS (DSCP EF)</span>
+                </label>
+              </div>
+            </details>
             <input id="pcmOnly" type="checkbox" checked hidden>
           </div>
         </div>
