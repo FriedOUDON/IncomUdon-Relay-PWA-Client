@@ -231,6 +231,8 @@
       port: 0,
     },
     settingsReconnectTimer: null,
+    startupAutoConnectAttempted: false,
+    startupLegacyPlainPassword: "",
   };
   const senderIDMin = 1;
   const senderIDMax = 0x7fffffff;
@@ -240,7 +242,11 @@
   bindCueControls();
   bindAudioTxControls();
   configureAuthUI();
-  initI18n();
+  initI18n()
+    .catch(() => {})
+    .finally(() => {
+      maybeAutoConnectOnStartup().catch(() => {});
+    });
 
   function sendPcmFrame(frame) {
     enqueueUplinkPacket(0x01, frame);
@@ -1069,6 +1075,9 @@
       merged.relayHost = defaults.relayHost;
     }
     merged.passwordHash = normalizePasswordHashToken(merged.passwordHash || merged.password);
+    if (!merged.passwordHash && typeof merged.password === "string" && merged.password.length > 0) {
+      state.startupLegacyPlainPassword = merged.password;
+    }
     merged.senderId = String(normalizeSenderID(merged.senderId, true));
     if (!merged.codecMode) {
       merged.codecMode = defaults.codecMode;
@@ -1203,6 +1212,69 @@
       ui.password.addEventListener("blur", () => {
         applyPasswordInputPresentation();
       });
+    }
+  }
+
+  function hasAutoConnectConfig() {
+    const relayHost = fixedRelayEnabled
+      ? effectiveFixedRelayHost()
+      : String(ui.relayHost ? ui.relayHost.value : "").trim();
+    const relayPort = fixedRelayEnabled
+      ? Number(effectiveFixedRelayPort())
+      : Number.parseInt(String(ui.relayPort ? ui.relayPort.value : "").trim(), 10);
+    const channelID = Number.parseInt(String(ui.channelId ? ui.channelId.value : "").trim(), 10);
+    const passwordHash = normalizePasswordHashToken(state.passwordHash);
+    return (
+      relayHost !== "" &&
+      Number.isFinite(relayPort) &&
+      relayPort > 0 &&
+      Number.isInteger(channelID) &&
+      channelID > 0 &&
+      passwordHash !== ""
+    );
+  }
+
+  async function ensureAutoConnectPasswordHash() {
+    state.passwordHash = normalizePasswordHashToken(state.passwordHash);
+    if (state.passwordHash) {
+      return true;
+    }
+
+    let legacyPlain = String(state.startupLegacyPlainPassword || "");
+    if (!legacyPlain) {
+      const stored = readStoredSettings();
+      if (stored && typeof stored.password === "string") {
+        legacyPlain = stored.password;
+      }
+    }
+    if (!legacyPlain) {
+      return false;
+    }
+
+    const hashHex = await sha256Hex(legacyPlain);
+    state.passwordHash = `${passwordHashPrefix}${hashHex}`;
+    state.startupLegacyPlainPassword = "";
+    applyPasswordInputPresentation();
+    persistFormSettings();
+    return true;
+  }
+
+  async function maybeAutoConnectOnStartup() {
+    if (state.startupAutoConnectAttempted) {
+      return;
+    }
+    state.startupAutoConnectAttempted = true;
+    await ensureAutoConnectPasswordHash();
+    if (!hasAutoConnectConfig()) {
+      return;
+    }
+    clearPendingSettingsReconnect();
+    persistFormSettings();
+    try {
+      await connectRelay();
+    } catch (err) {
+      appendLog(t("log_connect_failed", { error: err && err.message ? err.message : String(err) }), "error");
+      applyDisconnectedState();
     }
   }
 
