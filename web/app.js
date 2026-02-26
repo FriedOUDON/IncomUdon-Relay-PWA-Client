@@ -29,6 +29,7 @@
     browserCodec: document.getElementById("browserCodec"),
     txCodec: document.getElementById("txCodec"),
     qosEnabled: document.getElementById("qosEnabled"),
+    fecEnabled: document.getElementById("fecEnabled"),
     optionTxCodecPcm: document.getElementById("optionTxCodecPcm"),
     optionTxCodecCodec2: document.getElementById("optionTxCodecCodec2"),
     optionTxCodecOpus: document.getElementById("optionTxCodecOpus"),
@@ -85,6 +86,7 @@
     tx_codec_codec2: "codec2",
     tx_codec_opus: "opus",
     qos_enabled: "Network QoS (DSCP EF)",
+    fec_enabled: "TX FEC (RS 2-loss)",
     uplink_opus_optional: "opus (optional)",
     pcm_only: "PCM only (no Web-side encode)",
     connect: "Connect",
@@ -93,6 +95,7 @@
     connection: "Connection",
     talker: "Talker",
     hold_to_talk: "Hold to Talk (Space)",
+    hold_to_talk_remaining: "Hold to Talk ({seconds}s left)",
     cue_sounds: "Cue Sounds",
     cue_ptt_on: "PTT ON Cue",
     cue_ptt_off: "PTT OFF Cue",
@@ -125,6 +128,8 @@
     log_auth_session_required: "authentication session is missing or expired; please sign in again",
     log_basic_auth_required: "basic authentication is required; reload the page and authenticate",
     log_browser_codec_opus: "browser codec: opus (uplink/downlink)",
+    log_browser_opus_uplink_bitrate: "browser uplink opus bitrate: {bitrateKbps} kbps",
+    log_browser_opus_uplink_bitrate_fallback: "browser uplink opus bitrate fallback: requested {requestedKbps} kbps, using {effectiveKbps} kbps",
     log_opus_fallback_pcm: "opus unavailable, fallback to pcm: {error}",
     log_downlink_opus_fallback_pcm: "opus decoder unavailable, fallback to pcm: {error}",
     log_downlink_opus_decode_failed: "opus downlink decode failed: {error}",
@@ -149,6 +154,7 @@
     log_audio_tx_aborted: "audio file TX aborted",
     log_audio_tx_failed: "audio file TX failed (slot {index}): {error}",
     log_audio_tx_ptt_active: "audio file TX is blocked while PTT is active",
+    log_tx_timeout_forced_off: "TX timed out; forcing PTT off",
     log_reconnecting_settings: "settings changed; reconnecting to apply updates",
     mic_insecure_context: "microphone API is unavailable on insecure context (use HTTPS or localhost)",
     mic_not_supported: "microphone API is not supported by this browser",
@@ -210,6 +216,10 @@
     selfSenderId: 0,
     talkerId: 0,
     talkAllowed: false,
+    serverTalkTimeoutSec: 0,
+    txTimeoutRemainingSec: 0,
+    txTimeoutDeadlineMs: 0,
+    txTimeoutTicker: null,
     connectionView: {
       kind: "offline",
       host: "",
@@ -469,6 +479,29 @@
     }
   }
 
+  async function checkAuthSessionAfterUnexpectedClose() {
+    if (!supportsAuthLogout()) {
+      return;
+    }
+    try {
+      const response = await fetch(authCheckURL(), {
+        method: "GET",
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+      if (response.status !== 401) {
+        return;
+      }
+      if (authMode === "oidc") {
+        appendLog(t("log_auth_session_required"), "warn");
+      } else if (authMode === "basic") {
+        appendLog(t("log_basic_auth_required"), "warn");
+      }
+    } catch (_) {
+      // Network or background throttling errors are not treated as auth failures.
+    }
+  }
+
   function authLogoutURL() {
     return basePath ? `${basePath}/auth/logout` : "/auth/logout";
   }
@@ -512,6 +545,13 @@
     ws.onopen = async () => {
       appendLog(t("log_ws_opened"), "info");
       state.micPermissionDenied = false;
+      const safeSenderID = canonicalizeSenderIDField();
+      const selectedTxCodec = sanitizeSelectedTxCodec();
+      const selectedCodecMode = normalizeBitrateForTxCodec(ui.codecMode ? ui.codecMode.value : 0, selectedTxCodec);
+      if (ui.codecMode) {
+        ui.codecMode.value = String(selectedCodecMode);
+      }
+      const browserOpusUplinkBitrate = resolveBrowserUplinkOpusBitrate(selectedTxCodec, selectedCodecMode);
 
       state.browserCodec = normalizeBrowserCodec(ui.browserCodec.value);
       state.uplinkCodec = state.browserCodec;
@@ -523,7 +563,7 @@
         let fallbackReason = "";
 
         try {
-          state.opusEncoder = new OpusUplinkEncoder(sendOpusFrame);
+          state.opusEncoder = new OpusUplinkEncoder(sendOpusFrame, browserOpusUplinkBitrate);
           await state.opusEncoder.start();
         } catch (err) {
           opusReady = false;
@@ -550,6 +590,21 @@
         }
 
         if (opusReady) {
+          const effectiveUplinkBitrate = state.opusEncoder
+            ? state.opusEncoder.getConfiguredBitrate()
+            : browserOpusUplinkBitrate;
+          if (state.uplinkCodec === "opus" && selectedTxCodec === txCodecOpus) {
+            if (effectiveUplinkBitrate !== browserOpusUplinkBitrate) {
+              appendLog(t("log_browser_opus_uplink_bitrate_fallback", {
+                requestedKbps: formatBitrateKbps(browserOpusUplinkBitrate),
+                effectiveKbps: formatBitrateKbps(effectiveUplinkBitrate),
+              }), "warn");
+            } else {
+              appendLog(t("log_browser_opus_uplink_bitrate", {
+                bitrateKbps: formatBitrateKbps(effectiveUplinkBitrate),
+              }), "info");
+            }
+          }
           appendLog(t("log_browser_codec_opus"), "info");
         } else {
           if (state.opusEncoder) {
@@ -578,8 +633,6 @@
         }
       }
 
-      const safeSenderID = canonicalizeSenderIDField();
-      const selectedTxCodec = sanitizeSelectedTxCodec();
       persistFormSettings();
 
       sendCommand({
@@ -590,9 +643,10 @@
         senderId: safeSenderID,
         password: ui.password.value,
         cryptoMode: ui.cryptoMode.value,
-        codecMode: Number(ui.codecMode.value),
+        codecMode: selectedCodecMode,
         txCodec: selectedTxCodec,
         qosEnabled: ui.qosEnabled ? !!ui.qosEnabled.checked : true,
+        fecEnabled: ui.fecEnabled ? !!ui.fecEnabled.checked : true,
         codec2Lib: ui.codec2Lib.value.trim(),
         opusLib: ui.opusLib.value.trim(),
         uplinkCodec: state.browserCodec,
@@ -636,11 +690,7 @@
         appendLog(t("log_ws_auth_required"), "error");
       }
       if (event && Number(event.code) === 1006 && supportsAuthLogout()) {
-        if (authMode === "oidc") {
-          appendLog(t("log_auth_session_required"), "warn");
-        } else if (authMode === "basic") {
-          appendLog(t("log_basic_auth_required"), "warn");
-        }
+        void checkAuthSessionAfterUnexpectedClose();
       }
       if (event && Number(event.code) && Number(event.code) !== 1000) {
         appendLog(`${t("log_ws_closed")} (code=${event.code})`, "warn");
@@ -715,6 +765,8 @@
     if (event.type === "connected") {
       state.connected = true;
       state.selfSenderId = Number(event.senderId || 0);
+      state.serverTalkTimeoutSec = 0;
+      stopTxTimeoutCountdown();
       state.connectionView.host = event.relayHost || "";
       state.connectionView.port = Number(event.relayPort || 0);
       ui.connectBtn.disabled = true;
@@ -736,6 +788,9 @@
       }
       if (typeof event.qosEnabled === "boolean" && ui.qosEnabled) {
         ui.qosEnabled.checked = event.qosEnabled;
+      }
+      if (typeof event.fecEnabled === "boolean" && ui.fecEnabled) {
+        ui.fecEnabled.checked = event.fecEnabled;
       }
       ui.pcmOnly.checked = connectedTxCodec === txCodecPCM;
       sanitizeSelectedTxCodec(event.codecMode);
@@ -773,6 +828,13 @@
       return;
     }
 
+    if (event.type === "server_config") {
+      const nextTimeout = Math.max(0, Number(event.talkTimeoutSec || 0));
+      state.serverTalkTimeoutSec = Number.isFinite(nextTimeout) ? nextTimeout : 0;
+      syncTxTimeoutCountdownState();
+      return;
+    }
+
     if (event.type === "disconnected") {
       appendLog(event.message || t("log_disconnected"), "warn");
       applyDisconnectedState();
@@ -782,12 +844,21 @@
     if (event.type === "talker") {
       const prevTalkerId = Number(state.talkerId || 0);
       const nextTalkerId = Number(event.talkerId || 0);
+      const localTalkTimedOut =
+        prevTalkerId === state.selfSenderId &&
+        nextTalkerId === 0 &&
+        state.pttPressed;
       const remoteTalkEnded =
         prevTalkerId !== 0 &&
         prevTalkerId !== state.selfSenderId &&
         nextTalkerId === 0;
 
       updateTalkerStatus(nextTalkerId, event.talkAllowed);
+
+      if (localTalkTimedOut) {
+        handleLocalTxTimeout();
+        return;
+      }
 
       if (remoteTalkEnded) {
         playCue("pttOff");
@@ -833,6 +904,8 @@
   function applyDisconnectedState() {
     clearPendingSettingsReconnect();
     state.connected = false;
+    state.serverTalkTimeoutSec = 0;
+    stopTxTimeoutCountdown();
     cancelAudioTxTask(false);
     setPTT(false, false);
     state.txQueue = [];
@@ -884,6 +957,7 @@
       browserCodec: "opus",
       txCodec: txCodecPCM,
       qosEnabled: true,
+      fecEnabled: true,
       codec2Lib: "",
       opusLib: "",
       pcmOnly: true,
@@ -949,6 +1023,9 @@
     if (ui.qosEnabled) {
       ui.qosEnabled.checked = merged.qosEnabled !== false;
     }
+    if (ui.fecEnabled) {
+      ui.fecEnabled.checked = merged.fecEnabled !== false;
+    }
     ui.codec2Lib.value = String(merged.codec2Lib || "");
     ui.opusLib.value = String(merged.opusLib || "");
     sanitizeSelectedTxCodec(merged.codecMode);
@@ -977,6 +1054,7 @@
       ui.browserCodec,
       ui.txCodec,
       ui.qosEnabled,
+      ui.fecEnabled,
       ui.codec2Lib,
       ui.opusLib,
       ui.cuePttOnEnabled,
@@ -1007,6 +1085,7 @@
       ui.browserCodec,
       ui.txCodec,
       ui.qosEnabled,
+      ui.fecEnabled,
       ui.codec2Lib,
       ui.opusLib,
     ];
@@ -1082,6 +1161,7 @@
       browserCodec: ui.browserCodec.value,
       txCodec: selectedTxCodec,
       qosEnabled: ui.qosEnabled ? !!ui.qosEnabled.checked : true,
+      fecEnabled: ui.fecEnabled ? !!ui.fecEnabled.checked : true,
       codec2Lib: ui.codec2Lib.value.trim(),
       opusLib: ui.opusLib.value.trim(),
       pcmOnly: selectedTxCodec === txCodecPCM,
@@ -1618,15 +1698,131 @@
   function updateTalkerStatus(talkerId, talkAllowed) {
     state.talkerId = Number(talkerId || 0);
     state.talkAllowed = !!talkAllowed;
+    syncTxTimeoutCountdownState();
     if (!ui.talkerStatus) {
       return;
     }
     if (state.talkerId === 0) {
       ui.talkerStatus.textContent = t("talker_none");
+      updatePttButtonLabel();
       return;
     }
     const talkerText = String(state.talkerId);
     ui.talkerStatus.textContent = state.talkAllowed ? `${talkerText} (${t("talker_you")})` : talkerText;
+    updatePttButtonLabel();
+  }
+
+  function clearTxTimeoutTicker() {
+    if (!state.txTimeoutTicker) {
+      return;
+    }
+    window.clearInterval(state.txTimeoutTicker);
+    state.txTimeoutTicker = null;
+  }
+
+  function isLocalTxActiveForTimeout() {
+    if (!state.connected) {
+      return false;
+    }
+    if (state.serverTalkTimeoutSec <= 0) {
+      return false;
+    }
+    if (!state.pttPressed || !state.talkAllowed) {
+      return false;
+    }
+    if (!state.selfSenderId) {
+      return false;
+    }
+    return state.talkerId === state.selfSenderId;
+  }
+
+  function updatePttButtonLabel() {
+    const label = document.getElementById("labelPttButton");
+    if (!label) {
+      return;
+    }
+    if (isLocalTxActiveForTimeout() && state.txTimeoutRemainingSec > 0) {
+      label.textContent = t("hold_to_talk_remaining", { seconds: state.txTimeoutRemainingSec });
+      return;
+    }
+    label.textContent = t("hold_to_talk");
+  }
+
+  function stopTxTimeoutCountdown() {
+    clearTxTimeoutTicker();
+    state.txTimeoutDeadlineMs = 0;
+    state.txTimeoutRemainingSec = 0;
+    updatePttButtonLabel();
+  }
+
+  function restartTxTimeoutCountdown() {
+    clearTxTimeoutTicker();
+    if (state.serverTalkTimeoutSec <= 0) {
+      stopTxTimeoutCountdown();
+      return;
+    }
+    const maxSec = Math.max(1, Math.trunc(state.serverTalkTimeoutSec));
+    state.txTimeoutDeadlineMs = Date.now() + (maxSec * 1000);
+    state.txTimeoutRemainingSec = maxSec;
+    updatePttButtonLabel();
+    state.txTimeoutTicker = window.setInterval(() => {
+      if (!isLocalTxActiveForTimeout()) {
+        stopTxTimeoutCountdown();
+        return;
+      }
+      const leftMs = state.txTimeoutDeadlineMs - Date.now();
+      const leftSec = Math.max(0, Math.ceil(leftMs / 1000));
+      if (leftSec !== state.txTimeoutRemainingSec) {
+        state.txTimeoutRemainingSec = leftSec;
+        updatePttButtonLabel();
+      }
+      if (leftMs <= 0) {
+        handleLocalTxTimeout();
+      }
+    }, 200);
+  }
+
+  function syncTxTimeoutCountdownState() {
+    if (!isLocalTxActiveForTimeout()) {
+      stopTxTimeoutCountdown();
+      return;
+    }
+    if (state.txTimeoutTicker) {
+      updatePttButtonLabel();
+      return;
+    }
+    restartTxTimeoutCountdown();
+  }
+
+  function forceStopTransmissionForTimeout() {
+    const task = state.audioTxTask;
+    if (task && task.timer) {
+      window.clearInterval(task.timer);
+      task.timer = null;
+    }
+    state.audioTxTask = null;
+    if (state.pttPressed) {
+      sendCommand({ type: "ptt", pressed: false });
+    }
+    state.pttPressed = false;
+    ui.pttButton.classList.remove("active");
+    state.txQueue = [];
+    stopTxLoop();
+    state.txFrameIndex = 0;
+    refreshPTTAvailability();
+    refreshAudioTxSlotsUI();
+    updatePttButtonLabel();
+  }
+
+  function handleLocalTxTimeout() {
+    if (!state.pttPressed && !state.audioTxTask) {
+      stopTxTimeoutCountdown();
+      return;
+    }
+    stopTxTimeoutCountdown();
+    playCue("carrier");
+    forceStopTransmissionForTimeout();
+    appendLog(t("log_tx_timeout_forced_off"), "warn");
   }
 
   function setConnectionView(next) {
@@ -1672,6 +1868,7 @@
     setText("labelBrowserCodec", t("browser_codec"));
     setText("labelTxCodec", t("tx_codec"));
     setText("labelQosEnabled", t("qos_enabled"));
+    setText("labelFecEnabled", t("fec_enabled"));
     setText("optionTxCodecPcm", t("tx_codec_pcm"));
     setText("optionTxCodecCodec2", t("tx_codec_codec2"));
     setText("optionTxCodecOpus", t("tx_codec_opus"));
@@ -1682,7 +1879,7 @@
     setText("logoutBtn", t("logout"));
     setText("labelConnection", t("connection"));
     setText("labelTalker", t("talker"));
-    setText("labelPttButton", t("hold_to_talk"));
+    updatePttButtonLabel();
     setText("headingCueSounds", t("cue_sounds"));
     setText("labelCuePttOn", t("cue_ptt_on"));
     setText("labelCuePttOff", t("cue_ptt_off"));
@@ -1938,6 +2135,22 @@
       value = opusBitrateToLegacyCodec2Mode(value);
     }
     return nearestBitrateOption(codec2BitrateOptions, value);
+  }
+
+  function formatBitrateKbps(value) {
+    const parsed = Number.parseInt(String(value), 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return "0";
+    }
+    const kbps = parsed / 1000;
+    return Number.isInteger(kbps) ? String(kbps) : kbps.toFixed(1);
+  }
+
+  function resolveBrowserUplinkOpusBitrate(txCodec, codecMode) {
+    if (normalizeTxCodec(txCodec) !== txCodecOpus) {
+      return 20000;
+    }
+    return normalizeBitrateForTxCodec(codecMode, txCodecOpus);
   }
 
   function syncCodecModeOptions(preferredValue) {
@@ -2226,22 +2439,25 @@
     });
   }
 
-  async function setPTT(pressed, emitCue = true) {
-    if (state.audioTxTask) {
+  async function setPTT(pressed, emitCue = true, force = false) {
+    if (state.audioTxTask && !force) {
       return;
     }
-    if (pressed && state.micPermissionDenied) {
+    if (pressed && state.micPermissionDenied && !force) {
       return;
     }
     if (state.pttPressed === pressed) {
+      syncTxTimeoutCountdownState();
       return;
     }
     state.pttPressed = pressed;
     ui.pttButton.classList.toggle("active", pressed);
+    updatePttButtonLabel();
 
     if (!state.connected) {
       state.pttPressed = false;
       ui.pttButton.classList.remove("active");
+      stopTxTimeoutCountdown();
       return;
     }
 
@@ -2271,9 +2487,11 @@
       state.txQueue = [];
       stopTxLoop();
       state.txFrameIndex = 0;
+      stopTxTimeoutCountdown();
     }
 
     sendCommand({ type: "ptt", pressed });
+    syncTxTimeoutCountdownState();
   }
 
   class MicCapture {
@@ -2487,13 +2705,16 @@
   }
 
   class OpusUplinkEncoder {
-    constructor(onPacket) {
+    constructor(onPacket, targetBitrate) {
       this.onPacket = onPacket;
       this.encoder = null;
       this.started = false;
       this.timestampUs = 0;
       this.sampleRate = 8000;
       this.channels = 1;
+      const parsedBitrate = Number.parseInt(String(targetBitrate ?? ""), 10);
+      this.targetBitrate = Number.isFinite(parsedBitrate) && parsedBitrate > 0 ? parsedBitrate : 20000;
+      this.configuredBitrate = 0;
     }
 
     static isSupported() {
@@ -2509,14 +2730,21 @@
         throw new Error("WebCodecs AudioEncoder is not supported");
       }
 
-      const config = {
+      let config = {
         codec: "opus",
         sampleRate: this.sampleRate,
         numberOfChannels: this.channels,
-        bitrate: 20000,
+        bitrate: this.targetBitrate,
       };
 
-      const support = await AudioEncoder.isConfigSupported(config);
+      let support = await AudioEncoder.isConfigSupported(config);
+      if ((!support || !support.supported) && this.targetBitrate !== 20000) {
+        config = {
+          ...config,
+          bitrate: 20000,
+        };
+        support = await AudioEncoder.isConfigSupported(config);
+      }
       if (!support || !support.supported) {
         throw new Error("Opus AudioEncoder configuration is not supported");
       }
@@ -2533,7 +2761,15 @@
       });
       this.encoder.configure(config);
       this.timestampUs = 0;
+      this.configuredBitrate = Number.parseInt(String(config.bitrate), 10) || this.targetBitrate;
       this.started = true;
+    }
+
+    getConfiguredBitrate() {
+      if (this.configuredBitrate > 0) {
+        return this.configuredBitrate;
+      }
+      return this.targetBitrate;
     }
 
     encodeFrame(pcmFrame) {
@@ -2575,6 +2811,7 @@
     close() {
       if (!this.encoder) {
         this.started = false;
+        this.configuredBitrate = 0;
         return;
       }
       try {
@@ -2586,6 +2823,7 @@
       this.encoder = null;
       this.started = false;
       this.timestampUs = 0;
+      this.configuredBitrate = 0;
     }
   }
 

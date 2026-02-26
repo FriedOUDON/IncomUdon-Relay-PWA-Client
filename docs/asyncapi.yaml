@@ -61,6 +61,7 @@ channels:
           - $ref: "#/components/messages/TalkerEventMessage"
           - $ref: "#/components/messages/PeerCodecEventMessage"
           - $ref: "#/components/messages/StatusEventMessage"
+          - $ref: "#/components/messages/ServerConfigEventMessage"
           - $ref: "#/components/messages/ServerBinaryPCMMessage"
           - $ref: "#/components/messages/ServerBinaryOpusMessage"
 components:
@@ -84,6 +85,7 @@ components:
             uplinkCodec: opus
             downlinkCodec: opus
             qosEnabled: true
+            fecEnabled: true
     DisconnectCommandMessage:
       name: DisconnectCommand
       title: Disconnect command
@@ -124,6 +126,7 @@ components:
             cryptoMode: aes-gcm
             codecMode: 1600
             txCodec: codec2
+            fecEnabled: true
             uplinkCodec: opus
             downlinkCodec: opus
             codec2Ready: true
@@ -148,6 +151,11 @@ components:
       title: Status/log event
       payload:
         $ref: "#/components/schemas/StatusEvent"
+    ServerConfigEventMessage:
+      name: ServerConfigEvent
+      title: Server configuration event
+      payload:
+        $ref: "#/components/schemas/ServerConfigEvent"
     ClientBinaryPCMMessage:
       name: ClientBinaryPCM
       title: Browser PCM binary frame
@@ -240,6 +248,8 @@ components:
           enum: [pcm, opus]
         qosEnabled:
           type: boolean
+        fecEnabled:
+          type: boolean
         pcmOnly:
           type: boolean
           deprecated: true
@@ -312,6 +322,8 @@ components:
           type: boolean
         qosEnabled:
           type: boolean
+        fecEnabled:
+          type: boolean
         uplinkCodec:
           type: string
           enum: [pcm, opus]
@@ -371,4 +383,15 @@ components:
           enum: [info, warn, error]
         message:
           type: string
+      additionalProperties: true
+    ServerConfigEvent:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [server_config]
+        talkTimeoutSec:
+          type: integer
+          minimum: 0
       additionalProperties: true

@@ -24,6 +24,7 @@ const (
 	pktKeyExchange = 0x0A
 	pktCodecConfig = 0x0B
 	pktFec         = 0x0C
+	pktServerCfg   = 0x0D
 )
 
 const (

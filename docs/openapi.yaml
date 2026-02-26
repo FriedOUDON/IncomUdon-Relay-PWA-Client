@@ -233,6 +233,9 @@ components:
         qosEnabled:
           type: boolean
           default: true
+        fecEnabled:
+          type: boolean
+          default: true
         pcmOnly:
           type: boolean
           deprecated: true
@@ -275,7 +278,7 @@ components:
       properties:
         type:
           type: string
-          enum: [ready, connected, disconnected, talker, peer_codec, status]
+          enum: [ready, connected, disconnected, talker, peer_codec, status, server_config]
         level:
           type: string
           enum: [info, warn, error]
@@ -289,6 +292,8 @@ components:
           type: integer
         talkAllowed:
           type: boolean
+        talkTimeoutSec:
+          type: integer
         relayHost:
           type: string
         relayPort:
@@ -303,6 +308,8 @@ components:
         pcmOnly:
           type: boolean
         qosEnabled:
+          type: boolean
+        fecEnabled:
           type: boolean
         uplinkCodec:
           type: string
@@ -330,6 +337,7 @@ components:
         uplinkCodec: opus
         downlinkCodec: opus
         qosEnabled: true
+        fecEnabled: true
     ConnectedEventExample:
       summary: Connected event
       value:
@@ -344,6 +352,7 @@ components:
         txCodec: codec2
         pcmOnly: false
         qosEnabled: true
+        fecEnabled: true
         uplinkCodec: opus
         downlinkCodec: opus
         codec2Ready: true

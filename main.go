@@ -34,24 +34,26 @@ import (
 var webAssets embed.FS
 
 type serverEvent struct {
-	Type          string `json:"type"`
-	Level         string `json:"level,omitempty"`
-	Message       string `json:"message,omitempty"`
-	ChannelID     uint32 `json:"channelId,omitempty"`
-	SenderID      uint32 `json:"senderId,omitempty"`
-	TalkerID      uint32 `json:"talkerId,omitempty"`
-	TalkAllowed   bool   `json:"talkAllowed,omitempty"`
-	RelayHost     string `json:"relayHost,omitempty"`
-	RelayPort     int    `json:"relayPort,omitempty"`
-	CryptoMode    string `json:"cryptoMode,omitempty"`
-	CodecMode     int    `json:"codecMode,omitempty"`
-	TxCodec       string `json:"txCodec,omitempty"`
-	PCMOnly       bool   `json:"pcmOnly,omitempty"`
-	QosEnabled    *bool  `json:"qosEnabled,omitempty"`
-	UplinkCodec   string `json:"uplinkCodec,omitempty"`
-	DownlinkCodec string `json:"downlinkCodec,omitempty"`
-	Codec2Ready   bool   `json:"codec2Ready,omitempty"`
-	OpusReady     bool   `json:"opusReady,omitempty"`
+	Type           string `json:"type"`
+	Level          string `json:"level,omitempty"`
+	Message        string `json:"message,omitempty"`
+	ChannelID      uint32 `json:"channelId,omitempty"`
+	SenderID       uint32 `json:"senderId,omitempty"`
+	TalkerID       uint32 `json:"talkerId,omitempty"`
+	TalkAllowed    bool   `json:"talkAllowed,omitempty"`
+	TalkTimeoutSec uint32 `json:"talkTimeoutSec,omitempty"`
+	RelayHost      string `json:"relayHost,omitempty"`
+	RelayPort      int    `json:"relayPort,omitempty"`
+	CryptoMode     string `json:"cryptoMode,omitempty"`
+	CodecMode      int    `json:"codecMode,omitempty"`
+	TxCodec        string `json:"txCodec,omitempty"`
+	PCMOnly        bool   `json:"pcmOnly,omitempty"`
+	QosEnabled     *bool  `json:"qosEnabled,omitempty"`
+	FecEnabled     *bool  `json:"fecEnabled,omitempty"`
+	UplinkCodec    string `json:"uplinkCodec,omitempty"`
+	DownlinkCodec  string `json:"downlinkCodec,omitempty"`
+	Codec2Ready    bool   `json:"codec2Ready,omitempty"`
+	OpusReady      bool   `json:"opusReady,omitempty"`
 }
 
 type clientCommand struct {
@@ -70,6 +72,7 @@ type clientCommand struct {
 	UplinkCodec   string `json:"uplinkCodec,omitempty"`
 	DownlinkCodec string `json:"downlinkCodec,omitempty"`
 	QosEnabled    *bool  `json:"qosEnabled,omitempty"`
+	FecEnabled    *bool  `json:"fecEnabled,omitempty"`
 	PCMOnly       *bool  `json:"pcmOnly,omitempty"`
 	Pressed       *bool  `json:"pressed,omitempty"`
 }
@@ -92,7 +95,11 @@ const (
 	oidcStateCookieName   = "incomudon_oidc_state"
 )
 
-const oidcSessionRefreshLeeway = 30 * time.Second
+const (
+	oidcSessionRefreshLeeway  = 30 * time.Second
+	maxOIDCSessionCookieTTL   = 30 * 24 * time.Hour
+	defaultOIDCSessionTTLText = "12h"
+)
 
 type oidcRuntime struct {
 	issuer        string
@@ -135,6 +142,7 @@ type appServer struct {
 	basicUser         string
 	basicPass         string
 	oidc              *oidcRuntime
+	oidcSessionTTL    time.Duration
 	oidcRefreshMu     sync.Mutex
 	oidcRefreshTokens map[string]oidcRefreshTokenEntry
 
@@ -157,6 +165,7 @@ func main() {
 	oidcRedirectURLFlag := flag.String("oidc-redirect-url", os.Getenv("INCOMUDON_OIDC_REDIRECT_URL"), "OIDC redirect URL override (auth-mode=oidc)")
 	oidcScopesFlag := flag.String("oidc-scopes", getenvOrDefault("INCOMUDON_OIDC_SCOPES", "openid,profile,email"), "OIDC scopes CSV (auth-mode=oidc)")
 	oidcSessionSecretFlag := flag.String("oidc-session-secret", os.Getenv("INCOMUDON_OIDC_SESSION_SECRET"), "OIDC session signing secret (auth-mode=oidc)")
+	oidcSessionTTLFlag := flag.String("oidc-session-ttl", getenvOrDefault("INCOMUDON_OIDC_SESSION_TTL", defaultOIDCSessionTTLText), "OIDC session cookie TTL (e.g. 12h, 24h, 0 for token-exp-based)")
 	flag.Parse()
 
 	basePath := normalizeBasePath(*basePathFlag)
@@ -167,6 +176,16 @@ func main() {
 	mode, err := parseAuthMode(*authModeFlag)
 	if err != nil {
 		log.Fatalf("invalid auth mode: %v", err)
+	}
+	oidcSessionTTL, err := time.ParseDuration(strings.TrimSpace(*oidcSessionTTLFlag))
+	if err != nil {
+		log.Fatalf("invalid oidc-session-ttl: %v", err)
+	}
+	if oidcSessionTTL < 0 {
+		log.Fatalf("oidc-session-ttl must be >= 0")
+	}
+	if oidcSessionTTL > maxOIDCSessionCookieTTL {
+		log.Fatalf("oidc-session-ttl must be <= %s", maxOIDCSessionCookieTTL)
 	}
 	basicUser := strings.TrimSpace(*basicUserFlag)
 	basicPass := strings.TrimSpace(*basicPassFlag)
@@ -219,6 +238,7 @@ func main() {
 		basicUser:         basicUser,
 		basicPass:         basicPass,
 		oidc:              oidcRT,
+		oidcSessionTTL:    oidcSessionTTL,
 		oidcRefreshTokens: make(map[string]oidcRefreshTokenEntry),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  4096,
@@ -255,6 +275,11 @@ func main() {
 	}
 	if app.authMode == authModeOIDC {
 		log.Printf("OIDC authentication is enabled (issuer=%s)", app.oidc.issuer)
+		if app.oidcSessionTTL > 0 {
+			log.Printf("OIDC session cookie TTL is %s", app.oidcSessionTTL)
+		} else {
+			log.Printf("OIDC session cookie TTL follows token expiry")
+		}
 	}
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("http server error: %v", err)
@@ -546,6 +571,7 @@ func handleClientCommand(
 		effective := newSession.EffectiveConfig()
 		codec2Ready, opusReady := detectRuntimeCodecAvailability(effective.Codec2LibPath, effective.OpusLibPath)
 		effectiveQosEnabled := effective.QosEnabled
+		effectiveFecEnabled := effective.FecEnabled
 
 		enqueueJSON(serverEvent{
 			Type:          "connected",
@@ -559,6 +585,7 @@ func handleClientCommand(
 			TxCodec:       effective.TxCodec,
 			PCMOnly:       effective.PCMOnly,
 			QosEnabled:    &effectiveQosEnabled,
+			FecEnabled:    &effectiveFecEnabled,
 			UplinkCodec:   effective.UplinkCodec,
 			DownlinkCodec: effective.DownlinkCodec,
 			Codec2Ready:   codec2Ready,
@@ -652,6 +679,10 @@ func buildSessionConfig(
 	if cmd.QosEnabled != nil {
 		qosEnabled = *cmd.QosEnabled
 	}
+	fecEnabled := true
+	if cmd.FecEnabled != nil {
+		fecEnabled = *cmd.FecEnabled
+	}
 
 	txCodec := strings.ToLower(strings.TrimSpace(cmd.TxCodec))
 	switch txCodec {
@@ -691,6 +722,7 @@ func buildSessionConfig(
 		TxCodec:       txCodec,
 		PCMOnly:       pcmOnly,
 		QosEnabled:    qosEnabled,
+		FecEnabled:    fecEnabled,
 		Codec2LibPath: codec2LibPath,
 		OpusLibPath:   opusLibPath,
 		UplinkCodec:   cmd.UplinkCodec,
@@ -1014,7 +1046,7 @@ func (a *appServer) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		Name:  claims.Name,
 		Exp:   sessionExp,
 	}
-	if err := a.setSignedCookie(w, r, oidcSessionCookieName, sessionPayload, oidcSessionTTLFromExp(sessionExp), true); err != nil {
+	if err := a.setSignedCookie(w, r, oidcSessionCookieName, sessionPayload, a.oidcSessionCookieTTL(sessionExp), true); err != nil {
 		a.clearCookie(w, r, oidcStateCookieName, true)
 		http.Error(w, "failed to persist session", http.StatusInternalServerError)
 		return
@@ -1143,6 +1175,20 @@ func oidcSessionTTLFromExp(exp int64) time.Duration {
 	return ttl
 }
 
+func (a *appServer) oidcSessionCookieTTL(exp int64) time.Duration {
+	if a.oidcSessionTTL <= 0 {
+		return oidcSessionTTLFromExp(exp)
+	}
+	ttl := a.oidcSessionTTL
+	if ttl < time.Minute {
+		ttl = time.Minute
+	}
+	if ttl > maxOIDCSessionCookieTTL {
+		ttl = maxOIDCSessionCookieTTL
+	}
+	return ttl
+}
+
 func (a *appServer) ensureOIDCSession(w http.ResponseWriter, r *http.Request) (oidcSessionCookie, bool) {
 	payload, ok := a.readOIDCSessionRaw(r)
 	if !ok || payload.Sub == "" {
@@ -1227,7 +1273,7 @@ func (a *appServer) refreshOIDCSession(
 	}
 
 	nextPayload.Exp = nextExp
-	if err := a.setSignedCookie(w, r, oidcSessionCookieName, nextPayload, oidcSessionTTLFromExp(nextExp), true); err != nil {
+	if err := a.setSignedCookie(w, r, oidcSessionCookieName, nextPayload, a.oidcSessionCookieTTL(nextExp), true); err != nil {
 		return payload, false
 	}
 

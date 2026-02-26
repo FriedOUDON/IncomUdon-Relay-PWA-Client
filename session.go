@@ -21,6 +21,7 @@ type sessionConfig struct {
 	TxCodec       string
 	PCMOnly       bool
 	QosEnabled    bool
+	FecEnabled    bool
 	Codec2LibPath string
 	OpusLibPath   string
 	UplinkCodec   string
@@ -62,6 +63,7 @@ type relaySession struct {
 	codec2      *codec2Engine
 	opusDecoder *opusDecoderEngine
 	opusEncoder *opusEncoderEngine
+	fec         *fecEncoder
 
 	cb sessionCallbacks
 
@@ -116,6 +118,7 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		conn:              conn,
 		relayAddr:         relayAddr,
 		crypto:            cryptoCtx,
+		fec:               newFECEncoder(cfg.FecEnabled),
 		cb:                cb,
 		joinRetriesLeft:   5,
 		peerCodec:         make(map[uint32]peerCodecConfig),
@@ -217,6 +220,19 @@ func (s *relaySession) Start() {
 			Type:    "status",
 			Level:   "info",
 			Message: "Network QoS disabled",
+		})
+	}
+	if s.cfg.FecEnabled {
+		s.emitEvent(serverEvent{
+			Type:    "status",
+			Level:   "info",
+			Message: "TX FEC enabled (RS 2-loss parity)",
+		})
+	} else {
+		s.emitEvent(serverEvent{
+			Type:    "status",
+			Level:   "info",
+			Message: "TX FEC disabled",
 		})
 	}
 
@@ -394,7 +410,11 @@ func (s *relaySession) SetPTT(pressed bool) {
 		s.txPCMBuffer = nil
 		s.talkAllowed = false
 	}
+	fec := s.fec
 	s.mu.Unlock()
+	if fec != nil {
+		fec.Reset()
+	}
 
 	if pressed {
 		if err := s.sendCodecConfig(); err != nil {
@@ -436,7 +456,11 @@ func (s *relaySession) UpdateCodec(codecMode int, pcmOnly bool) {
 	s.pendingPCM = nil
 	s.pendingOpus = nil
 	s.txPCMBuffer = nil
+	fec := s.fec
 	s.mu.Unlock()
+	if fec != nil {
+		fec.Reset()
+	}
 
 	if forcedPCM {
 		s.emitEvent(serverEvent{
@@ -683,6 +707,8 @@ func (s *relaySession) handleDatagram(data []byte, from *net.UDPAddr) {
 		s.handleTalkPacket(pkt)
 	case pktCodecConfig:
 		s.handleCodecConfig(pkt)
+	case pktServerCfg:
+		s.handleServerConfig(pkt)
 	case pktAudio:
 		s.handleAudioPacket(pkt)
 	case pktKeyExchange:
@@ -795,6 +821,30 @@ func (s *relaySession) handleCodecConfig(pkt parsedPacket) {
 		SenderID:  pkt.Header.SenderID,
 		CodecMode: mode,
 		PCMOnly:   pcmOnly,
+	})
+}
+
+func (s *relaySession) handleServerConfig(pkt parsedPacket) {
+	if len(pkt.Payload) < 2 {
+		return
+	}
+	timeoutSec := uint32(binary.BigEndian.Uint16(pkt.Payload[:2]))
+	s.emitEvent(serverEvent{
+		Type:           "server_config",
+		TalkTimeoutSec: timeoutSec,
+	})
+	if timeoutSec == 0 {
+		s.emitEvent(serverEvent{
+			Type:    "status",
+			Level:   "info",
+			Message: "Server TX timeout is disabled",
+		})
+		return
+	}
+	s.emitEvent(serverEvent{
+		Type:    "status",
+		Level:   "info",
+		Message: fmt.Sprintf("Server TX timeout: %ds", timeoutSec),
 	})
 }
 
@@ -1109,6 +1159,8 @@ func (s *relaySession) sendAudioFrame(frame []byte, sourceCodecID uint8) error {
 	mode := s.cfg.CryptoMode
 	keyID := s.crypto.keyID
 	addr := s.relayAddr
+	fecEnabled := s.cfg.FecEnabled
+	fec := s.fec
 	codecMode := s.cfg.CodecMode
 	codec := s.codec2
 	opusEncoder := s.opusEncoder
@@ -1171,7 +1223,49 @@ func (s *relaySession) sendAudioFrame(frame []byte, sourceCodecID uint8) error {
 	}
 
 	_, err := s.conn.WriteToUDP(packet, addr)
-	return err
+	if err != nil {
+		return err
+	}
+
+	if !fecEnabled || fec == nil {
+		return nil
+	}
+
+	parityPackets := fec.AddFrame(audioSeq, audioFrame)
+	for _, parity := range parityPackets {
+		fecPayload := make([]byte, 4+len(parity.Data))
+		binary.BigEndian.PutUint16(fecPayload[0:2], parity.BlockStart)
+		fecPayload[2] = parity.BlockSize
+		fecPayload[3] = parity.ParityIndex
+		copy(fecPayload[4:], parity.Data)
+
+		s.mu.Lock()
+		fecSeq := s.seq
+		s.seq++
+		fecKeyID := s.crypto.keyID
+		fecNonce := uint64(0)
+		if mode != cryptoNoCrypto {
+			fecNonce = s.crypto.nextNonce()
+		}
+		s.mu.Unlock()
+
+		var fecPacket []byte
+		if mode == cryptoNoCrypto {
+			fecPacket = buildNoCryptoPacket(pktFec, channelID, senderID, fecSeq, fecPayload)
+		} else {
+			ciphertext, tag, encErr := s.crypto.encrypt(fecPayload, fecNonce, nil)
+			if encErr != nil {
+				return encErr
+			}
+			fecPacket = buildEncryptedPacket(pktFec, channelID, senderID, fecSeq, fecNonce, fecKeyID, ciphertext, tag)
+		}
+
+		if _, err := s.conn.WriteToUDP(fecPacket, addr); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (s *relaySession) emitEvent(event serverEvent) {

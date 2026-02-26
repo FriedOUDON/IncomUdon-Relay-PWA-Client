@@ -55,8 +55,9 @@ This project supports optional `libopus.so` bundling.
 - `-oidc-session-secret <random-secret>`
 - `-oidc-scopes openid,profile,email`
 - `-oidc-redirect-url https://.../auth/callback` (optional override)
+- `-oidc-session-ttl 12h` (OIDC session cookie TTL; default `12h`, set `0` to follow token expiry)
 - `INCOMUDON_OIDC_ISSUER`, `INCOMUDON_OIDC_CLIENT_ID`, `INCOMUDON_OIDC_CLIENT_SECRET`
-- `INCOMUDON_OIDC_SESSION_SECRET`, `INCOMUDON_OIDC_SCOPES`, `INCOMUDON_OIDC_REDIRECT_URL`
+- `INCOMUDON_OIDC_SESSION_SECRET`, `INCOMUDON_OIDC_SCOPES`, `INCOMUDON_OIDC_REDIRECT_URL`, `INCOMUDON_OIDC_SESSION_TTL`
 
 When `-codec2-lib` is not specified and uplink Codec2 is enabled, loader auto-searches
 `/opt/libcodec2` and `third_party/libcodec2` (including arch subdirectories).
@@ -96,8 +97,10 @@ Browser Opus requires `WebCodecs AudioEncoder` (uplink) and `WebCodecs AudioDeco
 - `none`: no HTTP authentication.
 - `basic`: HTTP Basic authentication on all pages/assets/WebSocket.
 - `oidc`: OIDC login (Authorization Code flow) with signed session cookie.
+- `oidc` session persistence can be tuned by `-oidc-session-ttl` / `INCOMUDON_OIDC_SESSION_TTL`.
 - Logout button is shown in UI when `auth-mode` is `basic` or `oidc`.
 - When `auth-mode` is `basic`/`oidc`, Service Worker is still registered (for PWA installability), but cache storage is disabled to avoid stale-auth issues.
+- On mobile browsers, WebSocket can still be closed when app is backgrounded; this does not always mean auth expiry.
 
 ### Authentication Methods Summary
 
@@ -142,7 +145,8 @@ go run ./main.go \
   -oidc-issuer https://accounts.example.com/realms/demo \
   -oidc-client-id incomudon-pwa \
   -oidc-client-secret change-me \
-  -oidc-session-secret replace-with-long-random-string
+  -oidc-session-secret replace-with-long-random-string \
+  -oidc-session-ttl 24h
 ```
 
 Notes:
@@ -230,6 +234,7 @@ is incompatible.
   - For `codec2`/`pcm`: `450`, `700`, `1600`, `2400`, `3200`
   - For `opus`: `6000`, `8000`, `12000`, `16000`, `20000`, `64000`, `96000`, `128000`
 - `Network QoS (DSCP EF)`: `On` / `Off` (default `On`)
+- `TX FEC (RS 2-loss)`: `On` / `Off` (default `On`)
 - `TX Codec` options are automatically filtered by server runtime library availability.
   - `codec2` is shown only when `libcodec2` is available.
   - `opus` is shown only when `libopus` is available.
@@ -238,6 +243,9 @@ Behavior:
 
 - If browser Opus encoder/decoder is unavailable, browser side falls back to `pcm`.
 - If server-side `libopus` cannot be loaded, `pwa_client` falls back to `pcm`.
+- If `TX Codec=opus` and `Browser Codec=opus`, browser uplink Opus bitrate is aligned to `Transmit Bitrate`.
+- In that same mode, browser Opus uplink packets are passed through to relay uplink (no server-side Opus re-encode).
+- When `TX FEC` is enabled, parity packets (`PKT_FEC`) are transmitted for uplink audio frames.
 - QoS `On` requests DSCP EF marking on the server-side UDP socket (Linux runtime).
   - If the OS/network does not allow it, a warning is logged and communication continues.
 
