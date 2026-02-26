@@ -13,6 +13,7 @@
   "codec_mode": "送信ビットレート",
   "browser_codec": "ブラウザCodec",
   "tx_codec": "送信Codec",
+  "mic_volume": "マイク音量",
   "tx_codec_pcm": "pcm",
   "tx_codec_codec2": "codec2",
   "tx_codec_opus": "opus",

@@ -12,6 +12,12 @@
   const txCodecPCM = "pcm";
   const txCodecCodec2 = "codec2";
   const txCodecOpus = "opus";
+  const defaultOpusBitrate = 8000;
+  const micVolumeMinPercent = 0;
+  const micVolumeMaxPercent = 300;
+  const micVolumeDefaultPercent = 200;
+  const micVolumeSnapPercent = 200;
+  const micVolumeSnapThreshold = 4;
   const passwordHashPrefix = "sha256:";
   const sha256HexPattern = /^[0-9a-f]{64}$/i;
   const codec2BitrateOptions = [450, 700, 1600, 2400, 3200];
@@ -30,6 +36,8 @@
     codecMode: document.getElementById("codecMode"),
     browserCodec: document.getElementById("browserCodec"),
     txCodec: document.getElementById("txCodec"),
+    micVolume: document.getElementById("micVolume"),
+    micVolumeValue: document.getElementById("micVolumeValue"),
     qosEnabled: document.getElementById("qosEnabled"),
     fecEnabled: document.getElementById("fecEnabled"),
     optionTxCodecPcm: document.getElementById("optionTxCodecPcm"),
@@ -85,6 +93,7 @@
     codec_mode: "Transmit Bitrate",
     browser_codec: "Browser Codec",
     tx_codec: "TX Codec",
+    mic_volume: "Mic Volume",
     tx_codec_pcm: "pcm",
     tx_codec_codec2: "codec2",
     tx_codec_opus: "opus",
@@ -203,6 +212,7 @@
     opusDecoder: null,
     downlinkOpusWarned: false,
     micPermissionDenied: false,
+    micVolumePercent: micVolumeDefaultPercent,
     txQueue: [],
     txTimer: null,
     txTickMs: 20,
@@ -326,6 +336,44 @@
     applyPasswordInputPresentation();
     persistFormSettings();
     return token;
+  }
+
+  function normalizeMicVolumePercent(rawValue) {
+    const parsed = Number.parseInt(String(rawValue ?? ""), 10);
+    if (!Number.isFinite(parsed)) {
+      return micVolumeDefaultPercent;
+    }
+    return Math.max(micVolumeMinPercent, Math.min(micVolumeMaxPercent, parsed));
+  }
+
+  function snapMicVolumePercent(value) {
+    const normalized = normalizeMicVolumePercent(value);
+    if (Math.abs(normalized - micVolumeSnapPercent) <= micVolumeSnapThreshold) {
+      return micVolumeSnapPercent;
+    }
+    return normalized;
+  }
+
+  function updateMicVolumeDisplay() {
+    if (!ui.micVolumeValue) {
+      return;
+    }
+    ui.micVolumeValue.textContent = `${state.micVolumePercent}%`;
+  }
+
+  function applyMicVolumeFromUI(rawValue, persist = true) {
+    const snapped = snapMicVolumePercent(rawValue);
+    state.micVolumePercent = snapped;
+    if (ui.micVolume) {
+      ui.micVolume.value = String(snapped);
+    }
+    if (state.mic && typeof state.mic.setGainPercent === "function") {
+      state.mic.setGainPercent(snapped);
+    }
+    updateMicVolumeDisplay();
+    if (persist) {
+      persistFormSettings();
+    }
   }
 
   function normalizeSenderID(raw, randomIfInvalid = true) {
@@ -1047,6 +1095,7 @@
       codecMode: "1600",
       browserCodec: "opus",
       txCodec: txCodecPCM,
+      micVolumePercent: String(micVolumeDefaultPercent),
       qosEnabled: true,
       fecEnabled: true,
       codec2Lib: "",
@@ -1100,6 +1149,9 @@
     if (!merged.audioTxSlotCount) {
       merged.audioTxSlotCount = defaults.audioTxSlotCount;
     }
+    if (!merged.micVolumePercent) {
+      merged.micVolumePercent = defaults.micVolumePercent;
+    }
     if (fixedRelayEnabled) {
       merged.relayHost = defaults.relayHost;
       merged.relayPort = defaults.relayPort;
@@ -1124,6 +1176,7 @@
     }
     ui.codec2Lib.value = String(merged.codec2Lib || "");
     ui.opusLib.value = String(merged.opusLib || "");
+    applyMicVolumeFromUI(merged.micVolumePercent, false);
     sanitizeSelectedTxCodec(merged.codecMode);
     ui.cuePttOnEnabled.checked = !!merged.cuePttOnEnabled;
     ui.cuePttOffEnabled.checked = !!merged.cuePttOffEnabled;
@@ -1212,6 +1265,15 @@
       ui.password.addEventListener("blur", () => {
         applyPasswordInputPresentation();
       });
+    }
+
+    if (ui.micVolume && !ui.micVolume.dataset.micVolumeBound) {
+      ui.micVolume.dataset.micVolumeBound = "1";
+      const syncMicVolume = () => {
+        applyMicVolumeFromUI(ui.micVolume.value, true);
+      };
+      ui.micVolume.addEventListener("input", syncMicVolume);
+      ui.micVolume.addEventListener("change", syncMicVolume);
     }
   }
 
@@ -1334,6 +1396,7 @@
       codecMode: ui.codecMode.value,
       browserCodec: ui.browserCodec.value,
       txCodec: selectedTxCodec,
+      micVolumePercent: String(normalizeMicVolumePercent(ui.micVolume ? ui.micVolume.value : state.micVolumePercent)),
       qosEnabled: ui.qosEnabled ? !!ui.qosEnabled.checked : true,
       fecEnabled: ui.fecEnabled ? !!ui.fecEnabled.checked : true,
       codec2Lib: ui.codec2Lib.value.trim(),
@@ -2041,6 +2104,7 @@
     setText("labelCodecMode", t("codec_mode"));
     setText("labelBrowserCodec", t("browser_codec"));
     setText("labelTxCodec", t("tx_codec"));
+    setText("labelMicVolume", t("mic_volume"));
     setText("labelQosEnabled", t("qos_enabled"));
     setText("labelFecEnabled", t("fec_enabled"));
     setText("optionTxCodecPcm", t("tx_codec_pcm"));
@@ -2075,6 +2139,7 @@
     setText("headingEvents", t("events"));
     setText("clearLogBtn", t("clear"));
     applyPasswordInputPresentation();
+    updateMicVolumeDisplay();
 
     updateTalkerStatus(state.talkerId, state.talkAllowed);
     applyConnectionView();
@@ -2300,6 +2365,9 @@
     let value = Number.isFinite(parsed) ? parsed : 0;
 
     if (normalizedTxCodec === txCodecOpus) {
+      if (value <= 0) {
+        value = defaultOpusBitrate;
+      }
       if (value < opusBitrateOptions[0]) {
         value = legacyCodec2ModeToOpusBitrate(value);
       }
@@ -2328,14 +2396,17 @@
     return normalizeBitrateForTxCodec(codecMode, txCodecOpus);
   }
 
-  function syncCodecModeOptions(preferredValue) {
+  function syncCodecModeOptions(preferredValue, forceOpusDefault = false) {
     if (!ui.codecMode) {
       return;
     }
 
     const selectedTxCodec = normalizeTxCodec(ui.txCodec ? ui.txCodec.value : state.txCodec);
     const options = bitrateOptionsForTxCodec(selectedTxCodec);
-    const currentValue = preferredValue !== undefined ? preferredValue : ui.codecMode.value;
+    let currentValue = preferredValue !== undefined ? preferredValue : ui.codecMode.value;
+    if (forceOpusDefault && preferredValue === undefined && selectedTxCodec === txCodecOpus) {
+      currentValue = defaultOpusBitrate;
+    }
     const normalizedValue = normalizeBitrateForTxCodec(currentValue, selectedTxCodec);
 
     const currentOptionValues = Array.from(ui.codecMode.options).map((option) => Number.parseInt(option.value, 10));
@@ -2383,6 +2454,7 @@
   function sanitizeSelectedTxCodec(preferredCodecMode) {
     const codec2Ready = !!(state.codecAvailability && state.codecAvailability.codec2);
     const opusReady = !!(state.codecAvailability && state.codecAvailability.opus);
+    const previous = state.txCodec;
 
     setOptionVisibility(ui.optionTxCodecPcm, true);
     setOptionVisibility(ui.optionTxCodecCodec2, codec2Ready);
@@ -2400,7 +2472,8 @@
     if (ui.txCodec) {
       ui.txCodec.value = selected;
     }
-    syncCodecModeOptions(preferredCodecMode);
+    const switchedToOpus = previous !== txCodecOpus && selected === txCodecOpus;
+    syncCodecModeOptions(preferredCodecMode, switchedToOpus);
     if (ui.pcmOnly) {
       ui.pcmOnly.checked = selected === txCodecPCM;
     }
@@ -2670,15 +2743,17 @@
   }
 
   class MicCapture {
-    constructor(onFrame) {
+    constructor(onFrame, gainPercent = micVolumeDefaultPercent) {
       this.onFrame = onFrame;
       this.ctx = null;
       this.stream = null;
       this.source = null;
+      this.inputGain = null;
       this.processor = null;
       this.workletNode = null;
       this.silence = null;
       this.started = false;
+      this.gainPercent = normalizeMicVolumePercent(gainPercent);
 
       this.inputBuffer = [];
       this.inputStart = 0;
@@ -2707,8 +2782,11 @@
       this.downsampleRatio = this.ctx.sampleRate / 8000;
 
       this.source = this.ctx.createMediaStreamSource(this.stream);
+      this.inputGain = this.ctx.createGain();
+      this.inputGain.gain.value = this.gainPercent / 100;
       this.silence = this.ctx.createGain();
       this.silence.gain.value = 0;
+      this.source.connect(this.inputGain);
 
       const workletReady = await this.tryStartWithWorklet();
       if (workletReady) {
@@ -2718,7 +2796,7 @@
 
       this.processor = this.ctx.createScriptProcessor(2048, 1, 1);
 
-      this.source.connect(this.processor);
+      this.inputGain.connect(this.processor);
       this.processor.connect(this.silence);
       this.silence.connect(this.ctx.destination);
 
@@ -2731,7 +2809,7 @@
     }
 
     async tryStartWithWorklet() {
-      if (!this.ctx || !this.source || !this.silence) {
+      if (!this.ctx || !this.inputGain || !this.silence) {
         return false;
       }
       if (!this.ctx.audioWorklet || typeof AudioWorkletNode === "undefined") {
@@ -2749,7 +2827,7 @@
           this.handleWorkletFrame(event.data);
         };
 
-        this.source.connect(this.workletNode);
+        this.inputGain.connect(this.workletNode);
         this.workletNode.connect(this.silence);
         this.silence.connect(this.ctx.destination);
         return true;
@@ -2795,6 +2873,13 @@
       }
     }
 
+    setGainPercent(percent) {
+      this.gainPercent = normalizeMicVolumePercent(percent);
+      if (this.inputGain) {
+        this.inputGain.gain.value = this.gainPercent / 100;
+      }
+    }
+
     stop() {
       if (this.processor) {
         this.processor.disconnect();
@@ -2809,6 +2894,10 @@
       if (this.source) {
         this.source.disconnect();
         this.source = null;
+      }
+      if (this.inputGain) {
+        this.inputGain.disconnect();
+        this.inputGain = null;
       }
       if (this.silence) {
         this.silence.disconnect();
@@ -3682,6 +3771,7 @@
       return;
     }
     transmitUplinkFrame(frame);
-  });
+  }, state.micVolumePercent);
+  applyMicVolumeFromUI(state.micVolumePercent, false);
 })();
 

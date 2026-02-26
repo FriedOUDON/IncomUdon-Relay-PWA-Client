@@ -13,6 +13,7 @@
   "codec_mode": "Transmit Bitrate",
   "browser_codec": "Browser Codec",
   "tx_codec": "TX Codec",
+  "mic_volume": "Mic Volume",
   "tx_codec_pcm": "pcm",
   "tx_codec_codec2": "codec2",
   "tx_codec_opus": "opus",

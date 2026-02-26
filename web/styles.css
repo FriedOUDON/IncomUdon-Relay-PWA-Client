@@ -195,6 +195,24 @@ h1 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.range-setting {
+  grid-column: 1 / -1;
+}
+
+.range-inline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.range-inline output {
+  min-width: 56px;
+  text-align: right;
+  color: var(--ink);
+  font-weight: 700;
+}
+
 .connect-grid-advanced .checkbox-row {
   grid-column: 1 / -1;
   min-height: 0;
