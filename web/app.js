@@ -12,6 +12,8 @@
   const txCodecPCM = "pcm";
   const txCodecCodec2 = "codec2";
   const txCodecOpus = "opus";
+  const passwordHashPrefix = "sha256:";
+  const sha256HexPattern = /^[0-9a-f]{64}$/i;
   const codec2BitrateOptions = [450, 700, 1600, 2400, 3200];
   const opusBitrateOptions = [6000, 8000, 12000, 16000, 20000, 64000, 96000, 128000];
   const settingsReconnectDebounceMs = 350;
@@ -78,6 +80,7 @@
     channel_id: "Channel ID",
     sender_id: "Sender ID (random if empty)",
     password: "Password",
+    password_unchanged: "(Unchanged)",
     crypto_mode: "Crypto Mode",
     codec_mode: "Transmit Bitrate",
     browser_codec: "Browser Codec",
@@ -155,6 +158,7 @@
     log_audio_tx_failed: "audio file TX failed (slot {index}): {error}",
     log_audio_tx_ptt_active: "audio file TX is blocked while PTT is active",
     log_tx_timeout_forced_off: "TX timed out; forcing PTT off",
+    log_password_hash_failed: "password hash failed: {error}",
     log_reconnecting_settings: "settings changed; reconnecting to apply updates",
     mic_insecure_context: "microphone API is unavailable on insecure context (use HTTPS or localhost)",
     mic_not_supported: "microphone API is not supported by this browser",
@@ -183,6 +187,7 @@
   const state = {
     ws: null,
     connected: false,
+    passwordHash: "",
     pttPressed: false,
     player: null,
     mic: null,
@@ -243,6 +248,78 @@
 
   function sendOpusFrame(frame) {
     enqueueUplinkPacket(0x02, frame);
+  }
+
+  function normalizePasswordHashToken(value) {
+    const text = String(value || "").trim();
+    if (!text) {
+      return "";
+    }
+    if (text.startsWith(passwordHashPrefix)) {
+      const hex = text.slice(passwordHashPrefix.length).trim().toLowerCase();
+      if (sha256HexPattern.test(hex)) {
+        return `${passwordHashPrefix}${hex}`;
+      }
+      return "";
+    }
+    if (sha256HexPattern.test(text)) {
+      return `${passwordHashPrefix}${text.toLowerCase()}`;
+    }
+    return "";
+  }
+
+  function hasPasswordHashToken() {
+    return !!normalizePasswordHashToken(state.passwordHash);
+  }
+
+  function applyPasswordInputPresentation() {
+    if (!ui.password) {
+      return;
+    }
+    if (ui.password.value) {
+      ui.password.placeholder = "";
+      return;
+    }
+    ui.password.placeholder = hasPasswordHashToken() ? t("password_unchanged") : "";
+  }
+
+  async function sha256Hex(text) {
+    if (!window.crypto || !window.crypto.subtle || typeof window.crypto.subtle.digest !== "function") {
+      throw new Error("Web Crypto API is unavailable");
+    }
+    const enc = new TextEncoder();
+    const bytes = enc.encode(String(text));
+    const digest = await window.crypto.subtle.digest("SHA-256", bytes);
+    const hashBytes = new Uint8Array(digest);
+    let hex = "";
+    for (let i = 0; i < hashBytes.length; i += 1) {
+      hex += hashBytes[i].toString(16).padStart(2, "0");
+    }
+    return hex;
+  }
+
+  async function resolvePasswordTokenForConnect() {
+    if (!ui.password) {
+      return normalizePasswordHashToken(state.passwordHash);
+    }
+    const raw = ui.password.value || "";
+    if (!raw) {
+      state.passwordHash = normalizePasswordHashToken(state.passwordHash);
+      applyPasswordInputPresentation();
+      return state.passwordHash;
+    }
+
+    const normalized = normalizePasswordHashToken(raw);
+    let token = normalized;
+    if (!token) {
+      const hashHex = await sha256Hex(raw);
+      token = `${passwordHashPrefix}${hashHex}`;
+    }
+    state.passwordHash = token;
+    ui.password.value = "";
+    applyPasswordInputPresentation();
+    persistFormSettings();
+    return token;
   }
 
   function normalizeSenderID(raw, randomIfInvalid = true) {
@@ -552,6 +629,14 @@
         ui.codecMode.value = String(selectedCodecMode);
       }
       const browserOpusUplinkBitrate = resolveBrowserUplinkOpusBitrate(selectedTxCodec, selectedCodecMode);
+      let passwordToken = "";
+      try {
+        passwordToken = await resolvePasswordTokenForConnect();
+      } catch (err) {
+        appendLog(t("log_password_hash_failed", { error: err && err.message ? err.message : String(err) }), "error");
+        ws.close();
+        return;
+      }
 
       state.browserCodec = normalizeBrowserCodec(ui.browserCodec.value);
       state.uplinkCodec = state.browserCodec;
@@ -641,7 +726,7 @@
         relayPort: fixedRelayEnabled ? effectiveFixedRelayPort() : Number(ui.relayPort.value),
         channelId: Number(ui.channelId.value),
         senderId: safeSenderID,
-        password: ui.password.value,
+        password: passwordToken,
         cryptoMode: ui.cryptoMode.value,
         codecMode: selectedCodecMode,
         txCodec: selectedTxCodec,
@@ -951,7 +1036,7 @@
       relayPort: "50000",
       channelId: "1",
       senderId: String(randomSenderID()),
-      password: "",
+      passwordHash: "",
       cryptoMode: "aes-gcm",
       codecMode: "1600",
       browserCodec: "opus",
@@ -983,6 +1068,7 @@
     if (!merged.relayHost || !String(merged.relayHost).trim()) {
       merged.relayHost = defaults.relayHost;
     }
+    merged.passwordHash = normalizePasswordHashToken(merged.passwordHash || merged.password);
     merged.senderId = String(normalizeSenderID(merged.senderId, true));
     if (!merged.codecMode) {
       merged.codecMode = defaults.codecMode;
@@ -1014,7 +1100,8 @@
     ui.relayPort.value = String(merged.relayPort);
     ui.channelId.value = String(merged.channelId);
     ui.senderId.value = String(merged.senderId);
-    ui.password.value = String(merged.password);
+    state.passwordHash = merged.passwordHash;
+    ui.password.value = "";
     ui.cryptoMode.value = String(merged.cryptoMode);
     ui.browserCodec.value = normalizeBrowserCodec(merged.browserCodec);
     if (ui.txCodec) {
@@ -1038,6 +1125,7 @@
     ui.audioTxSlotCount.value = String(normalizeAudioTxSlotCount(merged.audioTxSlotCount));
     setAudioTxSlotCount(merged.audioTxSlotCount, false);
     applyFixedRelayUIState();
+    applyPasswordInputPresentation();
 
     persistFormSettings();
   }
@@ -1103,6 +1191,19 @@
         persistFormSettings();
       });
     }
+
+    if (ui.password && !ui.password.dataset.passwordUiBound) {
+      ui.password.dataset.passwordUiBound = "1";
+      ui.password.addEventListener("focus", () => {
+        ui.password.select();
+      });
+      ui.password.addEventListener("input", () => {
+        applyPasswordInputPresentation();
+      });
+      ui.password.addEventListener("blur", () => {
+        applyPasswordInputPresentation();
+      });
+    }
   }
 
   function clearPendingSettingsReconnect() {
@@ -1150,12 +1251,13 @@
 
   function persistFormSettings() {
     const selectedTxCodec = sanitizeSelectedTxCodec();
+    const passwordHash = normalizePasswordHashToken(state.passwordHash);
     const settings = {
       relayHost: fixedRelayEnabled ? effectiveFixedRelayHost() : ui.relayHost.value.trim(),
       relayPort: fixedRelayEnabled ? String(effectiveFixedRelayPort()) : ui.relayPort.value,
       channelId: ui.channelId.value,
       senderId: ui.senderId.value,
-      password: ui.password.value,
+      passwordHash,
       cryptoMode: ui.cryptoMode.value,
       codecMode: ui.codecMode.value,
       browserCodec: ui.browserCodec.value,
@@ -1900,6 +2002,7 @@
     setText("labelAudioTxSlotCount", t("audio_tx_slot_count"));
     setText("headingEvents", t("events"));
     setText("clearLogBtn", t("clear"));
+    applyPasswordInputPresentation();
 
     updateTalkerStatus(state.talkerId, state.talkAllowed);
     applyConnectionView();

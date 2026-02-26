@@ -1,4 +1,4 @@
-﻿{
+{
   "app_title": "IncomUdon Relay PWA Client",
   "header_title": "Relay PWA Client",
   "language": "Language",
@@ -8,6 +8,7 @@
   "channel_id": "Channel ID",
   "sender_id": "Sender ID (random if empty)",
   "password": "Password",
+  "password_unchanged": "(Unchanged)",
   "crypto_mode": "Crypto Mode",
   "codec_mode": "Transmit Bitrate",
   "browser_codec": "Browser Codec",
@@ -85,6 +86,7 @@
   "log_audio_tx_failed": "audio file TX failed (slot {index}): {error}",
   "log_audio_tx_ptt_active": "audio file TX is blocked while PTT is active",
   "log_tx_timeout_forced_off": "TX timed out; forcing PTT off",
+  "log_password_hash_failed": "password hash failed: {error}",
   "log_reconnecting_settings": "settings changed; reconnecting to apply updates",
   "mic_insecure_context": "microphone API is unavailable on insecure context (use HTTPS or localhost)",
   "mic_not_supported": "microphone API is not supported by this browser",

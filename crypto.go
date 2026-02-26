@@ -7,8 +7,10 @@ import (
 	crand "crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"io"
+	"strings"
 )
 
 type cryptoMode string
@@ -142,15 +144,55 @@ func (c *cryptoContext) decrypt(ciphertext []byte, tag []byte, nonce uint64, aad
 }
 
 func derivePasswordKey(password string, channelID uint32) []byte {
+	passwordHash := normalizePasswordHash(password)
+	if len(passwordHash) == 0 {
+		return make([]byte, sha256.Size)
+	}
+
 	salt := make([]byte, 4)
 	binary.BigEndian.PutUint32(salt, channelID)
 
-	input := make([]byte, 0, len(password)+len(salt))
-	input = append(input, []byte(password)...)
+	input := make([]byte, 0, len(passwordHash)+len(salt))
+	input = append(input, passwordHash...)
 	input = append(input, salt...)
 
 	sum := sha256.Sum256(input)
 	return sum[:]
+}
+
+func normalizePasswordHash(passwordOrHash string) []byte {
+	raw := passwordOrHash
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+
+	const prefix = "sha256:"
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, prefix) {
+		hexPart := strings.TrimSpace(trimmed[len(prefix):])
+		if decoded, ok := decodeSHA256Hex(hexPart); ok {
+			return decoded
+		}
+	}
+
+	if decoded, ok := decodeSHA256Hex(trimmed); ok {
+		return decoded
+	}
+
+	sum := sha256.Sum256([]byte(raw))
+	return sum[:]
+}
+
+func decodeSHA256Hex(value string) ([]byte, bool) {
+	if len(value) != sha256.Size*2 {
+		return nil, false
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != sha256.Size {
+		return nil, false
+	}
+	return decoded, true
 }
 
 func hkdfSHA256(ikm []byte, salt []byte, info []byte, length int) []byte {

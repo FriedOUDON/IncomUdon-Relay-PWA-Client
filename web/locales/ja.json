@@ -1,4 +1,4 @@
-﻿{
+{
   "app_title": "IncomUdon リレー PWA クライアント",
   "header_title": "Relay PWA Client",
   "language": "言語",
@@ -8,6 +8,7 @@
   "channel_id": "Channel ID",
   "sender_id": "Sender ID（未入力でランダム）",
   "password": "Password",
+  "password_unchanged": "(変更無し)",
   "crypto_mode": "暗号モード",
   "codec_mode": "送信ビットレート",
   "browser_codec": "ブラウザCodec",
@@ -85,6 +86,7 @@
   "log_audio_tx_failed": "音源送信に失敗しました（スロット {index}）: {error}",
   "log_audio_tx_ptt_active": "PTT送信中のため音源送信を開始できません",
   "log_tx_timeout_forced_off": "送話時間が上限に達したため、PTTを強制的にOFFにしました",
+  "log_password_hash_failed": "パスワードのSHA-256ハッシュ化に失敗しました: {error}",
   "log_reconnecting_settings": "設定変更を反映するため再接続しています",
   "mic_insecure_context": "非セキュアコンテキストではマイク API は使えません（HTTPS または localhost を使用してください）",
   "mic_not_supported": "このブラウザはマイク API に対応していません",
