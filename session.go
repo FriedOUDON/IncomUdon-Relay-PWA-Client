@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"sync"
@@ -140,11 +141,34 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 
 	requiresCodec2Uplink := s.cfg.TxCodec == txCodecCodec2
 	codec2Path := strings.TrimSpace(cfg.Codec2LibPath)
-	if codec2Path != "" || requiresCodec2Uplink {
+	if codec2Path == "" && !requiresCodec2Uplink {
+		log.Printf(
+			"codec2 load skipped (txCodec=%s channel=%d sender=%d): tx codec does not require codec2 and no codec2 library path was provided",
+			s.cfg.TxCodec,
+			s.cfg.ChannelID,
+			s.cfg.SenderID,
+		)
+	} else {
+		log.Printf(
+			"codec2 load attempt (txCodec=%s channel=%d sender=%d requested=%q requiredByTx=%t)",
+			s.cfg.TxCodec,
+			s.cfg.ChannelID,
+			s.cfg.SenderID,
+			codec2Path,
+			requiresCodec2Uplink,
+		)
 		engine, loadErr := newCodec2Engine(codec2Path)
 		if loadErr != nil {
+			log.Printf(
+				"codec2 load failed (requested=%q txCodec=%s channel=%d sender=%d): %v",
+				codec2Path,
+				s.cfg.TxCodec,
+				s.cfg.ChannelID,
+				s.cfg.SenderID,
+				loadErr,
+			)
 			s.startupWarnings = append(s.startupWarnings,
-				fmt.Sprintf("Codec2 disabled: %v", loadErr))
+				"Codec2 library load failed")
 			if requiresCodec2Uplink {
 				s.cfg.TxCodec = txCodecPCM
 				s.cfg.PCMOnly = true
@@ -153,6 +177,13 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 			}
 		} else {
 			s.codec2 = engine
+			log.Printf(
+				"codec2 load success (txCodec=%s channel=%d sender=%d resolved=%q)",
+				s.cfg.TxCodec,
+				s.cfg.ChannelID,
+				s.cfg.SenderID,
+				engine.LibraryPath(),
+			)
 		}
 	}
 
@@ -162,8 +193,18 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		opusPath := strings.TrimSpace(s.cfg.OpusLibPath)
 		engine, loadErr := newOpusDecoderEngine(opusPath, 8000, 1)
 		if loadErr != nil {
+			log.Printf(
+				"opus decoder load failed (requested=%q txCodec=%s uplink=%s downlink=%s channel=%d sender=%d): %v",
+				opusPath,
+				s.cfg.TxCodec,
+				s.cfg.UplinkCodec,
+				s.cfg.DownlinkCodec,
+				s.cfg.ChannelID,
+				s.cfg.SenderID,
+				loadErr,
+			)
 			s.startupWarnings = append(s.startupWarnings,
-				fmt.Sprintf("Opus decoder unavailable: %v", loadErr))
+				"Opus decoder library load failed")
 			if s.cfg.UplinkCodec == uplinkCodecOpus && s.cfg.TxCodec != txCodecOpus {
 				s.cfg.UplinkCodec = uplinkCodecPCM
 				s.startupWarnings = append(s.startupWarnings,
@@ -177,8 +218,18 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		opusPath := strings.TrimSpace(s.cfg.OpusLibPath)
 		engine, loadErr := newOpusEncoderEngine(opusPath, 8000, 1)
 		if loadErr != nil {
+			log.Printf(
+				"opus encoder load failed (requested=%q txCodec=%s uplink=%s downlink=%s channel=%d sender=%d): %v",
+				opusPath,
+				s.cfg.TxCodec,
+				s.cfg.UplinkCodec,
+				s.cfg.DownlinkCodec,
+				s.cfg.ChannelID,
+				s.cfg.SenderID,
+				loadErr,
+			)
 			s.startupWarnings = append(s.startupWarnings,
-				fmt.Sprintf("Opus encoder unavailable: %v", loadErr))
+				"Opus encoder library load failed")
 			if s.cfg.TxCodec == txCodecOpus {
 				s.cfg.TxCodec = txCodecPCM
 				s.cfg.PCMOnly = true

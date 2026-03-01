@@ -17,9 +17,13 @@ This project supports optional user-provided `libcodec2.so` placement.
 
 - Bundle directory: `pwa_client/third_party/libcodec2/`
 - Recommended file path: `pwa_client/third_party/libcodec2/linux-x86_64/libcodec2.so`
+- musl example:
+  - `pwa_client/third_party/libcodec2/linux-musl-x86_64/libcodec2.so`
 - Raspberry Pi examples:
   - `pwa_client/third_party/libcodec2/linux-raspi-armv7l/libcodec2.so`
   - `pwa_client/third_party/libcodec2/linux-raspi-aarch64/libcodec2.so`
+  - `pwa_client/third_party/libcodec2/linux-musl-armv7l/libcodec2.so`
+  - `pwa_client/third_party/libcodec2/linux-musl-aarch64/libcodec2.so`
 
 ## libopus Packaging
 
@@ -27,9 +31,13 @@ This project supports optional `libopus.so` bundling.
 
 - Bundle directory: `pwa_client/third_party/libopus/`
 - Recommended file path: `pwa_client/third_party/libopus/linux-x86_64/libopus.so`
+- musl example:
+  - `pwa_client/third_party/libopus/linux-musl-x86_64/libopus.so`
 - Raspberry Pi examples:
   - `pwa_client/third_party/libopus/linux-raspi-armv7l/libopus.so`
   - `pwa_client/third_party/libopus/linux-raspi-aarch64/libopus.so`
+  - `pwa_client/third_party/libopus/linux-musl-armv7l/libopus.so`
+  - `pwa_client/third_party/libopus/linux-musl-aarch64/libopus.so`
 - Opus license text: `pwa_client/LICENSES/opus/COPYING`
 - Opus patent notice links: `pwa_client/LICENSES/opus/PATENT-NOTICE.txt`
 

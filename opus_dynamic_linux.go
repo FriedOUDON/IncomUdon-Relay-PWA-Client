@@ -322,6 +322,9 @@ func defaultOpusLibraryCandidates() []string {
 	}
 
 	archDirs := []string{
+		"linux-musl-x86_64",
+		"linux-musl-aarch64",
+		"linux-musl-armv7l",
 		"linux-x86_64",
 		"linux-aarch64",
 		"linux-arm64",
@@ -332,11 +335,20 @@ func defaultOpusLibraryCandidates() []string {
 
 	switch runtime.GOARCH {
 	case "amd64":
-		archDirs = append([]string{"linux-x86_64"}, archDirs...)
+		archDirs = append([]string{"linux-musl-x86_64", "linux-x86_64"}, archDirs...)
 	case "arm64":
-		archDirs = append([]string{"linux-raspi-aarch64", "linux-aarch64", "linux-arm64"}, archDirs...)
+		archDirs = append([]string{
+			"linux-musl-aarch64",
+			"linux-raspi-aarch64",
+			"linux-aarch64",
+			"linux-arm64",
+		}, archDirs...)
 	case "arm":
-		archDirs = append([]string{"linux-raspi-armv7l", "linux-armv7l"}, archDirs...)
+		archDirs = append([]string{
+			"linux-musl-armv7l",
+			"linux-raspi-armv7l",
+			"linux-armv7l",
+		}, archDirs...)
 	}
 
 	seen := make(map[string]struct{})

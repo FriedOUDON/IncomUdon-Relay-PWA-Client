@@ -119,6 +119,7 @@ import "C"
 import (
 	"encoding/binary"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -153,6 +154,7 @@ type codec2Engine struct {
 func newCodec2Engine(libPath string) (*codec2Engine, error) {
 	candidates := make([]string, 0, 16)
 	path := strings.TrimSpace(libPath)
+	explicitPathProvided := path != ""
 	if path != "" {
 		candidates = append(candidates, path)
 	} else {
@@ -161,7 +163,23 @@ func newCodec2Engine(libPath string) (*codec2Engine, error) {
 
 	var api C.codec2_api
 	var openErr error
+	tried := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+
+		statErrText := ""
+		statExists := false
+		if strings.Contains(candidate, "/") {
+			if _, statErr := os.Stat(candidate); statErr != nil {
+				statErrText = statErr.Error()
+			} else {
+				statExists = true
+			}
+		}
+
 		cPath := C.CString(candidate)
 		errBuf := make([]C.char, 512)
 		ok := C.codec2_api_open(&api, cPath, &errBuf[0], C.size_t(len(errBuf)))
@@ -171,10 +189,54 @@ func newCodec2Engine(libPath string) (*codec2Engine, error) {
 			openErr = nil
 			break
 		}
-		openErr = fmt.Errorf("%s", C.GoString(&errBuf[0]))
+		errText := C.GoString(&errBuf[0])
+		if statErrText != "" {
+			errText = fmt.Sprintf("%s; stat=%s", errText, statErrText)
+		} else if statExists && strings.Contains(strings.ToLower(errText), "no such file or directory") {
+			errText = fmt.Sprintf("%s (file exists; dependent shared library or runtime loader may be missing)", errText)
+		}
+		tried = append(tried, fmt.Sprintf("%s (%s)", candidate, errText))
+		openErr = fmt.Errorf("%s", errText)
 	}
 	if openErr != nil {
-		return nil, fmt.Errorf("failed to load codec2 library: %w", openErr)
+		if len(tried) == 0 {
+			return nil, fmt.Errorf("failed to load codec2 library: %w", openErr)
+		}
+
+		maxShown := 4
+		shown := tried
+		if len(tried) > maxShown {
+			shown = append([]string{}, tried[:maxShown]...)
+			shown = append(shown, fmt.Sprintf("... +%d more", len(tried)-maxShown))
+		}
+
+		hint := ""
+		for _, item := range tried {
+			lower := strings.ToLower(item)
+			switch {
+			case strings.Contains(item, "stat="):
+				hint = " (specified path is not visible from runtime; in Docker, use an in-container path or bind-mount it)"
+			case strings.Contains(item, "__memcpy_chk"):
+				hint = " (detected glibc/musl mismatch; use musl-built libcodec2.so on Alpine)"
+			case strings.Contains(lower, "wrong elf class"), strings.Contains(lower, "exec format error"):
+				hint = " (detected architecture mismatch; verify library arch matches runtime arch)"
+			case strings.Contains(item, "No such file or directory"):
+				hint = " (library file or dependent shared library is missing)"
+			}
+			if hint != "" {
+				break
+			}
+		}
+		if hint == "" && explicitPathProvided {
+			hint = " (explicit path was provided but could not be opened; verify container path and dependent libraries)"
+		}
+
+		return nil, fmt.Errorf(
+			"failed to load codec2 library; set -codec2-lib or INCOMUDON_CODEC2_LIB%s (tried %d candidates: %s)",
+			hint,
+			len(tried),
+			strings.Join(shown, "; "),
+		)
 	}
 	if path == "" {
 		return nil, fmt.Errorf("failed to load codec2 library: no candidate path")
@@ -200,6 +262,9 @@ func defaultCodec2LibraryCandidates() []string {
 	}
 
 	archDirs := []string{
+		"linux-musl-x86_64",
+		"linux-musl-aarch64",
+		"linux-musl-armv7l",
 		"linux-x86_64",
 		"linux-aarch64",
 		"linux-arm64",
@@ -210,15 +275,25 @@ func defaultCodec2LibraryCandidates() []string {
 
 	switch runtime.GOARCH {
 	case "amd64":
-		archDirs = append([]string{"linux-x86_64"}, archDirs...)
+		archDirs = append([]string{"linux-musl-x86_64", "linux-x86_64"}, archDirs...)
 	case "arm64":
-		archDirs = append([]string{"linux-raspi-aarch64", "linux-aarch64", "linux-arm64"}, archDirs...)
+		archDirs = append([]string{
+			"linux-musl-aarch64",
+			"linux-raspi-aarch64",
+			"linux-aarch64",
+			"linux-arm64",
+		}, archDirs...)
 	case "arm":
-		archDirs = append([]string{"linux-raspi-armv7l", "linux-armv7l"}, archDirs...)
+		archDirs = append([]string{
+			"linux-musl-armv7l",
+			"linux-raspi-armv7l",
+			"linux-armv7l",
+		}, archDirs...)
 	}
 
 	sharedObjects := []string{
 		"libcodec2.so",
+		"libcodec2-local.so",
 		"libcodec2.so.1",
 		"libcodec2.so.0",
 	}
@@ -247,7 +322,7 @@ func defaultCodec2LibraryCandidates() []string {
 		}
 	}
 
-	for _, soName := range []string{"libcodec2.so.1", "libcodec2.so.0", "libcodec2.so"} {
+	for _, soName := range []string{"libcodec2.so.1", "libcodec2.so.0", "libcodec2.so", "libcodec2-local.so"} {
 		appendUnique(soName)
 	}
 
