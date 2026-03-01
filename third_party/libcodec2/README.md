@@ -16,3 +16,8 @@ Auto-search (when `-codec2-lib` is not specified) checks these bundle directorie
 under `/opt/libcodec2`, `/opt/codec2`, and `third_party/libcodec2`.
 
 This repository does not include `libcodec2.so` by default.
+
+Compatibility requirement for recent IncomUdon builds:
+
+- `libcodec2.so` must provide `incomudon_codec2_abi_version()`.
+- Expected ABI value is `2026022801`.

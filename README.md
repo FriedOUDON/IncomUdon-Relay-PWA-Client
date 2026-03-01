@@ -25,6 +25,12 @@ This project supports optional user-provided `libcodec2.so` placement.
   - `pwa_client/third_party/libcodec2/linux-musl-armv7l/libcodec2.so`
   - `pwa_client/third_party/libcodec2/linux-musl-aarch64/libcodec2.so`
 
+Compatibility requirement:
+
+- `libcodec2.so` must export `incomudon_codec2_abi_version`.
+- Expected ABI value: `2026022801`.
+- If ABI/symbol does not match, PWA marks Codec2 unavailable and falls back to PCM.
+
 ## libopus Packaging
 
 This project supports optional `libopus.so` bundling.
@@ -71,6 +77,9 @@ When `-codec2-lib` is not specified and uplink Codec2 is enabled, loader auto-se
 `/opt/libcodec2` and `third_party/libcodec2` (including arch subdirectories).
 
 If Opus cannot be loaded, uplink/downlink automatically fall back to PCM.
+
+If Codec2 cannot be loaded (missing symbol/ABI mismatch/dependency issue), uplink/downlink
+Codec2 paths are disabled and PWA falls back to PCM.
 
 Browser Opus requires `WebCodecs AudioEncoder` (uplink) and `WebCodecs AudioDecoder` (downlink).
 

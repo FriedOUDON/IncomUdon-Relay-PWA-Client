@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	pathpkg "path"
 	"strings"
 	"sync"
 	"time"
@@ -157,6 +158,7 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 			codec2Path,
 			requiresCodec2Uplink,
 		)
+		codec2LibName := libraryDisplayName(codec2Path, "libcodec2.so")
 		engine, loadErr := newCodec2Engine(codec2Path)
 		if loadErr != nil {
 			log.Printf(
@@ -168,7 +170,7 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 				loadErr,
 			)
 			s.startupWarnings = append(s.startupWarnings,
-				"Codec2 library load failed")
+				fmt.Sprintf("Codec2 library load failed (%s)", codec2LibName))
 			if requiresCodec2Uplink {
 				s.cfg.TxCodec = txCodecPCM
 				s.cfg.PCMOnly = true
@@ -177,13 +179,17 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 			}
 		} else {
 			s.codec2 = engine
+			codec2LibName = libraryDisplayName(engine.LibraryPath(), codec2LibName)
 			log.Printf(
-				"codec2 load success (txCodec=%s channel=%d sender=%d resolved=%q)",
+				"codec2 load success (txCodec=%s channel=%d sender=%d resolved=%q abi=%d)",
 				s.cfg.TxCodec,
 				s.cfg.ChannelID,
 				s.cfg.SenderID,
 				engine.LibraryPath(),
+				engine.ABIVersion(),
 			)
+			s.startupWarnings = append(s.startupWarnings,
+				fmt.Sprintf("Codec2 library load succeeded (%s)", codec2LibName))
 		}
 	}
 
@@ -191,6 +197,7 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 	loadEncoder := s.cfg.DownlinkCodec == downlinkCodecOpus || s.cfg.TxCodec == txCodecOpus
 	if loadDecoder {
 		opusPath := strings.TrimSpace(s.cfg.OpusLibPath)
+		opusLibName := libraryDisplayName(opusPath, "libopus.so")
 		engine, loadErr := newOpusDecoderEngine(opusPath, 8000, 1)
 		if loadErr != nil {
 			log.Printf(
@@ -204,7 +211,7 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 				loadErr,
 			)
 			s.startupWarnings = append(s.startupWarnings,
-				"Opus decoder library load failed")
+				fmt.Sprintf("Opus decoder library load failed (%s)", opusLibName))
 			if s.cfg.UplinkCodec == uplinkCodecOpus && s.cfg.TxCodec != txCodecOpus {
 				s.cfg.UplinkCodec = uplinkCodecPCM
 				s.startupWarnings = append(s.startupWarnings,
@@ -212,10 +219,14 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 			}
 		} else {
 			s.opusDecoder = engine
+			opusLibName = libraryDisplayName(engine.LibraryPath(), opusLibName)
+			s.startupWarnings = append(s.startupWarnings,
+				fmt.Sprintf("Opus decoder library load succeeded (%s)", opusLibName))
 		}
 	}
 	if loadEncoder {
 		opusPath := strings.TrimSpace(s.cfg.OpusLibPath)
+		opusLibName := libraryDisplayName(opusPath, "libopus.so")
 		engine, loadErr := newOpusEncoderEngine(opusPath, 8000, 1)
 		if loadErr != nil {
 			log.Printf(
@@ -229,7 +240,7 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 				loadErr,
 			)
 			s.startupWarnings = append(s.startupWarnings,
-				"Opus encoder library load failed")
+				fmt.Sprintf("Opus encoder library load failed (%s)", opusLibName))
 			if s.cfg.TxCodec == txCodecOpus {
 				s.cfg.TxCodec = txCodecPCM
 				s.cfg.PCMOnly = true
@@ -243,6 +254,9 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 			}
 		} else {
 			s.opusEncoder = engine
+			opusLibName = libraryDisplayName(engine.LibraryPath(), opusLibName)
+			s.startupWarnings = append(s.startupWarnings,
+				fmt.Sprintf("Opus encoder library load succeeded (%s)", opusLibName))
 		}
 	}
 
@@ -287,43 +301,10 @@ func (s *relaySession) Start() {
 		})
 	}
 
-	if s.codec2 != nil {
-		message := "Codec2 dynamic library loaded"
-		if path := strings.TrimSpace(s.codec2.LibraryPath()); path != "" {
-			message = fmt.Sprintf("Codec2 dynamic library loaded: %s", path)
-		}
-		s.emitEvent(serverEvent{
-			Type:    "status",
-			Level:   "info",
-			Message: message,
-		})
-	}
-	if s.opusDecoder != nil {
-		message := "Opus decoder library loaded"
-		if path := strings.TrimSpace(s.opusDecoder.LibraryPath()); path != "" {
-			message = fmt.Sprintf("Opus decoder library loaded: %s", path)
-		}
-		s.emitEvent(serverEvent{
-			Type:    "status",
-			Level:   "info",
-			Message: message,
-		})
-	}
-	if s.opusEncoder != nil {
-		message := "Opus encoder library loaded"
-		if path := strings.TrimSpace(s.opusEncoder.LibraryPath()); path != "" {
-			message = fmt.Sprintf("Opus encoder library loaded: %s", path)
-		}
-		s.emitEvent(serverEvent{
-			Type:    "status",
-			Level:   "info",
-			Message: message,
-		})
-	}
 	for _, warning := range s.startupWarnings {
 		s.emitEvent(serverEvent{
 			Type:    "status",
-			Level:   "warn",
+			Level:   startupStatusLevel(warning),
 			Message: warning,
 		})
 	}
@@ -1503,4 +1484,27 @@ func udpAddrEqual(a, b *net.UDPAddr) bool {
 		return false
 	}
 	return a.IP.Equal(b.IP)
+}
+
+func libraryDisplayName(path string, fallback string) string {
+	cleaned := strings.TrimSpace(path)
+	if cleaned == "" {
+		return fallback
+	}
+	normalized := strings.ReplaceAll(cleaned, "\\", "/")
+	name := strings.TrimSpace(pathpkg.Base(normalized))
+	switch name {
+	case "", ".", "/":
+		return fallback
+	default:
+		return name
+	}
+}
+
+func startupStatusLevel(message string) string {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if strings.Contains(lower, "succeeded") {
+		return "info"
+	}
+	return "warn"
 }

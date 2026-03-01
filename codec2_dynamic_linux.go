@@ -20,6 +20,7 @@ typedef void (*codec2_encode_fn)(CODEC2*, unsigned char*, short*);
 typedef void (*codec2_decode_fn)(CODEC2*, short*, const unsigned char*);
 typedef int (*codec2_bits_per_frame_fn)(CODEC2*);
 typedef int (*codec2_samples_per_frame_fn)(CODEC2*);
+typedef int (*codec2_abi_version_fn)(void);
 
 typedef struct {
     void* handle;
@@ -29,6 +30,7 @@ typedef struct {
     codec2_decode_fn decode_fn;
     codec2_bits_per_frame_fn bits_fn;
     codec2_samples_per_frame_fn samples_fn;
+    codec2_abi_version_fn abi_fn;
 } codec2_api;
 
 static int codec2_load_symbol(void* handle, const char* name, void** out, char* err, size_t errLen) {
@@ -59,7 +61,8 @@ static int codec2_api_open(codec2_api* api, const char* path, char* err, size_t 
         !codec2_load_symbol(api->handle, "codec2_encode", (void**)&api->encode_fn, err, errLen) ||
         !codec2_load_symbol(api->handle, "codec2_decode", (void**)&api->decode_fn, err, errLen) ||
         !codec2_load_symbol(api->handle, "codec2_bits_per_frame", (void**)&api->bits_fn, err, errLen) ||
-        !codec2_load_symbol(api->handle, "codec2_samples_per_frame", (void**)&api->samples_fn, err, errLen)) {
+        !codec2_load_symbol(api->handle, "codec2_samples_per_frame", (void**)&api->samples_fn, err, errLen) ||
+        !codec2_load_symbol(api->handle, "incomudon_codec2_abi_version", (void**)&api->abi_fn, err, errLen)) {
         dlclose(api->handle);
         memset(api, 0, sizeof(*api));
         return 0;
@@ -102,6 +105,13 @@ static int codec2_api_samples_per_frame(codec2_api* api, CODEC2* state) {
     return api->samples_fn(state);
 }
 
+static int codec2_api_abi_version(codec2_api* api) {
+    if (api->abi_fn == NULL) {
+        return 0;
+    }
+    return api->abi_fn();
+}
+
 static void codec2_api_encode(codec2_api* api, CODEC2* state, unsigned char* bits, short* speechIn) {
     if (api->encode_fn != NULL && state != NULL) {
         api->encode_fn(state, bits, speechIn);
@@ -133,6 +143,8 @@ const (
 	codec2Mode1600 = 2
 	codec2Mode700C = 8
 	codec2Mode450  = 10
+
+	incomUdonCodec2ABIVersion = 2026022801
 )
 
 type codec2State struct {
@@ -144,8 +156,9 @@ type codec2State struct {
 type codec2Engine struct {
 	mu sync.Mutex
 
-	api  C.codec2_api
-	path string
+	api        C.codec2_api
+	path       string
+	abiVersion int
 
 	txStates map[int]*codec2State
 	rxStates map[int]*codec2State
@@ -185,9 +198,27 @@ func newCodec2Engine(libPath string) (*codec2Engine, error) {
 		ok := C.codec2_api_open(&api, cPath, &errBuf[0], C.size_t(len(errBuf)))
 		C.free(unsafe.Pointer(cPath))
 		if ok != 0 {
+			abiVersion := int(C.codec2_api_abi_version(&api))
+			if abiVersion != incomUdonCodec2ABIVersion {
+				C.codec2_api_close(&api)
+				errText := fmt.Sprintf(
+					"codec2 ABI mismatch (expected=%d got=%d)",
+					incomUdonCodec2ABIVersion,
+					abiVersion,
+				)
+				tried = append(tried, fmt.Sprintf("%s (%s)", candidate, errText))
+				openErr = fmt.Errorf("%s", errText)
+				continue
+			}
 			path = candidate
-			openErr = nil
-			break
+			engine := &codec2Engine{
+				api:        api,
+				path:       path,
+				abiVersion: abiVersion,
+				txStates:   make(map[int]*codec2State),
+				rxStates:   make(map[int]*codec2State),
+			}
+			return engine, nil
 		}
 		errText := C.GoString(&errBuf[0])
 		if statErrText != "" {
@@ -238,18 +269,7 @@ func newCodec2Engine(libPath string) (*codec2Engine, error) {
 			strings.Join(shown, "; "),
 		)
 	}
-	if path == "" {
-		return nil, fmt.Errorf("failed to load codec2 library: no candidate path")
-	}
-
-	engine := &codec2Engine{
-		api:      api,
-		path:     path,
-		txStates: make(map[int]*codec2State),
-		rxStates: make(map[int]*codec2State),
-	}
-
-	return engine, nil
+	return nil, fmt.Errorf("failed to load codec2 library: no candidate path")
 }
 
 func defaultCodec2LibraryCandidates() []string {
@@ -346,6 +366,10 @@ func (e *codec2Engine) Close() {
 
 func (e *codec2Engine) LibraryPath() string {
 	return e.path
+}
+
+func (e *codec2Engine) ABIVersion() int {
+	return e.abiVersion
 }
 
 func (e *codec2Engine) PCMBytesForMode(mode int) (int, error) {

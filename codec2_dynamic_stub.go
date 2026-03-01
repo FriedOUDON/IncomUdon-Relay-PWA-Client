@@ -16,6 +16,10 @@ func (e *codec2Engine) LibraryPath() string {
 	return ""
 }
 
+func (e *codec2Engine) ABIVersion() int {
+	return 0
+}
+
 func (e *codec2Engine) PCMBytesForMode(mode int) (int, error) {
 	return 0, fmt.Errorf("codec2 is not available")
 }
