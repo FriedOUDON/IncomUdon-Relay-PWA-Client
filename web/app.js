@@ -78,6 +78,7 @@
   const localeStorageKey = "incomudon.pwa.locale.v1";
   const fallbackLocale = "en";
   const supportedUiLocales = ["en", "ja"];
+  const authRemainingHeader = "X-Incomudon-Auth-Remaining-Sec";
   const wsToken = initializeWSToken();
   const englishFallbackStrings = {
     app_title: "IncomUdon Relay PWA Client",
@@ -138,6 +139,8 @@
     log_ws_error: "websocket error",
     log_ws_auth_required: "websocket token is required; open with ?ws_token=...",
     log_auth_session_required: "authentication session is missing or expired; please sign in again",
+    log_auth_session_remaining_connect: "authentication session remaining at connect: {remaining}",
+    log_auth_session_remaining_ptt: "authentication session remaining at PTT: {remaining}",
     log_basic_auth_required: "basic authentication is required; reload the page and authenticate",
     log_browser_codec_opus: "browser codec: opus (uplink/downlink)",
     log_browser_opus_uplink_bitrate: "browser uplink opus bitrate: {bitrateKbps} kbps",
@@ -582,7 +585,7 @@
 
   async function fetchAuthSessionStatus() {
     if (!supportsAuthLogout()) {
-      return 204;
+      return { status: 204, remainingSec: null };
     }
     try {
       const response = await fetch(authCheckURL(), {
@@ -590,9 +593,20 @@
         credentials: "same-origin",
         cache: "no-store",
       });
-      return Number(response.status || 0);
+      const remainingRaw = response.headers.get(authRemainingHeader);
+      let remainingSec = null;
+      if (remainingRaw !== null && remainingRaw !== "") {
+        const parsed = Number.parseInt(remainingRaw, 10);
+        if (Number.isFinite(parsed) && parsed >= 0) {
+          remainingSec = parsed;
+        }
+      }
+      return {
+        status: Number(response.status || 0),
+        remainingSec,
+      };
     } catch (_) {
-      return 0;
+      return { status: 0, remainingSec: null };
     }
   }
 
@@ -634,15 +648,50 @@
     applyDisconnectedState();
   }
 
+  function formatRemainingAuthDuration(totalSec) {
+    const safe = Math.max(0, Number.parseInt(String(totalSec || 0), 10) || 0);
+    const days = Math.floor(safe / 86400);
+    const hours = Math.floor((safe % 86400) / 3600);
+    const minutes = Math.floor((safe % 3600) / 60);
+    const seconds = safe % 60;
+    const parts = [];
+    if (days > 0) {
+      parts.push(`${days}d`);
+    }
+    if (days > 0 || hours > 0) {
+      parts.push(`${hours}h`);
+    }
+    if (days > 0 || hours > 0 || minutes > 0) {
+      parts.push(`${minutes}m`);
+    }
+    parts.push(`${seconds}s`);
+    return parts.join(" ");
+  }
+
+  function logAuthSessionRemaining(remainingSec, phase) {
+    if (!Number.isFinite(remainingSec) || remainingSec < 0 || authMode !== "oidc") {
+      return;
+    }
+    if (phase !== "connect" && phase !== "ptt") {
+      return;
+    }
+    const remaining = formatRemainingAuthDuration(remainingSec);
+    const key = phase === "ptt"
+      ? "log_auth_session_remaining_ptt"
+      : "log_auth_session_remaining_connect";
+    appendLog(t(key, { remaining }), "info");
+  }
+
   async function ensureAuthSessionBeforeConnect() {
     if (!supportsAuthLogout()) {
       return true;
     }
-    const status = await fetchAuthSessionStatus();
-    if (status === 204 || status === 200 || status === 0) {
+    const authStatus = await fetchAuthSessionStatus();
+    if (authStatus.status === 204 || authStatus.status === 200 || authStatus.status === 0) {
+      logAuthSessionRemaining(authStatus.remainingSec, "connect");
       return true;
     }
-    if (status === 401) {
+    if (authStatus.status === 401) {
       notifyAuthSessionExpired();
       if (authMode === "oidc") {
         window.location.href = oidcLoginURL();
@@ -652,15 +701,16 @@
     return true;
   }
 
-  async function ensureAuthSessionBeforeTransmit() {
+  async function ensureAuthSessionBeforeTransmit(phase) {
     if (!supportsAuthLogout()) {
       return true;
     }
-    const status = await fetchAuthSessionStatus();
-    if (status === 204 || status === 200 || status === 0) {
+    const authStatus = await fetchAuthSessionStatus();
+    if (authStatus.status === 204 || authStatus.status === 200 || authStatus.status === 0) {
+      logAuthSessionRemaining(authStatus.remainingSec, phase);
       return true;
     }
-    if (status === 401) {
+    if (authStatus.status === 401) {
       notifyAuthSessionExpired();
       closeSessionForAuthExpiry();
       return false;
@@ -672,8 +722,8 @@
     if (!supportsAuthLogout()) {
       return;
     }
-    const status = await fetchAuthSessionStatus();
-    if (status === 401) {
+    const authStatus = await fetchAuthSessionStatus();
+    if (authStatus.status === 401) {
       notifyAuthSessionExpired();
     }
   }
@@ -1795,7 +1845,7 @@
       appendLog(t("log_audio_tx_missing_file", { index: index + 1 }), "warn");
       return;
     }
-    if (!(await ensureAuthSessionBeforeTransmit())) {
+    if (!(await ensureAuthSessionBeforeTransmit("audio_tx"))) {
       return;
     }
 
@@ -2758,7 +2808,7 @@
     }
 
     if (pressed && !force) {
-      if (!(await ensureAuthSessionBeforeTransmit())) {
+      if (!(await ensureAuthSessionBeforeTransmit("ptt"))) {
         return;
       }
       if (!state.connected || !state.pttPressed) {

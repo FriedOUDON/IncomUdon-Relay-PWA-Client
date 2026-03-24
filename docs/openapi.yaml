@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: IncomUdon Relay PWA Client HTTP API
-  version: 1.0.1
+  version: 1.0.2
   description: |
     HTTP and WebSocket handshake endpoints exposed by `pwa_client`.
 
@@ -98,6 +98,14 @@ paths:
       responses:
         "204":
           description: Authorized
+          headers:
+            X-Incomudon-Auth-Remaining-Sec:
+              description: |
+                Remaining OIDC session lifetime in seconds.
+                Present for authorized `oidc` sessions.
+              schema:
+                type: integer
+                minimum: 0
         "401":
           description: |
             Unauthorized.

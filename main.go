@@ -93,6 +93,7 @@ const (
 const (
 	oidcSessionCookieName = "incomudon_oidc_session"
 	oidcStateCookieName   = "incomudon_oidc_state"
+	authRemainingHeader   = "X-Incomudon-Auth-Remaining-Sec"
 )
 
 const (
@@ -1089,7 +1090,8 @@ func (a *appServer) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("WWW-Authenticate", `Basic realm="IncomUdon Relay PWA Client"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	case authModeOIDC:
-		if _, ok := a.ensureOIDCSession(w, r); ok {
+		if payload, ok := a.ensureOIDCSession(w, r); ok {
+			setAuthRemainingHeader(w, payload.Exp)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -1105,6 +1107,17 @@ func (a *appServer) oidcLoginURL(r *http.Request) string {
 	params := url.Values{}
 	params.Set("next", next)
 	return loginPath + "?" + params.Encode()
+}
+
+func setAuthRemainingHeader(w http.ResponseWriter, expUnix int64) {
+	if w == nil || expUnix <= 0 {
+		return
+	}
+	remaining := time.Until(time.Unix(expUnix, 0))
+	if remaining < 0 {
+		remaining = 0
+	}
+	w.Header().Set(authRemainingHeader, strconv.FormatInt(int64(remaining/time.Second), 10))
 }
 
 func (a *appServer) oidcRedirectURL(r *http.Request) string {
