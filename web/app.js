@@ -243,6 +243,7 @@
     settingsReconnectTimer: null,
     startupAutoConnectAttempted: false,
     startupLegacyPlainPassword: "",
+    lastAuthSessionNoticeMs: 0,
   };
   const senderIDMin = 1;
   const senderIDMax = 0x7fffffff;
@@ -579,9 +580,9 @@
     return `${loginPath}?${params.toString()}`;
   }
 
-  async function ensureAuthSessionBeforeConnect() {
+  async function fetchAuthSessionStatus() {
     if (!supportsAuthLogout()) {
-      return true;
+      return 204;
     }
     try {
       const response = await fetch(authCheckURL(), {
@@ -589,47 +590,91 @@
         credentials: "same-origin",
         cache: "no-store",
       });
-      if (response.status === 204 || response.status === 200) {
-        return true;
-      }
-      if (response.status === 401) {
-        if (authMode === "oidc") {
-          appendLog(t("log_auth_session_required"), "warn");
-          window.location.href = oidcLoginURL();
-          return false;
-        }
-        if (authMode === "basic") {
-          appendLog(t("log_basic_auth_required"), "error");
-          return false;
-        }
-      }
-      return true;
+      return Number(response.status || 0);
     } catch (_) {
-      // Network failures are handled by websocket connection path.
+      return 0;
+    }
+  }
+
+  function currentAuthSessionMessage() {
+    if (authMode === "basic") {
+      return t("log_basic_auth_required");
+    }
+    return t("log_auth_session_required");
+  }
+
+  function notifyAuthSessionExpired() {
+    const message = currentAuthSessionMessage();
+    const now = Date.now();
+    if (now - Number(state.lastAuthSessionNoticeMs || 0) < 1500) {
+      return message;
+    }
+    state.lastAuthSessionNoticeMs = now;
+    appendLog(message, "warn");
+    try {
+      console.warn(`[IncomUdon] ${message}`);
+    } catch (_) {
+      // Ignore console access errors.
+    }
+    return message;
+  }
+
+  function closeSessionForAuthExpiry() {
+    const ws = state.ws;
+    if (ws) {
+      ws.onclose = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      try {
+        ws.close();
+      } catch (_) {
+        // Ignore websocket close failures.
+      }
+    }
+    applyDisconnectedState();
+  }
+
+  async function ensureAuthSessionBeforeConnect() {
+    if (!supportsAuthLogout()) {
       return true;
     }
+    const status = await fetchAuthSessionStatus();
+    if (status === 204 || status === 200 || status === 0) {
+      return true;
+    }
+    if (status === 401) {
+      notifyAuthSessionExpired();
+      if (authMode === "oidc") {
+        window.location.href = oidcLoginURL();
+      }
+      return false;
+    }
+    return true;
+  }
+
+  async function ensureAuthSessionBeforeTransmit() {
+    if (!supportsAuthLogout()) {
+      return true;
+    }
+    const status = await fetchAuthSessionStatus();
+    if (status === 204 || status === 200 || status === 0) {
+      return true;
+    }
+    if (status === 401) {
+      notifyAuthSessionExpired();
+      closeSessionForAuthExpiry();
+      return false;
+    }
+    return true;
   }
 
   async function checkAuthSessionAfterUnexpectedClose() {
     if (!supportsAuthLogout()) {
       return;
     }
-    try {
-      const response = await fetch(authCheckURL(), {
-        method: "GET",
-        credentials: "same-origin",
-        cache: "no-store",
-      });
-      if (response.status !== 401) {
-        return;
-      }
-      if (authMode === "oidc") {
-        appendLog(t("log_auth_session_required"), "warn");
-      } else if (authMode === "basic") {
-        appendLog(t("log_basic_auth_required"), "warn");
-      }
-    } catch (_) {
-      // Network or background throttling errors are not treated as auth failures.
+    const status = await fetchAuthSessionStatus();
+    if (status === 401) {
+      notifyAuthSessionExpired();
     }
   }
 
@@ -1750,6 +1795,9 @@
       appendLog(t("log_audio_tx_missing_file", { index: index + 1 }), "warn");
       return;
     }
+    if (!(await ensureAuthSessionBeforeTransmit())) {
+      return;
+    }
 
     const frames = await decodeAudioFileToFrames(slot.file);
     if (!frames || frames.length === 0) {
@@ -2709,6 +2757,15 @@
       return;
     }
 
+    if (pressed && !force) {
+      if (!(await ensureAuthSessionBeforeTransmit())) {
+        return;
+      }
+      if (!state.connected || !state.pttPressed) {
+        return;
+      }
+    }
+
     if (pressed) {
       state.txFrameIndex = 0;
       try {
@@ -3132,6 +3189,9 @@
           this.handleOutput(audioData);
         },
         error: (err) => {
+          if (shouldIgnoreOpusDecoderError(err)) {
+            return;
+          }
           appendLog(t("log_downlink_opus_decode_failed", { error: err.message || err }), "warn");
         },
       });
@@ -3162,6 +3222,9 @@
         this.decoder.decode(chunk);
         this.timestampUs += durationUs;
       } catch (err) {
+        if (shouldIgnoreOpusDecoderError(err)) {
+          return;
+        }
         appendLog(t("log_downlink_opus_decode_failed", { error: err.message || err }), "warn");
       }
     }
@@ -3200,6 +3263,9 @@
           sampleRate,
         });
       } catch (err) {
+        if (shouldIgnoreOpusDecoderError(err)) {
+          return;
+        }
         appendLog(t("log_downlink_opus_decode_failed", { error: err.message || err }), "warn");
       } finally {
         audioData.close();
@@ -3221,6 +3287,17 @@
       this.started = false;
       this.timestampUs = 0;
     }
+  }
+
+  function shouldIgnoreOpusDecoderError(err) {
+    const text = String((err && err.message) ? err.message : err || "").toLowerCase();
+    if (!text) {
+      return false;
+    }
+    if (!state.connected) {
+      return true;
+    }
+    return text.includes("closed codec") || text.includes("closed decoder");
   }
 
   class PCMPlayer {

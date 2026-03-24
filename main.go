@@ -98,7 +98,7 @@ const (
 const (
 	oidcSessionRefreshLeeway  = 30 * time.Second
 	maxOIDCSessionCookieTTL   = 30 * 24 * time.Hour
-	defaultOIDCSessionTTLText = "12h"
+	defaultOIDCSessionTTLText = "72h"
 )
 
 type oidcRuntime struct {
@@ -165,7 +165,7 @@ func main() {
 	oidcRedirectURLFlag := flag.String("oidc-redirect-url", os.Getenv("INCOMUDON_OIDC_REDIRECT_URL"), "OIDC redirect URL override (auth-mode=oidc)")
 	oidcScopesFlag := flag.String("oidc-scopes", getenvOrDefault("INCOMUDON_OIDC_SCOPES", "openid,profile,email"), "OIDC scopes CSV (auth-mode=oidc)")
 	oidcSessionSecretFlag := flag.String("oidc-session-secret", os.Getenv("INCOMUDON_OIDC_SESSION_SECRET"), "OIDC session signing secret (auth-mode=oidc)")
-	oidcSessionTTLFlag := flag.String("oidc-session-ttl", getenvOrDefault("INCOMUDON_OIDC_SESSION_TTL", defaultOIDCSessionTTLText), "OIDC session cookie TTL (e.g. 12h, 24h, 0 for token-exp-based)")
+	oidcSessionTTLFlag := flag.String("oidc-session-ttl", getenvOrDefault("INCOMUDON_OIDC_SESSION_TTL", defaultOIDCSessionTTLText), "OIDC session cookie TTL (e.g. 24h, 72h, 0 for token-exp-based)")
 	flag.Parse()
 
 	basePath := normalizeBasePath(*basePathFlag)

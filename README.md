@@ -69,7 +69,7 @@ This project supports optional `libopus.so` bundling.
 - `-oidc-session-secret <random-secret>`
 - `-oidc-scopes openid,profile,email`
 - `-oidc-redirect-url https://.../auth/callback` (optional override)
-- `-oidc-session-ttl 12h` (OIDC session cookie TTL; default `12h`, set `0` to follow token expiry)
+- `-oidc-session-ttl 72h` (OIDC session cookie TTL; default `72h`, set `0` to follow token expiry)
 - `INCOMUDON_OIDC_ISSUER`, `INCOMUDON_OIDC_CLIENT_ID`, `INCOMUDON_OIDC_CLIENT_SECRET`
 - `INCOMUDON_OIDC_SESSION_SECRET`, `INCOMUDON_OIDC_SCOPES`, `INCOMUDON_OIDC_REDIRECT_URL`, `INCOMUDON_OIDC_SESSION_TTL`
 

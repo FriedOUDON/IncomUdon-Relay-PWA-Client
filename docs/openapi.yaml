@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: IncomUdon Relay PWA Client HTTP API
-  version: 1.0.0
+  version: 1.0.1
   description: |
     HTTP and WebSocket handshake endpoints exposed by `pwa_client`.
 
@@ -9,6 +9,9 @@ info:
     - If `-base-path` is configured, all routes are served under that prefix.
       Example: `/auth/check` -> `/incomudon/auth/check`.
     - WebSocket message payloads are specified in `docs/asyncapi.yaml`.
+    - In `oidc` mode, the signed session cookie default TTL is `72h`
+      (`-oidc-session-ttl`, `INCOMUDON_OIDC_SESSION_TTL`).
+      Set `0` to follow token expiry.
 servers:
   - url: https://example.com{basePath}
     description: Reverse-proxy deployment
@@ -90,11 +93,16 @@ paths:
       summary: Check current authentication session
       description: |
         Returns `204` when current request is authorized under configured `-auth-mode`.
+        The browser UI uses this endpoint before WebSocket connect and before
+        starting transmit operations such as PTT/audio-file TX.
       responses:
         "204":
           description: Authorized
         "401":
-          description: Unauthorized
+          description: |
+            Unauthorized.
+            In browser UI, this means the authentication session is missing or expired;
+            the client logs a re-login warning and aborts transmit/connect attempts.
   /auth/logout:
     get:
       tags: [Authentication]
@@ -139,6 +147,8 @@ paths:
       description: |
         OIDC only (`-auth-mode oidc`).
         Exchanges authorization code, verifies ID token, then sets signed session cookie.
+        Default cookie TTL is `72h` unless overridden by `-oidc-session-ttl`
+        or `INCOMUDON_OIDC_SESSION_TTL`.
       parameters:
         - name: code
           in: query
