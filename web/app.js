@@ -12,7 +12,7 @@
   const txCodecPCM = "pcm";
   const txCodecCodec2 = "codec2";
   const txCodecOpus = "opus";
-  const defaultOpusBitrate = 8000;
+  const defaultOpusBitrate = 12000;
   const micVolumeMinPercent = 0;
   const micVolumeMaxPercent = 300;
   const micVolumeDefaultPercent = 200;
@@ -35,6 +35,7 @@
     cryptoMode: document.getElementById("cryptoMode"),
     codecMode: document.getElementById("codecMode"),
     browserCodec: document.getElementById("browserCodec"),
+    wsToken: document.getElementById("wsToken"),
     txCodec: document.getElementById("txCodec"),
     micVolume: document.getElementById("micVolume"),
     micVolumeValue: document.getElementById("micVolumeValue"),
@@ -79,7 +80,8 @@
   const fallbackLocale = "en";
   const supportedUiLocales = ["en", "ja"];
   const authRemainingHeader = "X-Incomudon-Auth-Remaining-Sec";
-  const wsToken = initializeWSToken();
+  const startupQueryOverrides = readStartupQueryOverrides();
+  const initialWSToken = initializeWSToken(startupQueryOverrides);
   const englishFallbackStrings = {
     app_title: "IncomUdon Relay PWA Client",
     header_title: "Relay PWA Client",
@@ -93,6 +95,7 @@
     crypto_mode: "Crypto Mode",
     codec_mode: "Transmit Bitrate",
     browser_codec: "Browser Codec",
+    ws_token: "WS Token",
     tx_codec: "TX Codec",
     mic_volume: "Mic Volume",
     tx_codec_pcm: "pcm",
@@ -204,9 +207,9 @@
     player: null,
     mic: null,
     browserCodec: "pcm",
-    txCodec: txCodecPCM,
-    uplinkCodec: "pcm",
-    downlinkCodec: "pcm",
+      txCodec: initialOpusReady ? txCodecOpus : txCodecPCM,
+      uplinkCodec: "pcm",
+      downlinkCodec: "pcm",
     codecAvailability: {
       codec2: initialCodec2Ready,
       opus: initialOpusReady,
@@ -325,6 +328,16 @@
     const raw = ui.password.value || "";
     if (!raw) {
       state.passwordHash = normalizePasswordHashToken(state.passwordHash);
+      if (!state.passwordHash) {
+        const legacyPlain = String(state.startupLegacyPlainPassword || "");
+        if (legacyPlain) {
+          const hashHex = await sha256Hex(legacyPlain);
+          state.passwordHash = `${passwordHashPrefix}${hashHex}`;
+          state.startupLegacyPlainPassword = "";
+          applyPasswordInputPresentation();
+          persistFormSettings();
+        }
+      }
       applyPasswordInputPresentation();
       return state.passwordHash;
     }
@@ -561,6 +574,7 @@
     const proto = window.location.protocol === "https:" ? "wss" : "ws";
     const path = basePath ? `${basePath}/ws` : "/ws";
     const url = new URL(`${proto}://${window.location.host}${path}`);
+    const wsToken = currentWSToken();
     if (wsToken) {
       url.searchParams.set("token", wsToken);
     }
@@ -756,7 +770,7 @@
     if (!(await ensureAuthSessionBeforeConnect())) {
       return;
     }
-    if (wsTokenRequired && !wsToken) {
+    if (wsTokenRequired && !currentWSToken()) {
       appendLog(t("log_ws_auth_required"), "error");
       setConnectionView({ kind: "error", level: "error" });
       return;
@@ -920,7 +934,7 @@
     };
 
     ws.onclose = (event) => {
-      if (wsTokenRequired && !wsToken) {
+      if (wsTokenRequired && !currentWSToken()) {
         appendLog(t("log_ws_auth_required"), "error");
       }
       if (event && Number(event.code) === 1006 && supportsAuthLogout()) {
@@ -1187,9 +1201,10 @@
       senderId: String(randomSenderID()),
       passwordHash: "",
       cryptoMode: "aes-gcm",
-      codecMode: "1600",
+      codecMode: initialOpusReady ? String(defaultOpusBitrate) : "1600",
       browserCodec: "opus",
-      txCodec: txCodecPCM,
+      txCodec: initialOpusReady ? txCodecOpus : txCodecPCM,
+      wsToken: initialWSToken,
       micVolumePercent: String(micVolumeDefaultPercent),
       qosEnabled: true,
       fecEnabled: true,
@@ -1214,10 +1229,12 @@
       ...defaults,
       ...stored,
     };
+    applyStartupQueryOverrides(merged);
 
     if (!merged.relayHost || !String(merged.relayHost).trim()) {
       merged.relayHost = defaults.relayHost;
     }
+    state.startupLegacyPlainPassword = "";
     merged.passwordHash = normalizePasswordHashToken(merged.passwordHash || merged.password);
     if (!merged.passwordHash && typeof merged.password === "string" && merged.password.length > 0) {
       state.startupLegacyPlainPassword = merged.password;
@@ -1260,6 +1277,9 @@
     ui.password.value = "";
     ui.cryptoMode.value = String(merged.cryptoMode);
     ui.browserCodec.value = normalizeBrowserCodec(merged.browserCodec);
+    if (ui.wsToken) {
+      ui.wsToken.value = String(merged.wsToken || "");
+    }
     if (ui.txCodec) {
       ui.txCodec.value = normalizeTxCodec(merged.txCodec);
     }
@@ -1283,6 +1303,7 @@
     setAudioTxSlotCount(merged.audioTxSlotCount, false);
     applyFixedRelayUIState();
     applyPasswordInputPresentation();
+    sanitizeStartupURLQuery();
 
     persistFormSettings();
   }
@@ -1297,6 +1318,7 @@
       ui.cryptoMode,
       ui.codecMode,
       ui.browserCodec,
+      ui.wsToken,
       ui.txCodec,
       ui.qosEnabled,
       ui.fecEnabled,
@@ -1328,6 +1350,7 @@
       ui.cryptoMode,
       ui.codecMode,
       ui.browserCodec,
+      ui.wsToken,
       ui.txCodec,
       ui.qosEnabled,
       ui.fecEnabled,
@@ -1490,6 +1513,7 @@
       cryptoMode: ui.cryptoMode.value,
       codecMode: ui.codecMode.value,
       browserCodec: ui.browserCodec.value,
+      wsToken: currentWSToken(),
       txCodec: selectedTxCodec,
       micVolumePercent: String(normalizeMicVolumePercent(ui.micVolume ? ui.micVolume.value : state.micVolumePercent)),
       qosEnabled: ui.qosEnabled ? !!ui.qosEnabled.checked : true,
@@ -1510,6 +1534,7 @@
     } catch (_) {
       // Ignore persistence errors (private mode or storage denied).
     }
+    persistLegacyWSToken(settings.wsToken);
   }
 
   function bindCueControls() {
@@ -2201,6 +2226,7 @@
     setText("labelCryptoMode", t("crypto_mode"));
     setText("labelCodecMode", t("codec_mode"));
     setText("labelBrowserCodec", t("browser_codec"));
+    setText("labelWsToken", t("ws_token"));
     setText("labelTxCodec", t("tx_codec"));
     setText("labelMicVolume", t("mic_volume"));
     setText("labelQosEnabled", t("qos_enabled"));
@@ -2622,21 +2648,20 @@
     ui.relayPort.disabled = true;
   }
 
-  function initializeWSToken() {
-    const params = new URLSearchParams(window.location.search || "");
-    const fromQuery = String(params.get("ws_token") || params.get("token") || "").trim();
+  function initializeWSToken(overrides = startupQueryOverrides) {
+    const fromQuery = overrides && overrides.hasWsToken
+      ? String(overrides.wsToken || "").trim()
+      : "";
     if (fromQuery) {
-      try {
-        localStorage.setItem(wsTokenStorageKey, fromQuery);
-      } catch (_) {
-        // Ignore storage errors.
-      }
-      try {
-        sessionStorage.setItem(wsTokenStorageKey, fromQuery);
-      } catch (_) {
-        // Ignore storage errors.
-      }
+      persistLegacyWSToken(fromQuery);
       return fromQuery;
+    }
+    const storedSettings = readStoredSettings();
+    if (storedSettings && typeof storedSettings.wsToken === "string") {
+      const storedToken = String(storedSettings.wsToken || "").trim();
+      if (storedToken) {
+        return storedToken;
+      }
     }
     try {
       const stored = String(localStorage.getItem(wsTokenStorageKey) || "").trim();
@@ -2655,6 +2680,121 @@
       // Ignore storage errors.
     }
     return "";
+  }
+
+  function currentWSToken() {
+    if (ui.wsToken) {
+      return String(ui.wsToken.value || "").trim();
+    }
+    return String(initialWSToken || "").trim();
+  }
+
+  function persistLegacyWSToken(value) {
+    const token = String(value || "").trim();
+    try {
+      if (token) {
+        localStorage.setItem(wsTokenStorageKey, token);
+      } else {
+        localStorage.removeItem(wsTokenStorageKey);
+      }
+    } catch (_) {
+      // Ignore storage errors.
+    }
+    try {
+      if (token) {
+        sessionStorage.setItem(wsTokenStorageKey, token);
+      } else {
+        sessionStorage.removeItem(wsTokenStorageKey);
+      }
+    } catch (_) {
+      // Ignore storage errors.
+    }
+  }
+
+  function firstQueryValue(params, names) {
+    if (!(params instanceof URLSearchParams) || !Array.isArray(names)) {
+      return "";
+    }
+    for (let i = 0; i < names.length; i += 1) {
+      const value = String(params.get(names[i]) || "").trim();
+      if (value) {
+        return value;
+      }
+    }
+    return "";
+  }
+
+  function readStartupQueryOverrides() {
+    const params = new URLSearchParams(window.location.search || "");
+    const wsToken = firstQueryValue(params, ["ws_token", "token"]);
+    const rawChannelId = firstQueryValue(params, ["channel_id", "channelId", "channel"]);
+    const password = firstQueryValue(params, ["password", "pass", "pw"]);
+    const rawTxCodec = firstQueryValue(params, ["tx_codec", "txCodec", "codec"]);
+    const parsedChannelId = Number.parseInt(rawChannelId, 10);
+    const channelId = Number.isInteger(parsedChannelId) && parsedChannelId > 0
+      ? String(parsedChannelId)
+      : "";
+    const normalizedTxCodec = String(rawTxCodec || "").trim().toLowerCase();
+    const txCodec =
+      normalizedTxCodec === txCodecPCM ||
+      normalizedTxCodec === txCodecCodec2 ||
+      normalizedTxCodec === txCodecOpus
+        ? normalizedTxCodec
+        : "";
+
+    return {
+      wsToken,
+      hasWsToken: wsToken !== "",
+      channelId,
+      hasChannelId: channelId !== "",
+      password,
+      hasPassword: password !== "",
+      txCodec,
+      hasTxCodec: txCodec !== "",
+    };
+  }
+
+  function applyStartupQueryOverrides(settings) {
+    if (!settings || typeof settings !== "object") {
+      return;
+    }
+    if (startupQueryOverrides.hasChannelId) {
+      settings.channelId = startupQueryOverrides.channelId;
+    }
+    if (startupQueryOverrides.hasPassword) {
+      settings.password = startupQueryOverrides.password;
+      settings.passwordHash = "";
+    }
+    if (startupQueryOverrides.hasTxCodec) {
+      settings.txCodec = startupQueryOverrides.txCodec;
+    }
+    if (startupQueryOverrides.hasWsToken) {
+      settings.wsToken = startupQueryOverrides.wsToken;
+    }
+  }
+
+  function sanitizeStartupURLQuery() {
+    const currentSearch = String(window.location.search || "");
+    if (!currentSearch) {
+      return;
+    }
+    if (!window.history || typeof window.history.replaceState !== "function") {
+      return;
+    }
+
+    const url = new URL(window.location.href);
+    url.search = "";
+    if (startupQueryOverrides.hasWsToken) {
+      url.searchParams.set("ws_token", startupQueryOverrides.wsToken);
+    }
+
+    const next = `${url.pathname}${url.search}${url.hash}`;
+    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (next === current) {
+      return;
+    }
+
+    window.history.replaceState(window.history.state, "", next);
   }
 
   function randomSenderID() {

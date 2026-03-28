@@ -12,6 +12,7 @@
   "crypto_mode": "Crypto Mode",
   "codec_mode": "Transmit Bitrate",
   "browser_codec": "Browser Codec",
+  "ws_token": "WS Token",
   "tx_codec": "TX Codec",
   "mic_volume": "Mic Volume",
   "tx_codec_pcm": "pcm",

@@ -61,6 +61,7 @@ This project supports optional `libopus.so` bundling.
 - `INCOMUDON_AUTH_MODE=none|basic|oidc`
 - `-ws-token <shared-token>`
 - `INCOMUDON_WS_TOKEN=<shared-token>`
+- Web UI field: `WS Token` (`Advanced Settings`)
 - `-basic-user <user>` / `-basic-pass <pass>`
 - `INCOMUDON_BASIC_USER` / `INCOMUDON_BASIC_PASS`
 - `-oidc-issuer <issuer-url>`
@@ -103,6 +104,7 @@ Browser Opus requires `WebCodecs AudioEncoder` (uplink) and `WebCodecs AudioDeco
     - `https://your-host.example/?ws_token=<shared-token>`
     - If `-base-path /incomudon/` is used, include trailing slash:
       - `https://your-host.example/incomudon/?ws_token=<shared-token>`
+  - Query `ws_token` overrides the `WS Token` textbox and any stored value.
   - Token received from query is cached in browser storage and reused on next launches.
   - `wss://.../ws?token=<shared-token>` is sent automatically by the web app.
 - Recommended profile:
@@ -200,6 +202,32 @@ Cue settings are stored in browser `localStorage`.
 - Locale files:
   - `web/locales/en.json`
   - `web/locales/ja.json`
+
+## Startup Query Overrides
+
+The browser UI supports startup-time query overrides for controlled launch links.
+
+- Supported parameters:
+  - `ws_token` or `token`
+  - `channel_id`, `channelId`, or `channel`
+  - `password`, `pass`, or `pw`
+  - `tx_codec`, `txCodec`, or `codec`
+- Supported `tx_codec` values:
+  - `pcm`
+  - `codec2`
+  - `opus`
+- Override priority:
+  - URL query
+  - saved browser settings (`localStorage`)
+  - built-in defaults
+- Applied behavior:
+  - Query values are copied into the UI on startup.
+  - After startup reflection completes, the page URL is rewritten.
+  - Only `ws_token` is kept in the rewritten URL.
+  - `channel_id`, `password`, and `tx_codec` are removed from the address bar after startup.
+- Notes:
+  - `password` from query is still visible to the browser/history/proxy while the initial request is processed. Use it only for trusted/internal launch flows.
+  - When `-fixed-relay` is enabled, relay destination still follows the server-fixed value even if other startup query overrides are used.
 
 ### CLI Examples
 
