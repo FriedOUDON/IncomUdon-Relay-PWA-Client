@@ -1,4 +1,4 @@
-﻿# IncomUdon Relay PWA Client
+# IncomUdon Relay PWA Client
 
 This directory is intended to be managed as an independent package/repository.
 
@@ -57,6 +57,10 @@ This project supports optional `libopus.so` bundling.
 - Web UI field: `Opus Library Path (server)`
 - `-fixed-relay host[:port]`
 - `INCOMUDON_FIXED_RELAY=host[:port]`
+- `-multi-max-slots 1..10`
+- `INCOMUDON_MULTI_MAX_SLOTS=1..10` (default: `4`)
+- `-multi-path /custom-multi-page`
+- `INCOMUDON_MULTI_PATH=/custom-multi-page` (default: `<base-path>/multi`)
 - `-auth-mode none|basic|oidc`
 - `INCOMUDON_AUTH_MODE=none|basic|oidc`
 - `-ws-token <shared-token>`
@@ -173,6 +177,45 @@ Notes:
 - Register callback URL in your IdP as:
   - no base path: `https://<host>/auth/callback`
   - with `-base-path /incomudon/`: `https://<host>/incomudon/auth/callback`
+
+## Multi-Channel Console
+
+The multi-channel page opens independent relay sessions in one browser window and is
+intended primarily for desktop Chrome or Edge in landscape orientation. The layout
+uses a responsive grid and collapses to a single column on narrower screens.
+
+- URL: `<base-path>/multi` by default. For example, `-base-path /incomudon`
+  exposes it at `/incomudon/multi`.
+- `INCOMUDON_MULTI_MAX_SLOTS` controls the number of visible slots. The default is
+  `4`; valid values are `1` through `10`.
+- `INCOMUDON_MULTI_PATH` changes the URL. A relative value is placed under the
+  configured base path; an absolute value begins with `/`.
+- Each slot has isolated connection settings, cue settings, and browser-saved local
+  cue/audio-TX files. Use the `Slot Settings and Cue Sounds` tab panel to select a
+  slot, edit its settings, and use that slot's Connect button.
+- The language selector uses the same English/Japanese preference as the single-channel
+  page. Changing it reloads the multi page and all slot settings frames in that language.
+- The unified Events console receives logs from every slot. Each line is prefixed with
+  its local time and source, for example `[12:34:56][Slot 2]`; multi-page events use
+  the `Main` source label.
+- Slot PTT shortcuts default to `1` through `9`, then `0` for slot 10. Shortcut
+  editing is locked by default; use `Edit Shortcuts` to unlock it temporarily.
+  PTT transmission is disabled while editing, and `Esc`, clicking elsewhere, or
+  30 seconds of inactivity locks the controls again.
+- Select the slots that should receive a simultaneous transmission with
+  `Broadcast target`. The broadcast shortcut defaults to `Shift+0` and can be
+  changed during shortcut editing.
+- After a form selection is committed, the page returns keyboard focus to the
+  main area so PTT shortcuts are available again. Text fields keep their normal
+  typing focus until they are committed or focus is moved away.
+- The page captures the microphone once and duplicates 8 kHz PCM frames only to
+  the currently pressed slot PTTs. This avoids multiple browser microphone captures
+  during simultaneous transmission. The active slot's Mic Volume setting is used
+  while transmitting to multiple slots.
+
+The remote-talker strip and each slot header show channel and sender/talker IDs from
+the relay's talker notifications. A slot only appears as receiving when its active
+speaker is not the slot's own sender ID.
 
 ## Cue Sounds (Browser)
 
@@ -425,6 +468,8 @@ docker compose down
 
 PWA_HOST_PORT controls the host-side port and PWA_LISTEN_PORT controls the
 container listener; both default to 50001. INCOMUDON_BASE_PATH defaults to /.
+INCOMUDON_MULTI_MAX_SLOTS defaults to 4 and INCOMUDON_MULTI_PATH defaults to the
+base path plus /multi.
 For HTTPS/reverse-proxy deployment, use the existing docker-compose.nginx.yml
 configuration instead of exposing this standalone service directly to the Internet.
 

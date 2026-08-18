@@ -9,6 +9,9 @@ services:
       - -base-path
       - /
     restart: unless-stopped
+    environment:
+      INCOMUDON_MULTI_MAX_SLOTS: "${INCOMUDON_MULTI_MAX_SLOTS:-4}"
+      INCOMUDON_MULTI_PATH: "${INCOMUDON_MULTI_PATH:-}"
     expose:
       - "8080"
 

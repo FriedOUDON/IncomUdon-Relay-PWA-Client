@@ -602,3 +602,403 @@ button[disabled] {
     width: calc(100% - 14px);
   }
 }
+
+/* Multi-channel console. The parent owns a single microphone stream; each slot owns a relay session and playback queue. */
+.multi-layout {
+  width: min(1800px, calc(100% - 32px));
+  padding-bottom: 32px;
+}
+
+.multi-hero .hero-head {
+  align-items: center;
+}
+
+.multi-hero-actions {
+  grid-auto-flow: column;
+  align-items: end;
+}
+
+.multi-single-link {
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.multi-broadcast-card,
+.multi-receiving-card {
+  display: grid;
+  gap: 12px;
+}
+
+.multi-broadcast-head,
+.multi-broadcast-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.multi-broadcast-actions {
+  justify-content: flex-start;
+}
+
+.multi-broadcast-actions .multi-ptt {
+  flex: 1 1 320px;
+}
+
+.multi-ptt {
+  min-height: 62px;
+  padding: 14px 16px;
+  font-size: 15px;
+  border-radius: 12px;
+}
+
+.multi-shortcut-control {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+}
+
+.multi-shortcut-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.multi-shortcut-button {
+  min-width: 62px;
+  color: var(--ink);
+  font-family: "IBM Plex Mono", "Consolas", monospace;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.multi-shortcut-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.multi-shortcut-button.editing {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, white 90%);
+  color: var(--accent-deep);
+}
+
+.multi-shortcut-edit-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.multi-shortcut-edit-button.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, white 88%);
+  color: var(--accent-deep);
+}
+
+.multi-shortcut-edit-status {
+  min-height: 18px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.multi-mic-status {
+  min-height: 18px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.multi-mic-status.ok,
+.multi-slot-status .ok {
+  color: var(--ok);
+}
+
+.multi-mic-status.warn,
+.multi-slot-status .warn {
+  color: var(--warn);
+}
+
+.multi-mic-status.error,
+.multi-slot-status .error {
+  color: var(--err);
+}
+
+.multi-receiving-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.multi-receiving-item,
+.multi-receiving-empty {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: #f8fafb;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.multi-receiving-empty {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.multi-slots {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr));
+  align-items: start;
+  gap: 14px;
+}
+
+.multi-slot-card {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--card) 94%, white 6%);
+  box-shadow: 0 14px 26px rgba(26, 40, 46, 0.07);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.multi-slot-card.selected {
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--line) 54%);
+}
+
+.multi-slot-card.connected {
+  box-shadow: 0 14px 26px rgba(26, 40, 46, 0.07), inset 4px 0 0 var(--ok);
+}
+
+.multi-slot-card.talking {
+  border-color: var(--accent);
+  box-shadow: 0 14px 26px rgba(164, 53, 23, 0.16), inset 4px 0 0 var(--accent);
+}
+
+.multi-slot-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 13px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 78%, white 22%);
+}
+
+.multi-slot-title {
+  margin: 0;
+  font-family: "Avenir Next", "Helvetica Neue", sans-serif;
+  font-size: 17px;
+}
+
+.multi-slot-select {
+  min-height: 0;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.multi-slot-status {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+  padding: 10px 13px;
+  background: #f8fafb;
+}
+
+.multi-slot-status > div {
+  min-width: 0;
+  padding: 0 8px;
+  border-left: 1px solid color-mix(in srgb, var(--line) 80%, white 20%);
+}
+
+.multi-slot-status > div:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.multi-slot-status dt {
+  margin: 0 0 3px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.multi-slot-status dd {
+  overflow: hidden;
+  margin: 0;
+  color: var(--ink);
+  font-family: "IBM Plex Mono", "Consolas", monospace;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.multi-slot-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  padding: 10px 13px;
+}
+
+.multi-settings-open {
+  min-width: 76px;
+}
+
+.multi-settings-card {
+  display: grid;
+  gap: 12px;
+}
+
+.multi-settings-lead {
+  margin: 4px 0 0;
+  font-size: 13px;
+}
+
+.multi-settings-tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 2px 2px 8px;
+  border-bottom: 1px solid var(--line);
+  scrollbar-width: thin;
+}
+
+.multi-settings-tab {
+  flex: 0 0 auto;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 7px 12px;
+  background: #f8fafb;
+  color: var(--muted);
+  font-family: "Avenir Next", "Helvetica Neue", sans-serif;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.multi-settings-tab:hover,
+.multi-settings-tab:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--line) 52%);
+  color: var(--ink);
+  outline: none;
+}
+
+.multi-settings-tab.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, white 88%);
+  color: var(--accent-deep);
+}
+
+.multi-settings-panes {
+  min-width: 0;
+}
+
+.multi-settings-pane {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f8fafb;
+}
+
+.multi-settings-pane[hidden] {
+  display: none;
+}
+
+.multi-slot-frame {
+  display: block;
+  width: 100%;
+  height: 640px;
+  border: 0;
+  background: #f8fafb;
+}
+
+/* A slot retains the existing single-channel settings and cue controls, but its parent owns PTT and microphone capture. */
+body.embedded-slot {
+  background: #f8fafb;
+}
+
+body.embedded-slot .backdrop,
+body.embedded-slot .hero,
+body.embedded-slot .control-card,
+body.embedded-slot .ptt-dock,
+body.embedded-slot .layout > .card:last-of-type {
+  display: none;
+}
+
+body.embedded-slot .layout {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 10px;
+  gap: 10px;
+}
+
+body.embedded-slot .card {
+  padding: 10px;
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+body.embedded-slot .connect-groups {
+  grid-template-columns: 1fr;
+}
+
+body.embedded-slot .connect-group {
+  padding: 9px;
+}
+
+body.embedded-slot .connect-grid-main,
+body.embedded-slot .connect-grid-advanced {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 760px) {
+  .multi-layout {
+    width: min(100% - 14px, 980px);
+    padding-bottom: 20px;
+  }
+
+  .multi-broadcast-head,
+  .multi-broadcast-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .multi-shortcut-control {
+    justify-items: start;
+  }
+
+  .multi-hero-actions {
+    grid-auto-flow: row;
+    justify-items: start;
+    width: 100%;
+  }
+
+  .multi-slot-status {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 0;
+  }
+
+  .multi-slot-status > div:nth-child(3) {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .multi-slot-frame {
+    height: 690px;
+  }
+
+  body.embedded-slot .connect-grid-main,
+  body.embedded-slot .connect-grid-advanced {
+    grid-template-columns: 1fr;
+  }
+}

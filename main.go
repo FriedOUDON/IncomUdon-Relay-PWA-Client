@@ -134,8 +134,11 @@ type oidcRefreshTokenEntry struct {
 
 type appServer struct {
 	basePath          string
+	multiPath         string
+	multiMaxSlots     int
 	static            http.Handler
 	indexT            *template.Template
+	multiT            *template.Template
 	codec2LibDefault  string
 	opusLibDefault    string
 	fixedRelayEnabled bool
@@ -156,6 +159,8 @@ type appServer struct {
 func main() {
 	listenAddr := flag.String("listen", ":8080", "HTTP listen address")
 	basePathFlag := flag.String("base-path", "/", "base path for reverse proxy deployment (e.g. /pwa)")
+	multiPathFlag := flag.String("multi-path", os.Getenv("INCOMUDON_MULTI_PATH"), "multi-channel page URL (default: <base-path>/multi)")
+	multiMaxSlotsFlag := flag.String("multi-max-slots", os.Getenv("INCOMUDON_MULTI_MAX_SLOTS"), "maximum multi-channel slots (1-10, default: 4)")
 	codec2LibFlag := flag.String("codec2-lib", os.Getenv("INCOMUDON_CODEC2_LIB"), "optional path to user-provided libcodec2.so")
 	opusLibFlag := flag.String("opus-lib", os.Getenv("INCOMUDON_OPUS_LIB"), "optional path to user-provided libopus.so")
 	fixedRelayFlag := flag.String("fixed-relay", os.Getenv("INCOMUDON_FIXED_RELAY"), "optional fixed relay host[:port]; when set, browser relay host/port is ignored")
@@ -173,6 +178,14 @@ func main() {
 	flag.Parse()
 
 	basePath := normalizeBasePath(*basePathFlag)
+	multiPath, err := resolveMultiPath(*multiPathFlag, basePath)
+	if err != nil {
+		log.Fatalf("invalid multi-channel page path: %v", err)
+	}
+	multiMaxSlots, err := parseMultiMaxSlots(*multiMaxSlotsFlag)
+	if err != nil {
+		log.Fatalf("invalid multi-channel slot count: %v", err)
+	}
 	fixedRelayHost, fixedRelayPort, fixedRelayEnabled, err := parseFixedRelayConfig(*fixedRelayFlag)
 	if err != nil {
 		log.Fatalf("invalid fixed relay setting: %v", err)
@@ -227,11 +240,22 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to parse index template: %v", err)
 	}
+	multiRaw, err := fs.ReadFile(subFS, "multi.html")
+	if err != nil {
+		log.Fatalf("failed to read multi.html: %v", err)
+	}
+	multiTemplate, err := template.New("multi").Parse(string(multiRaw))
+	if err != nil {
+		log.Fatalf("failed to parse multi template: %v", err)
+	}
 
 	app := &appServer{
 		basePath:          basePath,
+		multiPath:         multiPath,
+		multiMaxSlots:     multiMaxSlots,
 		static:            http.FileServer(http.FS(subFS)),
 		indexT:            indexTemplate,
+		multiT:            multiTemplate,
 		codec2LibDefault:  strings.TrimSpace(*codec2LibFlag),
 		opusLibDefault:    strings.TrimSpace(*opusLibFlag),
 		fixedRelayEnabled: fixedRelayEnabled,
@@ -268,6 +292,7 @@ func main() {
 		prefix = basePath + "/"
 	}
 	log.Printf("IncomUdon relay PWA client listening on http://0.0.0.0%s%s", *listenAddr, prefix)
+	log.Printf("Multi-channel page is available at %s (max slots=%d)", app.multiPath, app.multiMaxSlots)
 	if app.fixedRelayEnabled {
 		log.Printf("Fixed relay target is enabled: %s", net.JoinHostPort(app.fixedRelayHost, strconv.Itoa(app.fixedRelayPort)))
 	}
@@ -301,7 +326,54 @@ func normalizeBasePath(value string) string {
 	return strings.TrimRight(trimmed, "/")
 }
 
+const (
+	defaultMultiMaxSlots = 4
+	maximumMultiMaxSlots = 10
+)
+
+func parseMultiMaxSlots(value string) (int, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return defaultMultiMaxSlots, nil
+	}
+	count, err := strconv.Atoi(trimmed)
+	if err != nil || count < 1 || count > maximumMultiMaxSlots {
+		return 0, fmt.Errorf("must be an integer between 1 and %d", maximumMultiMaxSlots)
+	}
+	return count, nil
+}
+
+func resolveMultiPath(value string, basePath string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		if basePath == "" {
+			return "/multi", nil
+		}
+		return basePath + "/multi", nil
+	}
+	if !strings.HasPrefix(trimmed, "/") {
+		trimmed = basePath + "/" + trimmed
+	}
+	resolved := normalizeBasePath(trimmed)
+	if resolved == "" {
+		return "", errors.New("must not be the site root")
+	}
+	if resolved == basePath {
+		return "", errors.New("must differ from the base path")
+	}
+	wsPath := basePath + "/ws"
+	authPath := basePath + "/auth"
+	if resolved == wsPath || resolved == authPath || strings.HasPrefix(resolved, authPath+"/") {
+		return "", errors.New("must not overlap websocket or authentication routes")
+	}
+	return resolved, nil
+}
+
 func (a *appServer) registerRoutes(mux *http.ServeMux) {
+	mux.HandleFunc(a.multiPath, a.serveMulti)
+	mux.HandleFunc(a.multiPath+"/", func(w http.ResponseWriter, r *http.Request) {
+		redirectWithQuery(w, r, a.multiPath)
+	})
 	if a.basePath == "" {
 		mux.HandleFunc("/auth/check", a.handleAuthCheck)
 		mux.HandleFunc("/auth/logout", a.handleAuthLogout)
@@ -361,23 +433,25 @@ func (a *appServer) handleStatic(w http.ResponseWriter, r *http.Request) {
 	a.static.ServeHTTP(w, r2)
 }
 
-func (a *appServer) serveIndex(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
+type pageTemplateData struct {
+	BasePath          string
+	MultiPath         string
+	MultiMaxSlots     int
+	FixedRelayEnabled bool
+	FixedRelayHost    string
+	FixedRelayPort    int
+	WSTokenRequired   bool
+	AuthMode          string
+	Codec2Ready       bool
+	OpusReady         bool
+}
 
+func (a *appServer) pageData() pageTemplateData {
 	codec2Ready, opusReady := detectRuntimeCodecAvailability(a.codec2LibDefault, a.opusLibDefault)
-
-	data := struct {
-		BasePath          string
-		FixedRelayEnabled bool
-		FixedRelayHost    string
-		FixedRelayPort    int
-		WSTokenRequired   bool
-		AuthMode          string
-		Codec2Ready       bool
-		OpusReady         bool
-	}{
+	return pageTemplateData{
 		BasePath:          a.basePath,
+		MultiPath:         a.multiPath,
+		MultiMaxSlots:     a.multiMaxSlots,
 		FixedRelayEnabled: a.fixedRelayEnabled,
 		FixedRelayHost:    a.fixedRelayHost,
 		FixedRelayPort:    a.fixedRelayPort,
@@ -386,7 +460,23 @@ func (a *appServer) serveIndex(w http.ResponseWriter, r *http.Request) {
 		Codec2Ready:       codec2Ready,
 		OpusReady:         opusReady,
 	}
-	if err := a.indexT.Execute(w, data); err != nil {
+}
+
+func (a *appServer) serveIndex(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	if err := a.indexT.Execute(w, a.pageData()); err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+	}
+}
+
+func (a *appServer) serveMulti(w http.ResponseWriter, r *http.Request) {
+	if !a.authorizeRequest(w, r, false) {
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	if err := a.multiT.Execute(w, a.pageData()); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
 }

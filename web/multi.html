@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#142126">
+  <title>IncomUdon Relay PWA Client</title>
+  <link rel="manifest" href="{{.BasePath}}/manifest.webmanifest" crossorigin="use-credentials">
+  <link rel="icon" href="{{.BasePath}}/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{.BasePath}}/styles.css">
+</head>
+<body class="multi-page"
+  data-base-path="{{.BasePath}}"
+  data-multi-path="{{.MultiPath}}"
+  data-multi-max-slots="{{.MultiMaxSlots}}"
+  data-auth-mode="{{.AuthMode}}">
+  <div class="backdrop" aria-hidden="true"></div>
+  <main id="multiMain" class="layout multi-layout" tabindex="-1">
+    <header class="hero multi-hero">
+      <div class="hero-head">
+        <div>
+          <p class="kicker">IncomUdon</p>
+          <h1 id="multiTitle">Relay PWA Client</h1>
+        </div>
+        <div class="hero-actions multi-hero-actions">
+          <label class="lang-picker" for="multiLanguageSelect">
+            <span id="multiLabelLanguage">Language</span>
+            <select id="multiLanguageSelect">
+              <option value="en">English</option>
+              <option value="ja">日本語</option>
+            </select>
+          </label>
+          <a id="singleChannelLink" class="ghost multi-single-link" href="{{.BasePath}}/">Single Channel</a>
+        </div>
+      </div>
+    </header>
+
+    <section class="card multi-broadcast-card" aria-labelledby="multiBroadcastHeading">
+      <div class="multi-broadcast-head">
+        <div>
+          <p id="multiBroadcastHeading" class="status-label">Broadcast PTT</p>
+          <p id="multiBroadcastSummary" class="status-value">No selected connected slots</p>
+        </div>
+        <div class="multi-shortcut-control">
+          <span id="multiBroadcastShortcutLabel" class="multi-shortcut-label">Shortcut</span>
+          <button id="multiBroadcastShortcut" class="ghost multi-shortcut-button" type="button" aria-label="Set broadcast PTT shortcut"></button>
+        </div>
+      </div>
+      <div class="multi-broadcast-actions">
+        <button id="multiBroadcastPtt" class="ptt multi-ptt" type="button" disabled>
+          <span id="multiBroadcastPttLabel">Hold to Broadcast</span>
+        </button>
+        <button id="multiStopAll" class="ghost" type="button">Stop All PTT</button>
+      </div>
+      <div class="multi-shortcut-edit-row">
+        <button id="multiShortcutEdit" class="ghost multi-shortcut-edit-button" type="button" aria-pressed="false">Edit Shortcuts</button>
+        <p id="multiShortcutEditStatus" class="multi-shortcut-edit-status" aria-live="polite"></p>
+      </div>
+      <p id="multiMicStatus" class="multi-mic-status" aria-live="polite"></p>
+    </section>
+
+    <section class="card multi-receiving-card" aria-labelledby="multiReceivingHeading">
+      <div class="log-head">
+        <h2 id="multiReceivingHeading">Receiving / Active Talkers</h2>
+      </div>
+      <div id="multiReceivingList" class="multi-receiving-list" aria-live="polite"></div>
+    </section>
+
+    <section id="multiSlots" class="multi-slots" aria-label="Channel slots"></section>
+
+    <section class="card multi-log-card" aria-labelledby="multiEventsHeading">
+      <div class="log-head">
+        <h2 id="multiEventsHeading">Events</h2>
+        <button id="multiClearLog" class="ghost" type="button">Clear</button>
+      </div>
+      <pre id="multiLogBox" class="log" aria-live="polite"></pre>
+    </section>
+
+    <section class="card multi-settings-card" aria-labelledby="multiSettingsHeading">
+      <div class="log-head">
+        <div>
+          <h2 id="multiSettingsHeading">Slot Settings and Cue Sounds</h2>
+          <p id="multiSettingsLead" class="lead multi-settings-lead">Select a slot to edit its connection, cue sounds, and local audio files.</p>
+        </div>
+      </div>
+      <div id="multiSettingsTabs" class="multi-settings-tabs" role="tablist" aria-label="Slot settings"></div>
+      <div id="multiSettingsPanes" class="multi-settings-panes"></div>
+    </section>
+  </main>
+
+  <script src="{{.BasePath}}/multi.js"></script>
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        const basePath = document.body.dataset.basePath || "";
+        const authMode = String(document.body.dataset.authMode || "none").toLowerCase();
+        const swPath = `${basePath}/sw.js`;
+        const scope = `${basePath}/`;
+        navigator.serviceWorker.register(`${swPath}?auth_mode=${encodeURIComponent(authMode)}&build=51`, { scope }).catch(() => {});
+      });
+    }
+  </script>
+</body>
+</html>

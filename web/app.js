@@ -23,16 +23,26 @@
   const codec2BitrateOptions = [450, 700, 1600, 2400, 3200];
   const opusBitrateOptions = [6000, 8000, 12000, 16000, 20000, 64000, 96000, 128000];
   const settingsReconnectDebounceMs = 350;
+  const embeddedQuery = new URLSearchParams(window.location.search || "");
+  const embeddedSlotIndexRaw = Number.parseInt(embeddedQuery.get("slot") || "", 10);
+  const isEmbeddedSlot = embeddedQuery.get("embed") === "1" &&
+    Number.isInteger(embeddedSlotIndexRaw) && embeddedSlotIndexRaw > 0;
+  const embeddedSlotIndex = isEmbeddedSlot ? embeddedSlotIndexRaw : 0;
+  const embeddedStoragePrefix = isEmbeddedSlot ? `multi:${embeddedSlotIndex}:` : "";
+  if (isEmbeddedSlot) {
+    document.body.classList.add("embedded-slot");
+  }
   const mediaStorageDBName = "incomudon.pwa.media.v1";
   const mediaStorageStoreName = "files";
   const mediaStorageVersion = 1;
-  const mediaStorageCuePrefix = "cue:";
-  const mediaStorageAudioTxPrefix = "audioTx:";
+  const mediaStorageCuePrefix = `${embeddedStoragePrefix}cue:`;
+  const mediaStorageAudioTxPrefix = `${embeddedStoragePrefix}audioTx:`;
   const maxCueFilesBytes = 20 * 1024 * 1024;
   const maxAudioTxFilesBytes = 100 * 1024 * 1024;
   const maxPersistedMediaBytes = maxCueFilesBytes + maxAudioTxFilesBytes;
 
   const ui = {
+    main: document.getElementById("appMain"),
     titleMain: document.getElementById("titleMain"),
     languageSelect: document.getElementById("languageSelect"),
     relayHost: document.getElementById("relayHost"),
@@ -86,7 +96,9 @@
     logoutBtn: document.getElementById("logoutBtn"),
   };
 
-  const settingsStorageKey = "incomudon.pwa.settings.v1";
+  const settingsStorageKey = isEmbeddedSlot
+    ? `incomudon.pwa.multi.slot.${embeddedSlotIndex}.settings.v1`
+    : "incomudon.pwa.settings.v1";
   const wsTokenStorageKey = "incomudon.pwa.ws_token.v1";
   const localeStorageKey = "incomudon.pwa.locale.v1";
   const fallbackLocale = "en";
@@ -172,6 +184,8 @@
     log_microphone_start_failed: "microphone start failed: {error}",
     log_microphone_permission_denied: "microphone permission denied; PTT is disabled",
     log_connected_summary: "connected channel={channel} sender={sender} mode={mode} codec={codec}",
+    log_talker_started: "talk started: channel={channel} talker={talker}",
+    log_talker_ended: "talk ended: channel={channel} talker={talker}",
     log_disconnected: "disconnected",
     log_peer_codec: "peer codec sender={sender} mode={mode} pcmOnly={pcmOnly}",
     log_ready: "ready",
@@ -420,6 +434,7 @@
     if (persist) {
       persistFormSettings();
     }
+    notifyEmbeddedSlotState();
   }
 
   function normalizeSenderID(raw, randomIfInvalid = true) {
@@ -548,6 +563,7 @@
   }
 
   ui.connectBtn.addEventListener("click", () => {
+    releaseKeyboardFocus();
     clearPendingSettingsReconnect();
     persistFormSettings();
     connectRelay().catch((err) => {
@@ -557,17 +573,63 @@
   });
 
   ui.disconnectBtn.addEventListener("click", () => {
+    releaseKeyboardFocus();
     clearPendingSettingsReconnect();
     disconnectRelay();
   });
 
   ui.clearLogBtn.addEventListener("click", () => {
+    releaseKeyboardFocus();
     ui.logBox.textContent = "";
   });
 
   bindPTT(ui.pttButton);
+  installKeyboardFocusRelease();
+
+  function isKeyboardEditableTarget(element) {
+    return !!(element && typeof element.closest === "function" &&
+      element.closest("input, textarea, select, [contenteditable='true']"));
+  }
+
+  function releaseKeyboardFocus() {
+    const active = document.activeElement;
+    if (isKeyboardEditableTarget(active) && typeof active.blur === "function") {
+      active.blur();
+    }
+    if (ui.main && document.activeElement !== ui.main && typeof ui.main.focus === "function") {
+      ui.main.focus({ preventScroll: true });
+    }
+  }
+
+  function installKeyboardFocusRelease() {
+    document.addEventListener("change", (event) => {
+      if (isKeyboardEditableTarget(event.target)) {
+        window.requestAnimationFrame(releaseKeyboardFocus);
+      }
+    }, true);
+    document.addEventListener("keydown", (event) => {
+      if ((event.code === "Enter" || event.code === "Escape") && isKeyboardEditableTarget(event.target)) {
+        window.requestAnimationFrame(releaseKeyboardFocus);
+      }
+    }, true);
+    document.addEventListener("pointerdown", (event) => {
+      if (!isKeyboardEditableTarget(document.activeElement) || !event.target || typeof event.target.closest !== "function") {
+        return;
+      }
+      if (event.target.closest("input, textarea, select, label, button, a, [contenteditable='true']")) {
+        return;
+      }
+      window.requestAnimationFrame(releaseKeyboardFocus);
+    }, true);
+  }
 
   window.addEventListener("keydown", (event) => {
+    if (isEmbeddedSlot) {
+      if (!event.repeat) {
+        forwardEmbeddedKeyboardEvent("down", event);
+      }
+      return;
+    }
     if (event.code !== "Space" || event.repeat) {
       return;
     }
@@ -580,6 +642,10 @@
   });
 
   window.addEventListener("keyup", (event) => {
+    if (isEmbeddedSlot) {
+      forwardEmbeddedKeyboardEvent("up", event);
+      return;
+    }
     if (event.code !== "Space") {
       return;
     }
@@ -598,6 +664,147 @@
       state.player.resumeIfNeeded();
     }
   });
+
+  function embeddedSlotSnapshot() {
+    return {
+      connected: !!state.connected,
+      channelId: Number(ui.channelId ? ui.channelId.value : 0) || 0,
+      senderId: Number(ui.senderId ? ui.senderId.value : 0) || 0,
+      selfSenderId: Number(state.selfSenderId || 0),
+      activeTalkers: Array.isArray(state.activeTalkers) ? state.activeTalkers.slice() : [],
+      talkAllowed: !!state.talkAllowed,
+      pttPressed: !!state.pttPressed,
+      micVolume: Number(state.micVolumePercent || micVolumeDefaultPercent),
+    };
+  }
+
+  function notifyEmbeddedSlotState() {
+    if (!isEmbeddedSlot || !window.parent || window.parent === window) {
+      return;
+    }
+    try {
+      window.parent.postMessage({
+        type: "incomudon-slot-state",
+        slot: embeddedSlotIndex,
+        state: embeddedSlotSnapshot(),
+      }, window.location.origin);
+    } catch (_) {
+      // The multi-channel page is optional; keep standalone operation unaffected.
+    }
+  }
+
+  function notifyEmbeddedSlotInteraction() {
+    if (!isEmbeddedSlot || !window.parent || window.parent === window) {
+      return;
+    }
+    try {
+      window.parent.postMessage({
+        type: "incomudon-slot-interaction",
+        slot: embeddedSlotIndex,
+      }, window.location.origin);
+    } catch (_) {
+      // The multi-channel page is optional; keep standalone operation unaffected.
+    }
+  }
+
+  function notifyEmbeddedLog(text, level) {
+    if (!isEmbeddedSlot || !text || !window.parent || window.parent === window) {
+      return;
+    }
+    try {
+      window.parent.postMessage({
+        type: "incomudon-slot-log",
+        slot: embeddedSlotIndex,
+        text: String(text),
+        level: normalizeLevel(level),
+      }, window.location.origin);
+    } catch (_) {
+      // The multi-channel page is optional; keep standalone operation unaffected.
+    }
+  }
+
+  function embeddedKeyboardEditableTarget() {
+    const active = document.activeElement;
+    if (!active) {
+      return false;
+    }
+    const tag = String(active.tagName || "").toUpperCase();
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || active.isContentEditable;
+  }
+
+  function forwardEmbeddedKeyboardEvent(phase, event) {
+    if (!isEmbeddedSlot || !window.parent || window.parent === window) {
+      return;
+    }
+    const editable = embeddedKeyboardEditableTarget();
+    if (!editable && event.code !== "Tab") {
+      event.preventDefault();
+    }
+    try {
+      window.parent.postMessage({
+        type: "incomudon-slot-key",
+        slot: embeddedSlotIndex,
+        phase,
+        code: event.code,
+        ctrlKey: !!event.ctrlKey,
+        altKey: !!event.altKey,
+        shiftKey: !!event.shiftKey,
+        metaKey: !!event.metaKey,
+        editable,
+      }, window.location.origin);
+    } catch (_) {
+      // Ignore parent messaging errors.
+    }
+  }
+
+  function externalFrameFromMessage(frame) {
+    if (frame instanceof ArrayBuffer) {
+      return new Uint8Array(frame);
+    }
+    if (ArrayBuffer.isView(frame)) {
+      return new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength);
+    }
+    return null;
+  }
+
+  function handleEmbeddedSlotMessage(event) {
+    if (!isEmbeddedSlot || event.origin !== window.location.origin || !event.data || typeof event.data !== "object") {
+      return;
+    }
+    const data = event.data;
+    if (Number(data.slot) !== embeddedSlotIndex) {
+      return;
+    }
+    if (data.type === "incomudon-slot-command") {
+      switch (data.command) {
+        case "request-state":
+          notifyEmbeddedSlotState();
+          break;
+        case "connect":
+          connectRelay().catch((err) => {
+            appendLog(t("log_connect_failed", { error: err && err.message ? err.message : String(err) }), "error");
+            applyDisconnectedState();
+          });
+          break;
+        case "disconnect":
+          disconnectRelay();
+          break;
+        case "ptt":
+          setPTT(!!data.pressed, true, true);
+          break;
+        default:
+          break;
+      }
+      return;
+    }
+    if (data.type === "incomudon-slot-audio") {
+      const frame = externalFrameFromMessage(data.frame);
+      if (!frame || !state.connected || !state.pttPressed || !state.ws || state.ws.readyState !== WebSocket.OPEN || state.audioTxTask) {
+        return;
+      }
+      transmitUplinkFrame(frame);
+    }
+  }
 
   function wsURL() {
     const proto = window.location.protocol === "https:" ? "wss" : "ws";
@@ -1101,6 +1308,7 @@
       refreshPTTAvailability();
       refreshAudioTxSlotsUI();
       setConnectionView({ kind: "connected", level: "ok", host: event.relayHost, port: event.relayPort });
+      notifyEmbeddedSlotState();
       appendLog(t("log_connected_summary", {
         channel: event.channelId,
         sender: event.senderId,
@@ -1143,6 +1351,18 @@
       const remoteTalkEnded =
         prevTalkers.some((talkerId) => talkerId !== state.selfSenderId) &&
         !nextTalkers.some((talkerId) => talkerId !== state.selfSenderId);
+      const channelId = Math.max(0, Number(event.channelId || ui.channelId.value) || 0);
+      const channel = channelId > 0 ? channelId : "-";
+      nextTalkers
+        .filter((talkerId) => !prevTalkers.includes(talkerId))
+        .forEach((talkerId) => {
+          appendLog(t("log_talker_started", { channel, talker: talkerId }), "info");
+        });
+      prevTalkers
+        .filter((talkerId) => !nextTalkers.includes(talkerId))
+        .forEach((talkerId) => {
+          appendLog(t("log_talker_ended", { channel, talker: talkerId }), "info");
+        });
 
       updateTalkerStatus(nextTalkers, event.talkAllowed);
 
@@ -1236,6 +1456,7 @@
     refreshAudioTxSlotsUI();
     updateTalkerStatus([], false);
     setConnectionView({ kind: "offline", level: "warn" });
+    notifyEmbeddedSlotState();
   }
 
   function applyInitialFormSettings() {
@@ -1807,8 +2028,12 @@
   }
 
   async function clearPersistedMediaStorage() {
+    const keys = (await listPersistedMediaRecords()).map((record) => record.key);
+    if (keys.length === 0) {
+      return;
+    }
     await runMediaStorageTransaction("readwrite", (store) => {
-      store.clear();
+      keys.forEach((key) => store.delete(key));
     });
   }
 
@@ -2592,6 +2817,7 @@
       || (normalizedTalkers.includes(state.selfSenderId) ? state.selfSenderId : 0);
     state.talkAllowed = !!talkAllowed;
     syncTxTimeoutCountdownState();
+    notifyEmbeddedSlotState();
     if (!ui.talkerStatus) {
       return;
     }
@@ -2724,6 +2950,7 @@
       ...next,
     };
     applyConnectionView();
+    notifyEmbeddedSlotState();
   }
 
   function applyConnectionView() {
@@ -3322,6 +3549,10 @@
     if (startupQueryOverrides.hasWsToken) {
       url.searchParams.set("ws_token", startupQueryOverrides.wsToken);
     }
+    if (isEmbeddedSlot) {
+      url.searchParams.set("embed", "1");
+      url.searchParams.set("slot", String(embeddedSlotIndex));
+    }
 
     const next = `${url.pathname}${url.search}${url.hash}`;
     const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
@@ -3394,9 +3625,11 @@
     if (!text) {
       return;
     }
+    const normalizedLevel = normalizeLevel(level);
+    notifyEmbeddedLog(text, normalizedLevel);
     const ts = new Date().toLocaleTimeString();
     const line = document.createElement("div");
-    line.className = normalizeLevel(level);
+    line.className = normalizedLevel;
     line.textContent = `[${ts}] ${text}`;
     ui.logBox.appendChild(line);
     ui.logBox.scrollTop = ui.logBox.scrollHeight;
@@ -3413,6 +3646,7 @@
         return;
       }
       event.preventDefault();
+      releaseKeyboardFocus();
       if (event.pointerId !== undefined && typeof button.setPointerCapture === "function") {
         try {
           button.setPointerCapture(event.pointerId);
@@ -3479,6 +3713,7 @@
       state.pttPressed = false;
       ui.pttButton.classList.remove("active");
       stopTxTimeoutCountdown();
+      notifyEmbeddedSlotState();
       return;
     }
 
@@ -3522,6 +3757,7 @@
 
     sendCommand({ type: "ptt", pressed });
     syncTxTimeoutCountdownState();
+    notifyEmbeddedSlotState();
   }
 
   class MicCapture {
@@ -4565,7 +4801,8 @@
 
   state.player = new PCMPlayer();
   state.cuePlayer = new CuePlayer(state.player);
-  state.mic = new MicCapture((frame) => {
+  if (!isEmbeddedSlot) {
+    state.mic = new MicCapture((frame) => {
     if (!state.connected || !state.pttPressed || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
       return;
     }
@@ -4573,7 +4810,13 @@
       return;
     }
     transmitUplinkFrame(frame);
-  }, state.micVolumePercent);
+    }, state.micVolumePercent);
+  }
   applyMicVolumeFromUI(state.micVolumePercent, false);
+  if (isEmbeddedSlot) {
+    window.addEventListener("message", handleEmbeddedSlotMessage);
+    document.addEventListener("pointerdown", notifyEmbeddedSlotInteraction, true);
+    window.setTimeout(notifyEmbeddedSlotState, 0);
+  }
 })();
 

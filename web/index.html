@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -19,7 +19,7 @@
   data-opus-ready="{{if .OpusReady}}1{{else}}0{{end}}"
   data-auth-mode="{{.AuthMode}}">
   <div class="backdrop" aria-hidden="true"></div>
-  <main class="layout">
+  <main id="appMain" class="layout" tabindex="-1">
     <header class="hero">
       <div class="hero-head">
         <div>
@@ -277,7 +277,7 @@
         }
         const swPath = basePath ? `${basePath}/sw.js` : "/sw.js";
         const scope = basePath ? `${basePath}/` : "/";
-        const swRegisterPath = `${swPath}?auth_mode=${encodeURIComponent(authMode)}`;
+        const swRegisterPath = `${swPath}?auth_mode=${encodeURIComponent(authMode)}&build=51`;
         navigator.serviceWorker.register(swRegisterPath, { scope }).catch(() => {});
       });
     }

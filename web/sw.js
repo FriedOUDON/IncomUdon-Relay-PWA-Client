@@ -1,4 +1,4 @@
-const CACHE_NAME = "incomudon-pwa-v43";
+const CACHE_NAME = "incomudon-pwa-v51";
 const CACHE_PREFIX = "incomudon-pwa-";
 const swURL = new URL(self.location.href);
 const authMode = String(swURL.searchParams.get("auth_mode") || "none").toLowerCase();
@@ -6,8 +6,10 @@ const authEnabled = authMode !== "none";
 const APP_SHELL = [
   "./",
   "./index.html",
+  "./multi",
   "./styles.css",
   "./app.js",
+  "./multi.js",
   "./worklets/mic-capture-worklet.js",
   "./worklets/pcm-playback-worklet.js",
   "./manifest.webmanifest",
