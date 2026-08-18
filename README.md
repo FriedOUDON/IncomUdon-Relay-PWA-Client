@@ -188,10 +188,15 @@ In UI (`Cue Sounds` section), each cue can be:
 
 - enabled/disabled
 - changed by URL (`Audio URL`)
-- changed by local file (`Local File`, session only)
+- changed by a local file, stored in browser IndexedDB and restored after restart
 - tested and reset to default
 
-Cue settings are stored in browser `localStorage`.
+Cue settings are stored in browser `localStorage`. Selected local cue files and
+`Audio File TX` slot files are stored separately in IndexedDB for the same
+browser origin. The storage limits are 20 MiB for all cue files, 100 MiB for
+all `Audio File TX` files, and 120 MiB combined. Use `Clear Saved Files` to
+remove every locally stored cue and TX file; browser site-data deletion or
+private browsing can also remove them.
 
 ## UI Localization
 

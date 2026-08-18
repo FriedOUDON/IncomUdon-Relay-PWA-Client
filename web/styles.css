@@ -433,6 +433,10 @@ button[disabled] {
   max-width: 120px;
 }
 
+.audio-tx-storage-actions {
+  margin-top: 8px;
+}
+
 .audio-tx-slots {
   margin-top: 10px;
   display: grid;
@@ -500,6 +504,13 @@ button[disabled] {
 .cue-enable {
   min-height: 22px;
   align-self: auto;
+}
+
+.cue-file-status {
+  margin: -2px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 .cue-actions {

@@ -34,7 +34,7 @@
   "cue_ptt_off": "PTT OFF Cue",
   "cue_carrier": "Carrier Sense Cue",
   "cue_audio_url": "Audio URL",
-  "cue_local_file": "Local File (session only)",
+  "cue_local_file": "Local File (stored in browser)",
   "audio_tx_files": "Audio File TX",
   "audio_tx_slot_count": "Preset Slots",
   "audio_tx_slot": "Slot {index}",
@@ -93,5 +93,13 @@
   "mic_insecure_context": "microphone API is unavailable on insecure context (use HTTPS or localhost)",
   "mic_not_supported": "microphone API is not supported by this browser",
   "opus_decoder_not_supported": "WebCodecs AudioDecoder is not supported for Opus downlink",
-  "opus_decoder_config_not_supported": "Opus AudioDecoder configuration is not supported"
+  "opus_decoder_config_not_supported": "Opus AudioDecoder configuration is not supported",
+  "media_file_none": "No local file selected",
+  "media_file_saved": "Saved: {name} ({size})",
+  "media_file_session": "Session only: {name} ({size})",
+  "media_clear_saved": "Clear Saved Files",
+  "media_clear_saved_confirm": "Remove all locally saved cue and audio TX files?",
+  "log_media_restore_failed": "saved audio files could not be restored: {error}",
+  "log_media_file_session_only": "could not save {name}; it will be kept for this session only: {error}",
+  "log_media_storage_cleared": "locally saved audio files cleared"
 }

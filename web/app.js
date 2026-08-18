@@ -23,6 +23,14 @@
   const codec2BitrateOptions = [450, 700, 1600, 2400, 3200];
   const opusBitrateOptions = [6000, 8000, 12000, 16000, 20000, 64000, 96000, 128000];
   const settingsReconnectDebounceMs = 350;
+  const mediaStorageDBName = "incomudon.pwa.media.v1";
+  const mediaStorageStoreName = "files";
+  const mediaStorageVersion = 1;
+  const mediaStorageCuePrefix = "cue:";
+  const mediaStorageAudioTxPrefix = "audioTx:";
+  const maxCueFilesBytes = 20 * 1024 * 1024;
+  const maxAudioTxFilesBytes = 100 * 1024 * 1024;
+  const maxPersistedMediaBytes = maxCueFilesBytes + maxAudioTxFilesBytes;
 
   const ui = {
     titleMain: document.getElementById("titleMain"),
@@ -63,6 +71,9 @@
     cuePttOnFile: document.getElementById("cuePttOnFile"),
     cuePttOffFile: document.getElementById("cuePttOffFile"),
     cueCarrierFile: document.getElementById("cueCarrierFile"),
+    cuePttOnFileStatus: document.getElementById("cuePttOnFileStatus"),
+    cuePttOffFileStatus: document.getElementById("cuePttOffFileStatus"),
+    cueCarrierFileStatus: document.getElementById("cueCarrierFileStatus"),
     cuePttOnTest: document.getElementById("cuePttOnTest"),
     cuePttOffTest: document.getElementById("cuePttOffTest"),
     cueCarrierTest: document.getElementById("cueCarrierTest"),
@@ -71,6 +82,7 @@
     cueCarrierReset: document.getElementById("cueCarrierReset"),
     audioTxSlotCount: document.getElementById("audioTxSlotCount"),
     audioTxSlots: document.getElementById("audioTxSlots"),
+    clearSavedMediaBtn: document.getElementById("clearSavedMediaBtn"),
     logoutBtn: document.getElementById("logoutBtn"),
   };
 
@@ -117,7 +129,12 @@
     cue_ptt_off: "PTT OFF Cue",
     cue_carrier: "Carrier Sense Cue",
     cue_audio_url: "Audio URL",
-    cue_local_file: "Local File (session only)",
+    cue_local_file: "Local File (stored in browser)",
+    media_file_none: "No local file selected",
+    media_file_saved: "Saved: {name} ({size})",
+    media_file_session: "Session only: {name} ({size})",
+    media_clear_saved: "Clear Saved Files",
+    media_clear_saved_confirm: "Remove all locally saved cue and audio TX files?",
     audio_tx_files: "Audio File TX",
     audio_tx_slot_count: "Preset Slots",
     audio_tx_slot: "Slot {index}",
@@ -162,6 +179,9 @@
     log_cue_play_failed: "cue play failed ({label}): {error}",
     log_cue_local_selected: "cue local file selected ({label}): {name}",
     log_cue_reset_default: "cue reset to default ({label})",
+    log_media_restore_failed: "saved audio files could not be restored: {error}",
+    log_media_file_session_only: "could not save {name}; it will be kept for this session only: {error}",
+    log_media_storage_cleared: "locally saved audio files cleared",
     log_audio_tx_not_connected: "audio file TX requires an active connection",
     log_audio_tx_busy: "audio file TX is already running",
     log_audio_tx_missing_file: "audio file is not selected (slot {index})",
@@ -233,6 +253,9 @@
     },
     audioTxSlots: [],
     audioTxTask: null,
+    mediaFilesReady: false,
+    mediaFilesReadyPromise: null,
+    mediaStoragePersistenceRequested: false,
     lastCarrierCueMs: 0,
     selfSenderId: 0,
     talkerId: 0,
@@ -261,6 +284,9 @@
   bindFormPersistence();
   bindCueControls();
   bindAudioTxControls();
+  refreshCueFileStatuses();
+  refreshAudioTxSlotsUI();
+  state.mediaFilesReadyPromise = restorePersistedMediaFiles();
   configureAuthUI();
   initI18n()
     .catch(() => {})
@@ -1556,29 +1582,449 @@
     persistLegacyWSToken(settings.wsToken);
   }
 
+  function openMediaStorage() {
+    return new Promise((resolve, reject) => {
+      if (typeof indexedDB === "undefined") {
+        reject(new Error("IndexedDB is not available"));
+        return;
+      }
+
+      let request;
+      try {
+        request = indexedDB.open(mediaStorageDBName, mediaStorageVersion);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(mediaStorageStoreName)) {
+          db.createObjectStore(mediaStorageStoreName, { keyPath: "key" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("failed to open media storage"));
+      request.onblocked = () => reject(new Error("media storage is blocked by another tab"));
+    });
+  }
+
+  async function runMediaStorageTransaction(mode, operation) {
+    const db = await openMediaStorage();
+    return new Promise((resolve, reject) => {
+      let result;
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        try {
+          db.close();
+        } catch (_) {
+          // Ignore close errors.
+        }
+        callback(value);
+      };
+
+      let transaction;
+      try {
+        transaction = db.transaction(mediaStorageStoreName, mode);
+      } catch (err) {
+        finish(reject, err);
+        return;
+      }
+      transaction.oncomplete = () => finish(resolve, result);
+      transaction.onerror = () => finish(reject, transaction.error || new Error("media storage transaction failed"));
+      transaction.onabort = () => finish(reject, transaction.error || new Error("media storage transaction aborted"));
+
+      try {
+        operation(transaction.objectStore(mediaStorageStoreName), (value) => {
+          result = value;
+        });
+      } catch (err) {
+        try {
+          transaction.abort();
+        } catch (_) {
+          // Ignore abort errors after a completed transaction.
+        }
+        finish(reject, err);
+      }
+    });
+  }
+
+  function mediaStorageKeyForCue(kind) {
+    return `${mediaStorageCuePrefix}${kind}`;
+  }
+
+  function mediaStorageKeyForAudioTxSlot(index) {
+    return `${mediaStorageAudioTxPrefix}${index}`;
+  }
+
+  function isCueMediaKey(key) {
+    return String(key || "").startsWith(mediaStorageCuePrefix);
+  }
+
+  function isAudioTxMediaKey(key) {
+    return String(key || "").startsWith(mediaStorageAudioTxPrefix);
+  }
+
+  function mediaRecordFromFile(key, group, file, slotIndex = null) {
+    if (!file || typeof file.size !== "number" || typeof file.arrayBuffer !== "function") {
+      throw new Error("selected media file is invalid");
+    }
+    const size = Math.max(0, Math.floor(file.size));
+    return {
+      key,
+      group,
+      slotIndex,
+      blob: file,
+      name: String(file.name || "audio"),
+      type: String(file.type || "application/octet-stream"),
+      size,
+      updatedAt: Date.now(),
+    };
+  }
+
+  function normalizeStoredMediaRecord(record) {
+    if (!record || typeof record !== "object" || !record.blob ||
+        typeof record.blob.arrayBuffer !== "function" || typeof record.blob.size !== "number") {
+      return null;
+    }
+    const key = String(record.key || "");
+    if (!isCueMediaKey(key) && !isAudioTxMediaKey(key)) {
+      return null;
+    }
+    const group = isCueMediaKey(key) ? "cue" : "audioTx";
+    const size = Math.max(0, Math.floor(Number(record.size) || record.blob.size || 0));
+    return {
+      key,
+      group,
+      slotIndex: Number.isInteger(record.slotIndex) ? record.slotIndex : null,
+      blob: record.blob,
+      name: String(record.name || "audio"),
+      type: String(record.type || record.blob.type || "application/octet-stream"),
+      size,
+      updatedAt: Number(record.updatedAt) || 0,
+    };
+  }
+
+  async function listPersistedMediaRecords() {
+    const records = await runMediaStorageTransaction("readonly", (store, setResult) => {
+      const request = store.getAll();
+      request.onsuccess = () => setResult(request.result || []);
+    });
+    return Array.isArray(records)
+      ? records.map(normalizeStoredMediaRecord).filter((record) => record !== null)
+      : [];
+  }
+
+  function calculatePersistedMediaUsage(records, replacingKey, replacement) {
+    let cueBytes = 0;
+    let audioTxBytes = 0;
+    let totalBytes = 0;
+    let replacedSize = 0;
+    for (const record of records) {
+      if (record.key === replacingKey) {
+        replacedSize = record.size;
+        continue;
+      }
+      totalBytes += record.size;
+      if (record.group === "cue") {
+        cueBytes += record.size;
+      } else {
+        audioTxBytes += record.size;
+      }
+    }
+
+    totalBytes += replacement.size;
+    if (replacement.group === "cue") {
+      cueBytes += replacement.size;
+    } else {
+      audioTxBytes += replacement.size;
+    }
+    return { cueBytes, audioTxBytes, totalBytes, replacedSize };
+  }
+
+  async function ensureMediaStorageCapacity(records, replacement) {
+    const usage = calculatePersistedMediaUsage(records, replacement.key, replacement);
+    if (usage.cueBytes > maxCueFilesBytes) {
+      throw new Error(`cue sound storage limit is ${formatByteSize(maxCueFilesBytes)}`);
+    }
+    if (usage.audioTxBytes > maxAudioTxFilesBytes) {
+      throw new Error(`audio file TX storage limit is ${formatByteSize(maxAudioTxFilesBytes)}`);
+    }
+    if (usage.totalBytes > maxPersistedMediaBytes) {
+      throw new Error(`local media storage limit is ${formatByteSize(maxPersistedMediaBytes)}`);
+    }
+
+    if (!navigator.storage || typeof navigator.storage.estimate !== "function") {
+      return;
+    }
+    try {
+      const estimate = await navigator.storage.estimate();
+      const quota = Number(estimate && estimate.quota);
+      const currentUsage = Number(estimate && estimate.usage);
+      const additionalBytes = Math.max(0, replacement.size - usage.replacedSize);
+      if (Number.isFinite(quota) && Number.isFinite(currentUsage) && currentUsage + additionalBytes > quota) {
+        throw new Error("browser storage quota is exhausted");
+      }
+    } catch (err) {
+      if (err && String(err.message || err).includes("quota")) {
+        throw err;
+      }
+      // A failed estimate must not prevent normal IndexedDB storage.
+    }
+  }
+
+  async function savePersistedMediaFile(key, group, file, slotIndex = null) {
+    const record = mediaRecordFromFile(key, group, file, slotIndex);
+    const records = await listPersistedMediaRecords();
+    await ensureMediaStorageCapacity(records, record);
+    await runMediaStorageTransaction("readwrite", (store) => {
+      store.put(record);
+    });
+    requestPersistentMediaStorage();
+    return record;
+  }
+
+  async function deletePersistedMediaFile(key) {
+    await runMediaStorageTransaction("readwrite", (store) => {
+      store.delete(key);
+    });
+  }
+
+  async function deletePersistedAudioTxFilesFrom(index) {
+    const records = await listPersistedMediaRecords();
+    const keys = records
+      .filter((record) => record.group === "audioTx" && Number.isInteger(record.slotIndex) && record.slotIndex >= index)
+      .map((record) => record.key);
+    if (keys.length === 0) {
+      return;
+    }
+    await runMediaStorageTransaction("readwrite", (store) => {
+      keys.forEach((key) => store.delete(key));
+    });
+  }
+
+  async function clearPersistedMediaStorage() {
+    await runMediaStorageTransaction("readwrite", (store) => {
+      store.clear();
+    });
+  }
+
+  function requestPersistentMediaStorage() {
+    if (state.mediaStoragePersistenceRequested || !navigator.storage ||
+        typeof navigator.storage.persist !== "function") {
+      return;
+    }
+    state.mediaStoragePersistenceRequested = true;
+    navigator.storage.persist().catch(() => {
+      // Persistent storage is optional. IndexedDB still works in best-effort mode.
+    });
+  }
+
+  function createCueFileEntry(file, metadata = {}, persisted = false) {
+    return {
+      file,
+      objectUrl: URL.createObjectURL(file),
+      name: String(metadata.name || file.name || "audio"),
+      type: String(metadata.type || file.type || "application/octet-stream"),
+      size: Math.max(0, Math.floor(Number(metadata.size) || file.size || 0)),
+      persisted: !!persisted,
+    };
+  }
+
+  function clearCueFileFromMemory(kind) {
+    const previous = state.cueFiles[kind];
+    if (previous && previous.objectUrl) {
+      try {
+        URL.revokeObjectURL(previous.objectUrl);
+      } catch (_) {
+        // Ignore revoke errors.
+      }
+    }
+    state.cueFiles[kind] = null;
+    updateCueFileStatus(kind);
+  }
+
+  function setCueFileFromRecord(kind, record) {
+    clearCueFileFromMemory(kind);
+    state.cueFiles[kind] = createCueFileEntry(record.blob, record, true);
+    updateCueFileStatus(kind);
+  }
+
+  function formatByteSize(value) {
+    const bytes = Math.max(0, Number(value) || 0);
+    if (bytes < 1024) {
+      return `${Math.round(bytes)} B`;
+    }
+    const units = ["KiB", "MiB", "GiB"];
+    let scaled = bytes / 1024;
+    let unitIndex = 0;
+    while (scaled >= 1024 && unitIndex < units.length - 1) {
+      scaled /= 1024;
+      unitIndex += 1;
+    }
+    return `${scaled >= 10 ? scaled.toFixed(0) : scaled.toFixed(1)} ${units[unitIndex]}`;
+  }
+
+  function describeLocalMediaFile(entry, emptyLabel) {
+    if (!entry || !entry.file) {
+      return emptyLabel || t("media_file_none");
+    }
+    const params = {
+      name: String(entry.name || entry.file.name || "audio"),
+      size: formatByteSize(entry.size || entry.file.size),
+    };
+    return t(entry.persisted ? "media_file_saved" : "media_file_session", params);
+  }
+
+  function cueStatusElement(kind) {
+    if (kind === "pttOn") {
+      return ui.cuePttOnFileStatus;
+    }
+    if (kind === "pttOff") {
+      return ui.cuePttOffFileStatus;
+    }
+    return ui.cueCarrierFileStatus;
+  }
+
+  function updateCueFileStatus(kind) {
+    const element = cueStatusElement(kind);
+    if (element) {
+      element.textContent = describeLocalMediaFile(state.cueFiles[kind]);
+    }
+  }
+
+  function refreshCueFileStatuses() {
+    updateCueFileStatus("pttOn");
+    updateCueFileStatus("pttOff");
+    updateCueFileStatus("carrier");
+    const storageControls = [
+      ui.cuePttOnFile,
+      ui.cuePttOffFile,
+      ui.cueCarrierFile,
+      ui.cuePttOnReset,
+      ui.cuePttOffReset,
+      ui.cueCarrierReset,
+    ];
+    storageControls.forEach((element) => {
+      if (element) {
+        element.disabled = !state.mediaFilesReady;
+      }
+    });
+  }
+
+  async function restorePersistedMediaFiles() {
+    try {
+      const records = await listPersistedMediaRecords();
+      for (const record of records) {
+        if (record.group === "cue") {
+          const kind = record.key.slice(mediaStorageCuePrefix.length);
+          if (kind === "pttOn" || kind === "pttOff" || kind === "carrier") {
+            setCueFileFromRecord(kind, record);
+          }
+          continue;
+        }
+        if (record.group === "audioTx" && Number.isInteger(record.slotIndex) &&
+            record.slotIndex >= 0 && record.slotIndex < state.audioTxSlots.length) {
+          state.audioTxSlots[record.slotIndex] = {
+            file: record.blob,
+            name: record.name,
+            type: record.type,
+            size: record.size,
+            persisted: true,
+          };
+        }
+      }
+    } catch (err) {
+      appendLog(t("log_media_restore_failed", { error: err && err.message ? err.message : String(err) }), "warn");
+    } finally {
+      state.mediaFilesReady = true;
+      refreshCueFileStatuses();
+      refreshAudioTxSlotsUI();
+    }
+  }
+
+  async function clearAllSavedMediaFiles() {
+    if (state.audioTxTask) {
+      return;
+    }
+    if (typeof window.confirm === "function" && !window.confirm(t("media_clear_saved_confirm"))) {
+      return;
+    }
+
+    let storedFilesCleared = true;
+    try {
+      await clearPersistedMediaStorage();
+    } catch (err) {
+      // Clear current-session files too; a later reload may restore files if the
+      // browser denied IndexedDB deletion, and the warning makes that visible.
+      storedFilesCleared = false;
+      appendLog(t("log_media_restore_failed", { error: err && err.message ? err.message : String(err) }), "warn");
+    }
+
+    cleanupCueFiles();
+    state.audioTxSlots = state.audioTxSlots.map(() => createAudioTxSlotState());
+    persistFormSettings();
+    refreshCueFileStatuses();
+    refreshAudioTxSlotsUI();
+    if (storedFilesCleared) {
+      appendLog(t("log_media_storage_cleared"), "info");
+    }
+  }
+
   function bindCueControls() {
-    ui.cuePttOnFile.addEventListener("change", () => {
-      selectCueFile("pttOn", ui.cuePttOnFile.files && ui.cuePttOnFile.files[0]);
-    });
-    ui.cuePttOffFile.addEventListener("change", () => {
-      selectCueFile("pttOff", ui.cuePttOffFile.files && ui.cuePttOffFile.files[0]);
-    });
-    ui.cueCarrierFile.addEventListener("change", () => {
-      selectCueFile("carrier", ui.cueCarrierFile.files && ui.cueCarrierFile.files[0]);
-    });
+    const bindCueFileInput = (kind, input) => {
+      if (!input) {
+        return;
+      }
+      input.addEventListener("change", () => {
+        const file = input.files && input.files[0];
+        input.value = "";
+        selectCueFile(kind, file).catch((err) => {
+          appendLog(t("log_cue_play_failed", {
+            label: cueControls(kind).label,
+            error: err && err.message ? err.message : String(err),
+          }), "warn");
+        });
+      });
+    };
+    bindCueFileInput("pttOn", ui.cuePttOnFile);
+    bindCueFileInput("pttOff", ui.cuePttOffFile);
+    bindCueFileInput("carrier", ui.cueCarrierFile);
 
     ui.cuePttOnTest.addEventListener("click", () => playCue("pttOn", true));
     ui.cuePttOffTest.addEventListener("click", () => playCue("pttOff", true));
     ui.cueCarrierTest.addEventListener("click", () => playCue("carrier", true));
 
-    ui.cuePttOnReset.addEventListener("click", () => resetCueToDefault("pttOn"));
-    ui.cuePttOffReset.addEventListener("click", () => resetCueToDefault("pttOff"));
-    ui.cueCarrierReset.addEventListener("click", () => resetCueToDefault("carrier"));
+    const bindCueReset = (kind, button) => {
+      button.addEventListener("click", () => {
+        resetCueToDefault(kind).catch((err) => {
+          appendLog(t("log_cue_play_failed", {
+            label: cueControls(kind).label,
+            error: err && err.message ? err.message : String(err),
+          }), "warn");
+        });
+      });
+    };
+    bindCueReset("pttOn", ui.cuePttOnReset);
+    bindCueReset("pttOff", ui.cuePttOffReset);
+    bindCueReset("carrier", ui.cueCarrierReset);
 
     window.addEventListener("beforeunload", cleanupCueFiles);
   }
 
   function bindAudioTxControls() {
+    if (ui.clearSavedMediaBtn) {
+      ui.clearSavedMediaBtn.addEventListener("click", () => {
+        clearAllSavedMediaFiles().catch((err) => {
+          appendLog(t("log_media_restore_failed", {
+            error: err && err.message ? err.message : String(err),
+          }), "warn");
+        });
+      });
+    }
     if (!ui.audioTxSlotCount) {
       return;
     }
@@ -1596,6 +2042,7 @@
         enabled: ui.cuePttOnEnabled,
         url: ui.cuePttOnUrl,
         file: ui.cuePttOnFile,
+        status: ui.cuePttOnFileStatus,
         defaultUrl: cueDefaults.pttOnUrl,
         label: t("cue_ptt_on"),
       };
@@ -1605,6 +2052,7 @@
         enabled: ui.cuePttOffEnabled,
         url: ui.cuePttOffUrl,
         file: ui.cuePttOffFile,
+        status: ui.cuePttOffFileStatus,
         defaultUrl: cueDefaults.pttOffUrl,
         label: t("cue_ptt_off"),
       };
@@ -1613,6 +2061,7 @@
       enabled: ui.cueCarrierEnabled,
       url: ui.cueCarrierUrl,
       file: ui.cueCarrierFile,
+      status: ui.cueCarrierFileStatus,
       defaultUrl: cueDefaults.carrierUrl,
       label: t("cue_carrier"),
     };
@@ -1664,36 +2113,39 @@
     return controls.defaultUrl;
   }
 
-  function selectCueFile(kind, file) {
-    clearCueFile(kind);
+  async function selectCueFile(kind, file) {
+    clearCueFileFromMemory(kind);
     if (!file) {
       return;
     }
-    const objectUrl = URL.createObjectURL(file);
-    state.cueFiles[kind] = {
-      objectUrl,
-      name: file.name,
-    };
-    const controls = cueControls(kind);
-    appendLog(t("log_cue_local_selected", { label: controls.label, name: file.name }), "info");
-  }
 
-  function clearCueFile(kind) {
-    const prev = state.cueFiles[kind];
-    if (!prev || !prev.objectUrl) {
-      state.cueFiles[kind] = null;
-      return;
-    }
+    const entry = createCueFileEntry(file, file, false);
+    state.cueFiles[kind] = entry;
+    updateCueFileStatus(kind);
     try {
-      URL.revokeObjectURL(prev.objectUrl);
-    } catch (_) {
-      // Ignore revoke errors.
+      const record = await savePersistedMediaFile(mediaStorageKeyForCue(kind), "cue", file);
+      entry.name = record.name;
+      entry.type = record.type;
+      entry.size = record.size;
+      entry.persisted = true;
+    } catch (err) {
+      try {
+        await deletePersistedMediaFile(mediaStorageKeyForCue(kind));
+      } catch (_) {
+        // Ignore cleanup errors; the current selection remains session-only.
+      }
+      appendLog(t("log_media_file_session_only", {
+        name: entry.name,
+        error: err && err.message ? err.message : String(err),
+      }), "warn");
     }
-    state.cueFiles[kind] = null;
+    updateCueFileStatus(kind);
+    appendLog(t("log_cue_local_selected", { label: cueControls(kind).label, name: entry.name }), "info");
   }
 
-  function resetCueToDefault(kind) {
-    clearCueFile(kind);
+  async function resetCueToDefault(kind) {
+    clearCueFileFromMemory(kind);
+    await deletePersistedMediaFile(mediaStorageKeyForCue(kind));
     const controls = cueControls(kind);
     if (controls.url) {
       controls.url.value = controls.defaultUrl;
@@ -1701,14 +2153,15 @@
     if (controls.file) {
       controls.file.value = "";
     }
+    updateCueFileStatus(kind);
     persistFormSettings();
     appendLog(t("log_cue_reset_default", { label: controls.label }), "info");
   }
 
   function cleanupCueFiles() {
-    clearCueFile("pttOn");
-    clearCueFile("pttOff");
-    clearCueFile("carrier");
+    clearCueFileFromMemory("pttOn");
+    clearCueFileFromMemory("pttOff");
+    clearCueFileFromMemory("carrier");
   }
 
   function normalizeAudioTxSlotCount(value) {
@@ -1720,21 +2173,35 @@
   }
 
   function createAudioTxSlotState() {
-    return { file: null };
+    return {
+      file: null,
+      name: "",
+      type: "",
+      size: 0,
+      persisted: false,
+    };
   }
 
   function setAudioTxSlotCount(value, preserveExisting) {
     const count = normalizeAudioTxSlotCount(value);
     const keepExisting = preserveExisting !== false;
+    const previousSlots = state.audioTxSlots;
     const next = [];
     for (let i = 0; i < count; i += 1) {
-      if (keepExisting && state.audioTxSlots[i]) {
-        next.push(state.audioTxSlots[i]);
+      if (keepExisting && previousSlots[i]) {
+        next.push(previousSlots[i]);
       } else {
         next.push(createAudioTxSlotState());
       }
     }
     state.audioTxSlots = next;
+    if (keepExisting && count < previousSlots.length) {
+      deletePersistedAudioTxFilesFrom(count).catch((err) => {
+        appendLog(t("log_media_restore_failed", {
+          error: err && err.message ? err.message : String(err),
+        }), "warn");
+      });
+    }
     if (ui.audioTxSlotCount) {
       ui.audioTxSlotCount.value = String(count);
     }
@@ -1742,6 +2209,9 @@
   }
 
   function refreshAudioTxSlotsUI() {
+    if (ui.clearSavedMediaBtn) {
+      ui.clearSavedMediaBtn.disabled = !state.mediaFilesReady || !!state.audioTxTask;
+    }
     if (!ui.audioTxSlots) {
       return;
     }
@@ -1757,6 +2227,7 @@
     const activeTask = state.audioTxTask;
     const hasActiveTask = !!activeTask;
     const pttBusy = state.pttPressed && !hasActiveTask;
+    const mediaFilesLoading = !state.mediaFilesReady;
 
     for (let i = 0; i < state.audioTxSlots.length; i += 1) {
       const slot = state.audioTxSlots[i] || createAudioTxSlotState();
@@ -1776,7 +2247,7 @@
 
       const name = document.createElement("p");
       name.className = "audio-tx-slot-file";
-      name.textContent = slot.file ? slot.file.name : t("audio_tx_slot_empty");
+      name.textContent = describeLocalMediaFile(slot, t("audio_tx_slot_empty"));
       head.appendChild(name);
       row.appendChild(head);
 
@@ -1784,10 +2255,16 @@
       hiddenInput.type = "file";
       hiddenInput.accept = "audio/*,.wav";
       hiddenInput.className = "audio-tx-file-input";
-      hiddenInput.disabled = hasActiveTask;
+      hiddenInput.disabled = hasActiveTask || mediaFilesLoading;
       hiddenInput.addEventListener("change", () => {
-        setAudioTxSlotFile(i, hiddenInput.files && hiddenInput.files[0]);
+        const file = hiddenInput.files && hiddenInput.files[0];
         hiddenInput.value = "";
+        setAudioTxSlotFile(i, file).catch((err) => {
+          appendLog(t("log_audio_tx_failed", {
+            index: i + 1,
+            error: err && err.message ? err.message : String(err),
+          }), "error");
+        });
       });
       row.appendChild(hiddenInput);
 
@@ -1799,7 +2276,7 @@
       sendBtn.type = "button";
       sendBtn.className = "btn";
       sendBtn.textContent = isActiveSlot ? t("audio_tx_stop") : t("audio_tx_send");
-      sendBtn.disabled = isActiveSlot ? false : (!state.connected || !slot.file || hasActiveTask || pttBusy);
+      sendBtn.disabled = isActiveSlot ? false : (!state.connected || !slot.file || hasActiveTask || pttBusy || mediaFilesLoading);
       sendBtn.addEventListener("click", () => {
         if (isActiveSlot) {
           cancelAudioTxTask(true);
@@ -1816,7 +2293,7 @@
       selectBtn.type = "button";
       selectBtn.className = "ghost";
       selectBtn.textContent = t("audio_tx_select_file");
-      selectBtn.disabled = hasActiveTask;
+      selectBtn.disabled = hasActiveTask || mediaFilesLoading;
       selectBtn.addEventListener("click", () => {
         if (!hiddenInput.disabled) {
           hiddenInput.click();
@@ -1828,9 +2305,14 @@
       deleteBtn.type = "button";
       deleteBtn.className = "ghost";
       deleteBtn.textContent = t("audio_tx_delete");
-      deleteBtn.disabled = hasActiveTask || !slot.file;
+      deleteBtn.disabled = hasActiveTask || mediaFilesLoading || !slot.file;
       deleteBtn.addEventListener("click", () => {
-        clearAudioTxSlotFile(i, true);
+        clearAudioTxSlotFile(i, true).catch((err) => {
+          appendLog(t("log_audio_tx_failed", {
+            index: i + 1,
+            error: err && err.message ? err.message : String(err),
+          }), "error");
+        });
       });
       actions.appendChild(deleteBtn);
 
@@ -1839,21 +2321,46 @@
     }
   }
 
-  function setAudioTxSlotFile(index, file) {
+  async function setAudioTxSlotFile(index, file) {
     if (index < 0 || index >= state.audioTxSlots.length) {
       return;
     }
-    const slot = state.audioTxSlots[index] || createAudioTxSlotState();
-    slot.file = file || null;
-    state.audioTxSlots[index] = slot;
-    persistFormSettings();
-    if (file) {
-      appendLog(t("log_audio_tx_slot_selected", { index: index + 1, name: file.name }), "info");
+    if (!file) {
+      await clearAudioTxSlotFile(index, false);
+      return;
     }
+
+    const slot = {
+      file,
+      name: String(file.name || "audio"),
+      type: String(file.type || "application/octet-stream"),
+      size: Math.max(0, Math.floor(file.size || 0)),
+      persisted: false,
+    };
+    state.audioTxSlots[index] = slot;
+    try {
+      const record = await savePersistedMediaFile(mediaStorageKeyForAudioTxSlot(index), "audioTx", file, index);
+      slot.name = record.name;
+      slot.type = record.type;
+      slot.size = record.size;
+      slot.persisted = true;
+    } catch (err) {
+      try {
+        await deletePersistedMediaFile(mediaStorageKeyForAudioTxSlot(index));
+      } catch (_) {
+        // Ignore cleanup errors; the current selection remains session-only.
+      }
+      appendLog(t("log_media_file_session_only", {
+        name: slot.name,
+        error: err && err.message ? err.message : String(err),
+      }), "warn");
+    }
+    persistFormSettings();
+    appendLog(t("log_audio_tx_slot_selected", { index: index + 1, name: slot.name }), "info");
     refreshAudioTxSlotsUI();
   }
 
-  function clearAudioTxSlotFile(index, emitLog) {
+  async function clearAudioTxSlotFile(index, emitLog) {
     if (index < 0 || index >= state.audioTxSlots.length) {
       return;
     }
@@ -1862,13 +2369,13 @@
       return;
     }
     const hadFile = !!slot.file;
-    slot.file = null;
-    state.audioTxSlots[index] = slot;
+    state.audioTxSlots[index] = createAudioTxSlotState();
     persistFormSettings();
+    refreshAudioTxSlotsUI();
+    await deletePersistedMediaFile(mediaStorageKeyForAudioTxSlot(index));
     if (emitLog && hadFile) {
       appendLog(t("log_audio_tx_slot_cleared", { index: index + 1 }), "info");
     }
-    refreshAudioTxSlotsUI();
   }
 
   async function startAudioTxFromSlot(index) {
@@ -1897,7 +2404,7 @@
     if (!frames || frames.length === 0) {
       throw new Error("decoded audio is empty");
     }
-    startAudioTxTask(index, slot.file.name, frames);
+    startAudioTxTask(index, String(slot.name || slot.file.name || "audio"), frames);
   }
 
   async function decodeAudioFileToFrames(file) {
@@ -2278,6 +2785,7 @@
     setText("labelCuePttOnFile", t("cue_local_file"));
     setText("labelCuePttOffFile", t("cue_local_file"));
     setText("labelCueCarrierFile", t("cue_local_file"));
+    refreshCueFileStatuses();
     setText("cuePttOnTest", t("test"));
     setText("cuePttOffTest", t("test"));
     setText("cueCarrierTest", t("test"));
@@ -2286,6 +2794,7 @@
     setText("cueCarrierReset", t("default"));
     setText("headingAudioTx", t("audio_tx_files"));
     setText("labelAudioTxSlotCount", t("audio_tx_slot_count"));
+    setText("clearSavedMediaBtn", t("media_clear_saved"));
     setText("headingEvents", t("events"));
     setText("clearLogBtn", t("clear"));
     applyPasswordInputPresentation();
