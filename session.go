@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	pathpkg "path"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -78,20 +79,24 @@ type relaySession struct {
 	pttPressed    bool
 	talkAllowed   bool
 	currentTalker uint32
+	activeTalkers map[uint32]bool
 
 	joinRetriesLeft int
 	serverLocked    bool
 	pendingPCM      [][]byte
 	pendingOpus     [][]byte
 	txPCMBuffer     []byte
-	downlinkPCM     []byte
+	downlinkPCM     map[uint32][]byte
+	downlinkQueues  map[uint32][][]byte
 
-	peerCodec          map[uint32]peerCodecConfig
-	unsupportedFrames  map[string]struct{}
-	startupWarnings    []string
-	qosApplied         bool
-	uplinkOpusWarned   bool
-	downlinkOpusWarned bool
+	peerCodec              map[uint32]peerCodecConfig
+	unsupportedFrames      map[string]struct{}
+	startupWarnings        []string
+	qosApplied             bool
+	uplinkOpusWarned       bool
+	downlinkOpusWarned     bool
+	serverMultiTalkEnabled bool
+	serverMaxActiveTalkers int
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -123,7 +128,10 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		fec:               newFECEncoder(cfg.FecEnabled),
 		cb:                cb,
 		joinRetriesLeft:   5,
+		activeTalkers:     make(map[uint32]bool),
 		peerCodec:         make(map[uint32]peerCodecConfig),
+		downlinkPCM:       make(map[uint32][]byte),
+		downlinkQueues:    make(map[uint32][][]byte),
 		unsupportedFrames: make(map[string]struct{}),
 		done:              make(chan struct{}),
 	}
@@ -324,11 +332,12 @@ func (s *relaySession) Start() {
 		s.emitError("failed to send keepalive: %v", err)
 	}
 
-	s.wg.Add(4)
+	s.wg.Add(5)
 	go s.readLoop()
 	go s.keepaliveLoop()
 	go s.joinRetryLoop()
 	go s.codecLoop()
+	go s.downlinkMixLoop()
 }
 
 func (s *relaySession) Close() {
@@ -350,6 +359,8 @@ func (s *relaySession) Close() {
 	s.pendingOpus = nil
 	s.txPCMBuffer = nil
 	s.downlinkPCM = nil
+	s.downlinkQueues = nil
+	s.activeTalkers = nil
 	s.mu.Unlock()
 	if codec != nil {
 		codec.Close()
@@ -366,6 +377,32 @@ func (s *relaySession) EffectiveConfig() sessionConfig {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.cfg
+}
+
+func (s *relaySession) emitConnected() {
+	effective := s.EffectiveConfig()
+	codec2Ready, opusReady := detectRuntimeCodecAvailability(effective.Codec2LibPath, effective.OpusLibPath)
+	qosEnabled := effective.QosEnabled
+	fecEnabled := effective.FecEnabled
+
+	s.emitEvent(serverEvent{
+		Type:          "connected",
+		Message:       "relay server response received",
+		RelayHost:     effective.RelayHost,
+		RelayPort:     effective.RelayPort,
+		ChannelID:     effective.ChannelID,
+		SenderID:      effective.SenderID,
+		CryptoMode:    string(effective.CryptoMode),
+		CodecMode:     effective.CodecMode,
+		TxCodec:       effective.TxCodec,
+		PCMOnly:       effective.PCMOnly,
+		QosEnabled:    &qosEnabled,
+		FecEnabled:    &fecEnabled,
+		UplinkCodec:   effective.UplinkCodec,
+		DownlinkCodec: effective.DownlinkCodec,
+		Codec2Ready:   codec2Ready,
+		OpusReady:     opusReady,
+	})
 }
 
 func (s *relaySession) HandleBrowserBinary(payload []byte) {
@@ -679,7 +716,7 @@ func (s *relaySession) joinRetryLoop() {
 			if s.joinRetriesLeft <= 0 {
 				s.mu.Unlock()
 				s.emitEvent(serverEvent{
-					Type:    "status",
+					Type:    "disconnected",
 					Level:   "warn",
 					Message: "No response from relay server (join retry limit reached)",
 				})
@@ -715,6 +752,47 @@ func (s *relaySession) codecLoop() {
 			if err := s.sendCodecConfig(); err != nil {
 				s.emitError("failed to broadcast codec config: %v", err)
 			}
+		}
+	}
+}
+
+func (s *relaySession) downlinkMixLoop() {
+	defer s.wg.Done()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			frames := make([][]byte, 0)
+
+			s.mu.Lock()
+			for senderID, queue := range s.downlinkQueues {
+				if len(queue) == 0 {
+					delete(s.downlinkQueues, senderID)
+					continue
+				}
+				frames = append(frames, queue[0])
+				if len(queue) == 1 {
+					delete(s.downlinkQueues, senderID)
+				} else {
+					s.downlinkQueues[senderID] = queue[1:]
+				}
+			}
+			s.mu.Unlock()
+
+			if len(frames) == 0 {
+				continue
+			}
+
+			mixed := mixPCMFrames(frames)
+			if len(mixed) == 0 {
+				continue
+			}
+			s.emitMixedDownlinkAudio(mixed)
 		}
 	}
 }
@@ -774,20 +852,38 @@ func (s *relaySession) acceptServerAddress(from *net.UDPAddr) bool {
 		Message:   message,
 		ChannelID: channelID,
 	})
+	s.emitConnected()
 	return true
 }
 
 func (s *relaySession) handleTalkPacket(pkt parsedPacket) {
 	talker := readTalkerPayload(pkt.Payload, pkt.Header.SenderID)
-	if pkt.Header.Type == pktTalkRelease {
-		talker = 0
-	}
-
 	var flushPCM [][]byte
 	var flushOpus [][]byte
 	s.mu.Lock()
-	s.currentTalker = talker
-	s.talkAllowed = talker != 0 && talker == s.cfg.SenderID
+	switch pkt.Header.Type {
+	case pktTalkGrant:
+		if talker != 0 {
+			s.activeTalkers[talker] = true
+		}
+	case pktTalkRelease:
+		delete(s.activeTalkers, talker)
+	case pktTalkDeny:
+		// no-op
+	}
+
+	activeTalkers := make([]uint32, 0, len(s.activeTalkers))
+	for senderID := range s.activeTalkers {
+		activeTalkers = append(activeTalkers, senderID)
+	}
+	sort.Slice(activeTalkers, func(i, j int) bool { return activeTalkers[i] < activeTalkers[j] })
+
+	s.currentTalker = 0
+	for _, senderID := range activeTalkers {
+		s.currentTalker = senderID
+		break
+	}
+	s.talkAllowed = s.activeTalkers[s.cfg.SenderID]
 	if s.talkAllowed && len(s.pendingPCM) > 0 {
 		flushPCM = append(flushPCM, s.pendingPCM...)
 		s.pendingPCM = nil
@@ -797,20 +893,26 @@ func (s *relaySession) handleTalkPacket(pkt parsedPacket) {
 		s.pendingOpus = nil
 	}
 	talkAllowed := s.talkAllowed
+	currentTalker := s.currentTalker
 	s.mu.Unlock()
 
 	s.emitEvent(serverEvent{
-		Type:        "talker",
-		TalkerID:    talker,
-		TalkAllowed: talkAllowed,
+		Type:          "talker",
+		TalkerID:      currentTalker,
+		ActiveTalkers: activeTalkers,
+		TalkAllowed:   talkAllowed,
 	})
 
 	if pkt.Header.Type == pktTalkDeny {
+		currentTalker := talker
+		if currentTalker == 0 && len(activeTalkers) > 0 {
+			currentTalker = activeTalkers[0]
+		}
 		s.emitEvent(serverEvent{
 			Type:     "status",
 			Level:    "warn",
-			Message:  fmt.Sprintf("PTT denied. Current talker=%d", talker),
-			TalkerID: talker,
+			Message:  fmt.Sprintf("PTT denied. Current talker=%d", currentTalker),
+			TalkerID: currentTalker,
 		})
 	}
 
@@ -861,9 +963,25 @@ func (s *relaySession) handleServerConfig(pkt parsedPacket) {
 		return
 	}
 	timeoutSec := uint32(binary.BigEndian.Uint16(pkt.Payload[:2]))
+	multiTalkEnabled := false
+	maxActiveTalkers := uint32(1)
+	if len(pkt.Payload) >= 4 {
+		multiTalkEnabled = (pkt.Payload[2] & 0x01) != 0
+		if pkt.Payload[3] > 0 {
+			maxActiveTalkers = uint32(pkt.Payload[3])
+		}
+	}
+
+	s.mu.Lock()
+	s.serverMultiTalkEnabled = multiTalkEnabled
+	s.serverMaxActiveTalkers = int(maxActiveTalkers)
+	s.mu.Unlock()
+
 	s.emitEvent(serverEvent{
-		Type:           "server_config",
-		TalkTimeoutSec: timeoutSec,
+		Type:             "server_config",
+		TalkTimeoutSec:   timeoutSec,
+		MultiTalkEnabled: multiTalkEnabled,
+		MaxActiveTalkers: maxActiveTalkers,
 	})
 	if timeoutSec == 0 {
 		s.emitEvent(serverEvent{
@@ -878,6 +996,13 @@ func (s *relaySession) handleServerConfig(pkt parsedPacket) {
 		Level:   "info",
 		Message: fmt.Sprintf("Server TX timeout: %ds", timeoutSec),
 	})
+	if multiTalkEnabled {
+		s.emitEvent(serverEvent{
+			Type:    "status",
+			Level:   "info",
+			Message: fmt.Sprintf("Server multi-talk enabled (max active talkers: %d)", maxActiveTalkers),
+		})
+	}
 }
 
 func (s *relaySession) handleHandshakePacket(pkt parsedPacket) {
@@ -918,20 +1043,15 @@ func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
 	peerCfg, hasPeer := s.peerCodec[pkt.Header.SenderID]
 	codec := s.codec2
 	opusDecoder := s.opusDecoder
-	downlinkCodec := s.cfg.DownlinkCodec
 	s.mu.Unlock()
 
 	if hasPeer {
 		codecID := normalizeCodecTransportID(peerCfg.CodecID, peerCfg.PCMOnly)
 		switch codecID {
 		case codecTransportPCM:
-			s.emitDownlinkAudio(frame)
+			s.emitDownlinkAudio(pkt.Header.SenderID, frame)
 			return
 		case codecTransportOpus:
-			if downlinkCodec == downlinkCodecOpus && s.cb.onOpus != nil {
-				s.cb.onOpus(append([]byte(nil), frame...))
-				return
-			}
 			if opusDecoder == nil {
 				s.emitUnsupportedFrame(pkt.Header.SenderID, len(frame),
 					"opus decoder is unavailable")
@@ -942,7 +1062,7 @@ func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
 				s.emitUnsupportedFrame(pkt.Header.SenderID, len(frame), err.Error())
 				return
 			}
-			s.emitDownlinkAudio(decoded)
+			s.emitDownlinkAudio(pkt.Header.SenderID, decoded)
 			return
 		default:
 			if codec == nil {
@@ -952,7 +1072,7 @@ func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
 			}
 			decoded, err := codec.Decode(peerCfg.Mode, frame)
 			if err == nil {
-				s.emitDownlinkAudio(decoded)
+				s.emitDownlinkAudio(pkt.Header.SenderID, decoded)
 				return
 			}
 		}
@@ -966,7 +1086,7 @@ func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
 			CodecID: codecTransportPCM,
 		}
 		s.mu.Unlock()
-		s.emitDownlinkAudio(frame)
+		s.emitDownlinkAudio(pkt.Header.SenderID, frame)
 		return
 	}
 
@@ -980,21 +1100,9 @@ func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
 				CodecID: codecTransportCodec2,
 			}
 			s.mu.Unlock()
-			s.emitDownlinkAudio(decoded)
+			s.emitDownlinkAudio(pkt.Header.SenderID, decoded)
 			return
 		}
-	}
-
-	if downlinkCodec == downlinkCodecOpus && s.cb.onOpus != nil {
-		s.mu.Lock()
-		s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{
-			Mode:    normalizeCodecModeForTransport(s.cfg.CodecMode, codecTransportOpus, false),
-			PCMOnly: false,
-			CodecID: codecTransportOpus,
-		}
-		s.mu.Unlock()
-		s.cb.onOpus(append([]byte(nil), frame...))
-		return
 	}
 
 	if opusDecoder != nil {
@@ -1007,7 +1115,7 @@ func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
 				CodecID: codecTransportOpus,
 			}
 			s.mu.Unlock()
-			s.emitDownlinkAudio(decoded)
+			s.emitDownlinkAudio(pkt.Header.SenderID, decoded)
 			return
 		}
 	}
@@ -1044,64 +1152,133 @@ func (s *relaySession) emitUnsupportedFrame(senderID uint32, size int, reason st
 	})
 }
 
-func (s *relaySession) emitDownlinkAudio(frame []byte) {
-	frames := s.collectDownlinkPCMFrames(frame)
+func (s *relaySession) emitDownlinkAudio(senderID uint32, frame []byte) {
+	frames := s.collectDownlinkPCMFrames(senderID, frame)
+	if len(frames) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	if s.downlinkQueues == nil {
+		s.downlinkQueues = make(map[uint32][][]byte)
+	}
+	queue := s.downlinkQueues[senderID]
 	for _, pcm := range frames {
-		s.mu.Lock()
-		downlinkCodec := s.cfg.DownlinkCodec
-		encoder := s.opusEncoder
-		warned := s.downlinkOpusWarned
-		s.mu.Unlock()
+		if len(queue) >= 48 {
+			queue = queue[1:]
+		}
+		queue = append(queue, pcm)
+	}
+	s.downlinkQueues[senderID] = queue
+	s.mu.Unlock()
+}
 
-		if downlinkCodec == downlinkCodecOpus && encoder != nil && s.cb.onOpus != nil {
-			packet, err := encoder.Encode(pcm)
-			if err == nil {
-				s.cb.onOpus(packet)
-				continue
-			}
+func (s *relaySession) emitMixedDownlinkAudio(pcm []byte) {
+	if len(pcm) == 0 {
+		return
+	}
 
-			if !warned {
-				s.mu.Lock()
-				if !s.downlinkOpusWarned {
-					s.downlinkOpusWarned = true
-					s.mu.Unlock()
-					s.emitEvent(serverEvent{
-						Type:    "status",
-						Level:   "warn",
-						Message: fmt.Sprintf("Opus downlink encode failed; fallback to PCM: %v", err),
-					})
-				} else {
-					s.mu.Unlock()
-				}
-			}
+	s.mu.Lock()
+	downlinkCodec := s.cfg.DownlinkCodec
+	encoder := s.opusEncoder
+	warned := s.downlinkOpusWarned
+	s.mu.Unlock()
+
+	if downlinkCodec == downlinkCodecOpus && encoder != nil && s.cb.onOpus != nil {
+		packet, err := encoder.Encode(pcm)
+		if err == nil {
+			s.cb.onOpus(packet)
+			return
 		}
 
-		if s.cb.onPCM != nil {
-			s.cb.onPCM(pcm)
+		if !warned {
+			s.mu.Lock()
+			if !s.downlinkOpusWarned {
+				s.downlinkOpusWarned = true
+				s.mu.Unlock()
+				s.emitEvent(serverEvent{
+					Type:    "status",
+					Level:   "warn",
+					Message: fmt.Sprintf("Opus downlink encode failed; fallback to PCM: %v", err),
+				})
+			} else {
+				s.mu.Unlock()
+			}
 		}
+	}
+
+	if s.cb.onPCM != nil {
+		s.cb.onPCM(pcm)
 	}
 }
 
-func (s *relaySession) collectDownlinkPCMFrames(frame []byte) [][]byte {
+func (s *relaySession) collectDownlinkPCMFrames(senderID uint32, frame []byte) [][]byte {
+	if senderID == 0 {
+		return nil
+	}
+
 	pcm := sanitizePCM(frame)
 	if len(pcm) == 0 {
 		return nil
 	}
 
 	s.mu.Lock()
-	if len(s.downlinkPCM) > pcmBytesPerFrame*64 {
-		s.downlinkPCM = nil
+	buffer := s.downlinkPCM[senderID]
+	if len(buffer) > pcmBytesPerFrame*64 {
+		buffer = nil
 	}
-	s.downlinkPCM = append(s.downlinkPCM, pcm...)
-	frames := make([][]byte, 0, len(s.downlinkPCM)/pcmBytesPerFrame+1)
-	for len(s.downlinkPCM) >= pcmBytesPerFrame {
-		out := append([]byte(nil), s.downlinkPCM[:pcmBytesPerFrame]...)
+	buffer = append(buffer, pcm...)
+	frames := make([][]byte, 0, len(buffer)/pcmBytesPerFrame+1)
+	for len(buffer) >= pcmBytesPerFrame {
+		out := append([]byte(nil), buffer[:pcmBytesPerFrame]...)
 		frames = append(frames, out)
-		s.downlinkPCM = s.downlinkPCM[pcmBytesPerFrame:]
+		buffer = buffer[pcmBytesPerFrame:]
+	}
+	if len(buffer) == 0 {
+		delete(s.downlinkPCM, senderID)
+	} else {
+		s.downlinkPCM[senderID] = buffer
 	}
 	s.mu.Unlock()
 
 	return frames
+}
+
+func mixPCMFrames(frames [][]byte) []byte {
+	if len(frames) == 0 {
+		return nil
+	}
+
+	samplesPerFrame := pcmBytesPerFrame / 2
+	accum := make([]int, samplesPerFrame)
+	contributors := 0
+
+	for _, pcm := range frames {
+		if len(pcm) < pcmBytesPerFrame {
+			continue
+		}
+		contributors++
+		for i := 0; i < samplesPerFrame; i++ {
+			sample := int(int16(binary.LittleEndian.Uint16(pcm[i*2 : i*2+2])))
+			accum[i] += sample
+		}
+	}
+
+	if contributors == 0 {
+		return nil
+	}
+
+	mixed := make([]byte, pcmBytesPerFrame)
+	for i := 0; i < samplesPerFrame; i++ {
+		value := accum[i] / contributors
+		if value > 32767 {
+			value = 32767
+		} else if value < -32768 {
+			value = -32768
+		}
+		binary.LittleEndian.PutUint16(mixed[i*2:i*2+2], uint16(int16(value)))
+	}
+	return mixed
 }
 
 func (s *relaySession) sendJoin() error {

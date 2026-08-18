@@ -34,26 +34,29 @@ import (
 var webAssets embed.FS
 
 type serverEvent struct {
-	Type           string `json:"type"`
-	Level          string `json:"level,omitempty"`
-	Message        string `json:"message,omitempty"`
-	ChannelID      uint32 `json:"channelId,omitempty"`
-	SenderID       uint32 `json:"senderId,omitempty"`
-	TalkerID       uint32 `json:"talkerId,omitempty"`
-	TalkAllowed    bool   `json:"talkAllowed,omitempty"`
-	TalkTimeoutSec uint32 `json:"talkTimeoutSec,omitempty"`
-	RelayHost      string `json:"relayHost,omitempty"`
-	RelayPort      int    `json:"relayPort,omitempty"`
-	CryptoMode     string `json:"cryptoMode,omitempty"`
-	CodecMode      int    `json:"codecMode,omitempty"`
-	TxCodec        string `json:"txCodec,omitempty"`
-	PCMOnly        bool   `json:"pcmOnly,omitempty"`
-	QosEnabled     *bool  `json:"qosEnabled,omitempty"`
-	FecEnabled     *bool  `json:"fecEnabled,omitempty"`
-	UplinkCodec    string `json:"uplinkCodec,omitempty"`
-	DownlinkCodec  string `json:"downlinkCodec,omitempty"`
-	Codec2Ready    bool   `json:"codec2Ready,omitempty"`
-	OpusReady      bool   `json:"opusReady,omitempty"`
+	Type             string   `json:"type"`
+	Level            string   `json:"level,omitempty"`
+	Message          string   `json:"message,omitempty"`
+	ChannelID        uint32   `json:"channelId,omitempty"`
+	SenderID         uint32   `json:"senderId,omitempty"`
+	TalkerID         uint32   `json:"talkerId,omitempty"`
+	ActiveTalkers    []uint32 `json:"activeTalkers,omitempty"`
+	TalkAllowed      bool     `json:"talkAllowed,omitempty"`
+	TalkTimeoutSec   uint32   `json:"talkTimeoutSec,omitempty"`
+	MultiTalkEnabled bool     `json:"multiTalkEnabled,omitempty"`
+	MaxActiveTalkers uint32   `json:"maxActiveTalkers,omitempty"`
+	RelayHost        string   `json:"relayHost,omitempty"`
+	RelayPort        int      `json:"relayPort,omitempty"`
+	CryptoMode       string   `json:"cryptoMode,omitempty"`
+	CodecMode        int      `json:"codecMode,omitempty"`
+	TxCodec          string   `json:"txCodec,omitempty"`
+	PCMOnly          bool     `json:"pcmOnly,omitempty"`
+	QosEnabled       *bool    `json:"qosEnabled,omitempty"`
+	FecEnabled       *bool    `json:"fecEnabled,omitempty"`
+	UplinkCodec      string   `json:"uplinkCodec,omitempty"`
+	DownlinkCodec    string   `json:"downlinkCodec,omitempty"`
+	Codec2Ready      bool     `json:"codec2Ready,omitempty"`
+	OpusReady        bool     `json:"opusReady,omitempty"`
 }
 
 type clientCommand struct {
@@ -569,29 +572,6 @@ func handleClientCommand(
 			return current, false
 		}
 		newSession.Start()
-		effective := newSession.EffectiveConfig()
-		codec2Ready, opusReady := detectRuntimeCodecAvailability(effective.Codec2LibPath, effective.OpusLibPath)
-		effectiveQosEnabled := effective.QosEnabled
-		effectiveFecEnabled := effective.FecEnabled
-
-		enqueueJSON(serverEvent{
-			Type:          "connected",
-			Message:       "relay session started",
-			RelayHost:     effective.RelayHost,
-			RelayPort:     effective.RelayPort,
-			ChannelID:     effective.ChannelID,
-			SenderID:      effective.SenderID,
-			CryptoMode:    string(effective.CryptoMode),
-			CodecMode:     effective.CodecMode,
-			TxCodec:       effective.TxCodec,
-			PCMOnly:       effective.PCMOnly,
-			QosEnabled:    &effectiveQosEnabled,
-			FecEnabled:    &effectiveFecEnabled,
-			UplinkCodec:   effective.UplinkCodec,
-			DownlinkCodec: effective.DownlinkCodec,
-			Codec2Ready:   codec2Ready,
-			OpusReady:     opusReady,
-		})
 		return newSession, true
 
 	case "disconnect":

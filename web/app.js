@@ -236,8 +236,11 @@
     lastCarrierCueMs: 0,
     selfSenderId: 0,
     talkerId: 0,
+    activeTalkers: [],
     talkAllowed: false,
     serverTalkTimeoutSec: 0,
+    serverMultiTalkEnabled: false,
+    serverMaxActiveTalkers: 1,
     txTimeoutRemainingSec: 0,
     txTimeoutDeadlineMs: 0,
     txTimeoutTicker: null,
@@ -1013,7 +1016,12 @@
     if (event.type === "connected") {
       state.connected = true;
       state.selfSenderId = Number(event.senderId || 0);
+      state.activeTalkers = [];
+      state.talkerId = 0;
+      state.talkAllowed = false;
       state.serverTalkTimeoutSec = 0;
+      state.serverMultiTalkEnabled = false;
+      state.serverMaxActiveTalkers = 1;
       stopTxTimeoutCountdown();
       state.connectionView.host = event.relayHost || "";
       state.connectionView.port = Number(event.relayPort || 0);
@@ -1079,29 +1087,38 @@
     if (event.type === "server_config") {
       const nextTimeout = Math.max(0, Number(event.talkTimeoutSec || 0));
       state.serverTalkTimeoutSec = Number.isFinite(nextTimeout) ? nextTimeout : 0;
+      state.serverMultiTalkEnabled = !!event.multiTalkEnabled;
+      state.serverMaxActiveTalkers = Math.max(1, Number(event.maxActiveTalkers || 1));
       syncTxTimeoutCountdownState();
       return;
     }
 
     if (event.type === "disconnected") {
+      const ws = state.ws;
       appendLog(event.message || t("log_disconnected"), "warn");
       applyDisconnectedState();
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        ws.close();
+      }
       return;
     }
 
     if (event.type === "talker") {
-      const prevTalkerId = Number(state.talkerId || 0);
-      const nextTalkerId = Number(event.talkerId || 0);
+      const prevTalkers = Array.isArray(state.activeTalkers) ? state.activeTalkers.slice() : [];
+      const nextTalkers = Array.isArray(event.activeTalkers)
+        ? event.activeTalkers
+            .map((value) => Number(value || 0))
+            .filter((value) => Number.isFinite(value) && value > 0)
+        : [];
       const localTalkTimedOut =
-        prevTalkerId === state.selfSenderId &&
-        nextTalkerId === 0 &&
+        prevTalkers.includes(state.selfSenderId) &&
+        !nextTalkers.includes(state.selfSenderId) &&
         state.pttPressed;
       const remoteTalkEnded =
-        prevTalkerId !== 0 &&
-        prevTalkerId !== state.selfSenderId &&
-        nextTalkerId === 0;
+        prevTalkers.some((talkerId) => talkerId !== state.selfSenderId) &&
+        !nextTalkers.some((talkerId) => talkerId !== state.selfSenderId);
 
-      updateTalkerStatus(nextTalkerId, event.talkAllowed);
+      updateTalkerStatus(nextTalkers, event.talkAllowed);
 
       if (localTalkTimedOut) {
         handleLocalTxTimeout();
@@ -1112,8 +1129,8 @@
         playCue("pttOff");
       }
 
-      if (state.pttPressed && !event.talkAllowed && nextTalkerId !== 0 &&
-          nextTalkerId !== state.selfSenderId) {
+      if (state.pttPressed && !event.talkAllowed &&
+          nextTalkers.some((talkerId) => talkerId !== state.selfSenderId)) {
         playCue("carrier");
       }
       return;
@@ -1153,6 +1170,8 @@
     clearPendingSettingsReconnect();
     state.connected = false;
     state.serverTalkTimeoutSec = 0;
+    state.serverMultiTalkEnabled = false;
+    state.serverMaxActiveTalkers = 1;
     stopTxTimeoutCountdown();
     cancelAudioTxTask(false);
     setPTT(false, false);
@@ -1189,7 +1208,7 @@
     ui.disconnectBtn.disabled = true;
     refreshPTTAvailability();
     refreshAudioTxSlotsUI();
-    updateTalkerStatus(0, false);
+    updateTalkerStatus([], false);
     setConnectionView({ kind: "offline", level: "warn" });
   }
 
@@ -2055,19 +2074,26 @@
     el.textContent = value;
   }
 
-  function updateTalkerStatus(talkerId, talkAllowed) {
-    state.talkerId = Number(talkerId || 0);
+  function updateTalkerStatus(activeTalkers, talkAllowed) {
+    const normalizedTalkers = Array.isArray(activeTalkers)
+      ? activeTalkers
+          .map((value) => Number(value || 0))
+          .filter((value) => Number.isFinite(value) && value > 0)
+      : [];
+    state.activeTalkers = normalizedTalkers;
+    state.talkerId = normalizedTalkers.find((talkerId) => talkerId !== state.selfSenderId)
+      || (normalizedTalkers.includes(state.selfSenderId) ? state.selfSenderId : 0);
     state.talkAllowed = !!talkAllowed;
     syncTxTimeoutCountdownState();
     if (!ui.talkerStatus) {
       return;
     }
-    if (state.talkerId === 0) {
+    if (state.activeTalkers.length === 0) {
       ui.talkerStatus.textContent = t("talker_none");
       updatePttButtonLabel();
       return;
     }
-    const talkerText = String(state.talkerId);
+    const talkerText = state.activeTalkers.join(", ");
     ui.talkerStatus.textContent = state.talkAllowed ? `${talkerText} (${t("talker_you")})` : talkerText;
     updatePttButtonLabel();
   }
@@ -2093,7 +2119,7 @@
     if (!state.selfSenderId) {
       return false;
     }
-    return state.talkerId === state.selfSenderId;
+    return state.activeTalkers.includes(state.selfSenderId);
   }
 
   function updatePttButtonLabel() {
@@ -2265,7 +2291,7 @@
     applyPasswordInputPresentation();
     updateMicVolumeDisplay();
 
-    updateTalkerStatus(state.talkerId, state.talkAllowed);
+    updateTalkerStatus(state.activeTalkers, state.talkAllowed);
     applyConnectionView();
     refreshAudioTxSlotsUI();
   }

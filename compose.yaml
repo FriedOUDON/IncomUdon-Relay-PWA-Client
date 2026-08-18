@@ -1,0 +1,35 @@
+name: incomudon-pwa-client
+
+services:
+  pwa-client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: incomudon-pwa-client:local
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${PWA_HOST_PORT:-50001}:${PWA_LISTEN_PORT:-50001}"
+    command:
+      - -listen
+      - ":${PWA_LISTEN_PORT:-50001}"
+      - -base-path
+      - "${INCOMUDON_BASE_PATH:-/}"
+    environment:
+      INCOMUDON_FIXED_RELAY: "${INCOMUDON_FIXED_RELAY:-}"
+      INCOMUDON_AUTH_MODE: "${INCOMUDON_AUTH_MODE:-none}"
+      INCOMUDON_WS_TOKEN: "${INCOMUDON_WS_TOKEN:-}"
+      INCOMUDON_BASIC_USER: "${INCOMUDON_BASIC_USER:-}"
+      INCOMUDON_BASIC_PASS: "${INCOMUDON_BASIC_PASS:-}"
+      INCOMUDON_OIDC_ISSUER: "${INCOMUDON_OIDC_ISSUER:-}"
+      INCOMUDON_OIDC_CLIENT_ID: "${INCOMUDON_OIDC_CLIENT_ID:-}"
+      INCOMUDON_OIDC_CLIENT_SECRET: "${INCOMUDON_OIDC_CLIENT_SECRET:-}"
+      INCOMUDON_OIDC_SESSION_SECRET: "${INCOMUDON_OIDC_SESSION_SECRET:-}"
+      INCOMUDON_OIDC_SCOPES: "${INCOMUDON_OIDC_SCOPES:-}"
+      INCOMUDON_OIDC_REDIRECT_URL: "${INCOMUDON_OIDC_REDIRECT_URL:-}"
+      INCOMUDON_OIDC_SESSION_TTL: "${INCOMUDON_OIDC_SESSION_TTL:-72h}"
+      INCOMUDON_CODEC2_LIB: "${INCOMUDON_CODEC2_LIB:-}"
+      INCOMUDON_OPUS_LIB: "${INCOMUDON_OPUS_LIB:-}"
+    volumes:
+      - ./third_party/libcodec2:/opt/libcodec2:ro
+      - ./third_party/libopus:/opt/libopus:ro

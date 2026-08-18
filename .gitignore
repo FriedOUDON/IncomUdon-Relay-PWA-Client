@@ -5,3 +5,6 @@
 !/third_party/libcodec2/linux-musl-x86_64/.gitkeep
 incomudon-pwa-client.exe
 
+
+# Local Docker Compose configuration can contain secrets.
+.env

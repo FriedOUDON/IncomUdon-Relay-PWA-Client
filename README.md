@@ -376,3 +376,56 @@ Start `pwa_client` first, then reload Nginx:
 sudo nginx -t
 sudo systemctl reload nginx
 ```
+## Docker Compose
+
+compose.yaml manages the standalone PWA service. It builds the image, starts it
+with restart policy unless-stopped, and mounts user-provided Codec2/Opus library
+directories read-only.
+
+1. Create the local configuration file:
+
+~~~bash
+cp .env.example .env
+~~~
+
+2. Edit .env and set at least INCOMUDON_FIXED_RELAY for a public deployment.
+   Set INCOMUDON_AUTH_MODE, authentication settings, and INCOMUDON_WS_TOKEN
+   as required.
+
+3. Build and start:
+
+~~~bash
+docker compose up -d --build
+~~~
+
+4. Check service status and logs:
+
+~~~bash
+docker compose ps
+docker compose logs -f pwa-client
+~~~
+
+5. Apply configuration or dynamic library changes:
+
+~~~bash
+docker compose up -d --build
+~~~
+
+Use docker compose restart pwa-client when only a mounted libcodec2.so or
+libopus.so was replaced. Stop and remove the service with:
+
+~~~bash
+docker compose down
+~~~
+
+PWA_HOST_PORT controls the host-side port and PWA_LISTEN_PORT controls the
+container listener; both default to 50001. INCOMUDON_BASE_PATH defaults to /.
+For HTTPS/reverse-proxy deployment, use the existing docker-compose.nginx.yml
+configuration instead of exposing this standalone service directly to the Internet.
+
+Place optional dynamic libraries before starting Compose:
+
+- third_party/libcodec2/.../libcodec2.so is mounted at /opt/libcodec2.
+- third_party/libopus/.../libopus.so is mounted at /opt/libopus.
+
+Keep .env private because it can contain authentication secrets and shared tokens.

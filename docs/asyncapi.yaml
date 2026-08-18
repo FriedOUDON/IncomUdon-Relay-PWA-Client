@@ -112,13 +112,14 @@ components:
         $ref: "#/components/schemas/ReadyEvent"
     ConnectedEventMessage:
       name: ConnectedEvent
-      title: Connected event
+      title: Relay response confirmed event
+      description: Emitted only after the PWA receives a valid UDP response from the relay server.
       payload:
         $ref: "#/components/schemas/ConnectedEvent"
       examples:
         - payload:
             type: connected
-            message: relay session started
+            message: relay server response received
             relayHost: 192.0.2.10
             relayPort: 50000
             channelId: 1
@@ -134,6 +135,7 @@ components:
     DisconnectedEventMessage:
       name: DisconnectedEvent
       title: Disconnected event
+      description: Emitted for an explicit disconnect or when the relay does not respond before the join retry limit.
       payload:
         $ref: "#/components/schemas/DisconnectedEvent"
     TalkerEventMessage:
@@ -296,6 +298,7 @@ components:
       additionalProperties: true
     ConnectedEvent:
       type: object
+      description: Sent only after a relay server response has been received; opening the WebSocket or UDP socket alone does not produce this event.
       required: [type]
       properties:
         type:
@@ -337,6 +340,7 @@ components:
       additionalProperties: true
     DisconnectedEvent:
       type: object
+      description: Also sent when the relay join retry limit is reached without a response.
       required: [type]
       properties:
         type:
