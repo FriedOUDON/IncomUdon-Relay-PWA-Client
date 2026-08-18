@@ -186,7 +186,7 @@
     strings: { ...englishFallbackStrings },
   };
   const cueDefaults = {
-    pttOnEnabled: false,
+    pttOnEnabled: true,
     pttOffEnabled: true,
     carrierEnabled: true,
     pttOnUrl: "sfx/ptt_on.wav",

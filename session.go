@@ -67,6 +67,7 @@ type relaySession struct {
 	opusDecoder *opusDecoderEngine
 	opusEncoder *opusEncoderEngine
 	fec         *fecEncoder
+	fecDecoders map[uint32]*fecDecoder
 
 	cb sessionCallbacks
 
@@ -130,6 +131,7 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		joinRetriesLeft:   5,
 		activeTalkers:     make(map[uint32]bool),
 		peerCodec:         make(map[uint32]peerCodecConfig),
+		fecDecoders:       make(map[uint32]*fecDecoder),
 		downlinkPCM:       make(map[uint32][]byte),
 		downlinkQueues:    make(map[uint32][][]byte),
 		unsupportedFrames: make(map[string]struct{}),
@@ -299,7 +301,7 @@ func (s *relaySession) Start() {
 		s.emitEvent(serverEvent{
 			Type:    "status",
 			Level:   "info",
-			Message: "TX FEC enabled (RS 2-loss parity)",
+			Message: "FEC enabled (TX/RX RS 2-loss parity)",
 		})
 	} else {
 		s.emitEvent(serverEvent{
@@ -361,6 +363,7 @@ func (s *relaySession) Close() {
 	s.downlinkPCM = nil
 	s.downlinkQueues = nil
 	s.activeTalkers = nil
+	s.fecDecoders = nil
 	s.mu.Unlock()
 	if codec != nil {
 		codec.Close()
@@ -821,6 +824,8 @@ func (s *relaySession) handleDatagram(data []byte, from *net.UDPAddr) {
 		s.handleServerConfig(pkt)
 	case pktAudio:
 		s.handleAudioPacket(pkt)
+	case pktFec:
+		s.handleFecPacket(pkt)
 	case pktKeyExchange:
 		s.handleHandshakePacket(pkt)
 	}
@@ -860,14 +865,20 @@ func (s *relaySession) handleTalkPacket(pkt parsedPacket) {
 	talker := readTalkerPayload(pkt.Payload, pkt.Header.SenderID)
 	var flushPCM [][]byte
 	var flushOpus [][]byte
+	var releaseDecoder *fecDecoder
 	s.mu.Lock()
 	switch pkt.Header.Type {
 	case pktTalkGrant:
 		if talker != 0 {
+			if !s.activeTalkers[talker] {
+				delete(s.fecDecoders, talker)
+			}
 			s.activeTalkers[talker] = true
 		}
 	case pktTalkRelease:
 		delete(s.activeTalkers, talker)
+		releaseDecoder = s.fecDecoders[talker]
+		delete(s.fecDecoders, talker)
 	case pktTalkDeny:
 		// no-op
 	}
@@ -895,6 +906,12 @@ func (s *relaySession) handleTalkPacket(pkt parsedPacket) {
 	talkAllowed := s.talkAllowed
 	currentTalker := s.currentTalker
 	s.mu.Unlock()
+
+	if releaseDecoder != nil {
+		for _, frame := range releaseDecoder.Flush() {
+			s.handleCodecFrame(talker, frame.Data)
+		}
+	}
 
 	s.emitEvent(serverEvent{
 		Type:          "talker",
@@ -943,10 +960,14 @@ func (s *relaySession) handleCodecConfig(pkt parsedPacket) {
 	}
 
 	s.mu.Lock()
+	previous, hadPrevious := s.peerCodec[pkt.Header.SenderID]
 	s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{
 		Mode:    mode,
 		PCMOnly: pcmOnly,
 		CodecID: codecID,
+	}
+	if hadPrevious && (previous.Mode != mode || previous.PCMOnly != pcmOnly || previous.CodecID != codecID) {
+		delete(s.fecDecoders, pkt.Header.SenderID)
 	}
 	s.mu.Unlock()
 
@@ -1017,30 +1038,107 @@ func (s *relaySession) handleHandshakePacket(pkt parsedPacket) {
 }
 
 func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
-	plaintext := pkt.Payload
+	plaintext, ok := s.decryptRealtimePayload(pkt)
+	if !ok {
+		return
+	}
 
+	audioSeq, frame, hasSequence := splitAudioPayload(plaintext)
+	if len(frame) == 0 {
+		return
+	}
+	if hasSequence && s.fecReceiveEnabled() {
+		for _, recovered := range s.pushFECData(pkt.Header.SenderID, audioSeq, frame) {
+			s.handleCodecFrame(pkt.Header.SenderID, recovered.Data)
+		}
+		return
+	}
+	s.handleCodecFrame(pkt.Header.SenderID, frame)
+}
+
+func (s *relaySession) handleFecPacket(pkt parsedPacket) {
+	if !s.fecReceiveEnabled() {
+		return
+	}
+	plaintext, ok := s.decryptRealtimePayload(pkt)
+	if !ok || len(plaintext) < 4 {
+		return
+	}
+
+	blockStart := binary.BigEndian.Uint16(plaintext[0:2])
+	blockSize := plaintext[2]
+	parityIndex := plaintext[3]
+	parity := plaintext[4:]
+	for _, recovered := range s.pushFECParity(pkt.Header.SenderID, blockStart, blockSize, parityIndex, parity) {
+		s.handleCodecFrame(pkt.Header.SenderID, recovered.Data)
+	}
+}
+
+func (s *relaySession) decryptRealtimePayload(pkt parsedPacket) ([]byte, bool) {
+	plaintext := pkt.Payload
 	s.mu.Lock()
 	mode := s.cfg.CryptoMode
 	s.mu.Unlock()
-
-	if mode != cryptoNoCrypto {
-		if !pkt.HasSecurity {
-			return
-		}
-		decoded, err := s.crypto.decrypt(pkt.Payload, pkt.Tag, pkt.Sec.Nonce, nil)
-		if err != nil {
-			return
-		}
-		plaintext = decoded
+	if mode == cryptoNoCrypto {
+		return plaintext, true
 	}
+	if !pkt.HasSecurity {
+		return nil, false
+	}
+	decoded, err := s.crypto.decrypt(pkt.Payload, pkt.Tag, pkt.Sec.Nonce, nil)
+	if err != nil {
+		return nil, false
+	}
+	return decoded, true
+}
 
-	frame := extractAudioFrame(plaintext)
+func (s *relaySession) fecReceiveEnabled() bool {
+	s.mu.Lock()
+	enabled := s.cfg.FecEnabled
+	s.mu.Unlock()
+	return enabled
+}
+
+func (s *relaySession) pushFECData(senderID uint32, audioSeq uint16, frame []byte) []fecDecodedFrame {
+	decoder := s.fecDecoderFor(senderID)
+	if decoder == nil {
+		return nil
+	}
+	return decoder.PushData(audioSeq, frame)
+}
+
+func (s *relaySession) pushFECParity(senderID uint32, blockStart uint16, blockSize uint8, parityIndex uint8, data []byte) []fecDecodedFrame {
+	decoder := s.fecDecoderFor(senderID)
+	if decoder == nil {
+		return nil
+	}
+	return decoder.PushParity(blockStart, blockSize, parityIndex, data)
+}
+
+func (s *relaySession) fecDecoderFor(senderID uint32) *fecDecoder {
+	if senderID == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fecDecoders == nil {
+		s.fecDecoders = make(map[uint32]*fecDecoder)
+	}
+	decoder := s.fecDecoders[senderID]
+	if decoder == nil {
+		decoder = newFECDecoder(s.cfg.FecEnabled)
+		s.fecDecoders[senderID] = decoder
+	}
+	return decoder
+}
+
+func (s *relaySession) handleCodecFrame(senderID uint32, frame []byte) {
 	if len(frame) == 0 {
 		return
 	}
 
 	s.mu.Lock()
-	peerCfg, hasPeer := s.peerCodec[pkt.Header.SenderID]
+	peerCfg, hasPeer := s.peerCodec[senderID]
 	codec := s.codec2
 	opusDecoder := s.opusDecoder
 	s.mu.Unlock()
@@ -1049,30 +1147,28 @@ func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
 		codecID := normalizeCodecTransportID(peerCfg.CodecID, peerCfg.PCMOnly)
 		switch codecID {
 		case codecTransportPCM:
-			s.emitDownlinkAudio(pkt.Header.SenderID, frame)
+			s.emitDownlinkAudio(senderID, frame)
 			return
 		case codecTransportOpus:
 			if opusDecoder == nil {
-				s.emitUnsupportedFrame(pkt.Header.SenderID, len(frame),
-					"opus decoder is unavailable")
+				s.emitUnsupportedFrame(senderID, len(frame), "opus decoder is unavailable")
 				return
 			}
 			decoded, err := opusDecoder.Decode(frame)
 			if err != nil {
-				s.emitUnsupportedFrame(pkt.Header.SenderID, len(frame), err.Error())
+				s.emitUnsupportedFrame(senderID, len(frame), err.Error())
 				return
 			}
-			s.emitDownlinkAudio(pkt.Header.SenderID, decoded)
+			s.emitDownlinkAudio(senderID, decoded)
 			return
 		default:
 			if codec == nil {
-				s.emitUnsupportedFrame(pkt.Header.SenderID, len(frame),
-					"codec2 is unavailable")
+				s.emitUnsupportedFrame(senderID, len(frame), "codec2 is unavailable")
 				return
 			}
 			decoded, err := codec.Decode(peerCfg.Mode, frame)
 			if err == nil {
-				s.emitDownlinkAudio(pkt.Header.SenderID, decoded)
+				s.emitDownlinkAudio(senderID, decoded)
 				return
 			}
 		}
@@ -1080,13 +1176,13 @@ func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
 
 	if len(frame) == pcmBytesPerFrame {
 		s.mu.Lock()
-		s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{
+		s.peerCodec[senderID] = peerCodecConfig{
 			Mode:    normalizeCodecModeForTransport(s.cfg.CodecMode, codecTransportPCM, true),
 			PCMOnly: true,
 			CodecID: codecTransportPCM,
 		}
 		s.mu.Unlock()
-		s.emitDownlinkAudio(pkt.Header.SenderID, frame)
+		s.emitDownlinkAudio(senderID, frame)
 		return
 	}
 
@@ -1094,13 +1190,13 @@ func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
 		decoded, detectedMode, err := codec.DecodeBySize(frame)
 		if err == nil {
 			s.mu.Lock()
-			s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{
+			s.peerCodec[senderID] = peerCodecConfig{
 				Mode:    detectedMode,
 				PCMOnly: false,
 				CodecID: codecTransportCodec2,
 			}
 			s.mu.Unlock()
-			s.emitDownlinkAudio(pkt.Header.SenderID, decoded)
+			s.emitDownlinkAudio(senderID, decoded)
 			return
 		}
 	}
@@ -1109,18 +1205,18 @@ func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
 		decoded, err := opusDecoder.Decode(frame)
 		if err == nil {
 			s.mu.Lock()
-			s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{
+			s.peerCodec[senderID] = peerCodecConfig{
 				Mode:    normalizeCodecModeForTransport(s.cfg.CodecMode, codecTransportOpus, false),
 				PCMOnly: false,
 				CodecID: codecTransportOpus,
 			}
 			s.mu.Unlock()
-			s.emitDownlinkAudio(pkt.Header.SenderID, decoded)
+			s.emitDownlinkAudio(senderID, decoded)
 			return
 		}
 	}
 
-	s.emitUnsupportedFrame(pkt.Header.SenderID, len(frame), "no compatible decoder")
+	s.emitUnsupportedFrame(senderID, len(frame), "no compatible decoder")
 }
 
 func (s *relaySession) emitUnsupportedFrame(senderID uint32, size int, reason string) {
@@ -1511,21 +1607,26 @@ func normalizePCMFrame(frame []byte) []byte {
 	return out
 }
 
-func extractAudioFrame(payload []byte) []byte {
+func splitAudioPayload(payload []byte) (uint16, []byte, bool) {
 	if len(payload) == 0 {
-		return nil
+		return 0, nil, false
 	}
 	if len(payload) == pcmBytesPerFrame {
-		return append([]byte(nil), payload...)
+		return 0, append([]byte(nil), payload...), false
 	}
 	if len(payload) < 2 {
-		return nil
+		return 0, nil, false
 	}
 	frame := payload[2:]
 	if len(frame) == 0 {
-		return nil
+		return 0, nil, false
 	}
-	return append([]byte(nil), frame...)
+	return binary.BigEndian.Uint16(payload[:2]), append([]byte(nil), frame...), true
+}
+
+func extractAudioFrame(payload []byte) []byte {
+	_, frame, _ := splitAudioPayload(payload)
+	return frame
 }
 
 var codec2ModeOptions = []int{450, 700, 1600, 2400, 3200}
