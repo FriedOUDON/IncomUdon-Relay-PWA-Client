@@ -3,6 +3,8 @@
   const settingsLockStorageKey = "incomudon.pwa.settings_lock.v1";
   const settingsUnlockSessionKey = "incomudon.pwa.settings_lock.unlocked.v1";
   const settingsLockPBKDF2Iterations = 310000;
+  const audioDebugStorageKey = "incomudon.pwa.audio_debug.v1";
+  const audioDebugQuery = new URLSearchParams(window.location.search || "").get("audio_debug") === "1";
   const maxSlotsRaw = Number.parseInt(document.body.dataset.multiMaxSlots || "", 10);
   const defaultSlotsRaw = Number.parseInt(document.body.dataset.multiDefaultSlots || "", 10);
   const maxSlots = Math.min(10, Math.max(1, Number.isFinite(maxSlotsRaw) ? maxSlotsRaw : 10));
@@ -88,6 +90,27 @@
     settings_export_file: "incomudon-pwa-multi-settings.json",
   };
   let strings = { ...fallbackStrings };
+
+  function multiAudioDebug(event, details = {}) {
+    let enabled = audioDebugQuery;
+    if (!enabled) {
+      try {
+        enabled = window.localStorage.getItem(audioDebugStorageKey) === "1";
+      } catch (_) {
+        // Query-string debugging still works if storage is unavailable.
+      }
+    }
+    if (!enabled) {
+      return;
+    }
+    console.debug("[IncomUdon multi audio]", event, {
+      atMs: Math.round(performance.now()),
+      visibility: document.visibilityState,
+      hidden: !!document.hidden,
+      focused: document.hasFocus(),
+      ...details,
+    });
+  }
 
   const ui = {
     main: document.getElementById("multiMain"),
@@ -764,6 +787,9 @@
     const url = new URL(basePath ? `${basePath}/` : "/", window.location.origin);
     url.searchParams.set("embed", "1");
     url.searchParams.set("slot", String(index + 1));
+    if (audioDebugQuery) {
+      url.searchParams.set("audio_debug", "1");
+    }
     return url.toString();
   }
 
@@ -777,6 +803,8 @@
     const title = document.createElement("h2");
     title.className = "multi-slot-title";
     title.textContent = t("multi_slot", { index: index + 1 });
+    const headControls = document.createElement("div");
+    headControls.className = "multi-slot-head-controls";
     const selectLabel = document.createElement("label");
     selectLabel.className = "checkbox-row multi-slot-select";
     const selected = document.createElement("input");
@@ -785,7 +813,16 @@
     const selectedText = document.createElement("span");
     selectedText.textContent = t("multi_selected");
     selectLabel.append(selected, selectedText);
-    head.append(title, selectLabel);
+    const muteLabel = document.createElement("label");
+    muteLabel.className = "checkbox-row multi-slot-mute";
+    const mute = document.createElement("input");
+    mute.type = "checkbox";
+    mute.checked = !!state.controls.muted[index];
+    const muteText = document.createElement("span");
+    muteText.textContent = t("multi_mute");
+    muteLabel.append(mute, muteText);
+    headControls.append(selectLabel, muteLabel);
+    head.append(title, headControls);
 
     const status = document.createElement("dl");
     status.className = "multi-slot-status";
@@ -812,16 +849,13 @@
     ptt.disabled = true;
     const pttText = document.createElement("span");
     ptt.appendChild(pttText);
-    const mute = document.createElement("button");
-    mute.className = "ghost multi-mute-button";
-    mute.type = "button";
     const shortcut = document.createElement("button");
     shortcut.className = "ghost multi-shortcut-button";
     shortcut.type = "button";
     const settingsButton = document.createElement("button");
     settingsButton.className = "ghost multi-settings-open";
     settingsButton.type = "button";
-    controls.append(ptt, mute, shortcut, settingsButton);
+    controls.append(ptt, shortcut, settingsButton);
 
     card.append(head, status, controls, talkerFooter);
     ui.slots.appendChild(card);
@@ -854,13 +888,15 @@
       card,
       title,
       selected,
+      selectedText,
+      mute,
+      muteText,
       channelValue: channelPair.value,
       senderValue: senderPair.value,
       connectionValue: connectionPair.value,
       talkerValue,
       ptt,
       pttText,
-      mute,
       shortcut,
       settingsButton,
       settingsTab,
@@ -891,8 +927,8 @@
       updateBroadcastView();
       queueReconcile();
     });
-    mute.addEventListener("click", () => {
-      state.controls.muted[index] = !state.controls.muted[index];
+    mute.addEventListener("change", () => {
+      state.controls.muted[index] = !!mute.checked;
       slot.muted = !!state.controls.muted[index];
       persistControls();
       postSlotCommand(slot, { command: "set_receive_muted", muted: slot.muted });
@@ -944,7 +980,7 @@
     const val = document.createElement("dd");
     val.tabIndex = 0;
     val.textContent = value;
-    val.title = value;
+    val.dataset.fullText = String(value || "-");
     row.append(key, val);
     return { row, value: val };
   }
@@ -991,7 +1027,7 @@
     if (!element) return;
     const text = String(value || "-");
     element.textContent = text;
-    element.title = text;
+    element.dataset.fullText = text;
   }
 
   function updateSlotView(slot) {
@@ -1011,6 +1047,11 @@
     slot.card.classList.toggle("connection-error", failed);
     slot.card.classList.toggle("reconnecting", reconnecting);
     slot.selected.checked = !!state.controls.selected[slot.index];
+    slot.mute.checked = slot.muted;
+    if (slot.selectedText) slot.selectedText.textContent = t("multi_selected");
+    if (slot.muteText) slot.muteText.textContent = t("multi_mute");
+    slot.mute.setAttribute("aria-label", t("multi_mute"));
+    slot.mute.title = t("multi_mute");
     if (slot.title) {
       slot.title.textContent = retainChannelName && channelName ? channel : t("multi_slot", { index: slot.index + 1 });
       slot.title.title = slot.title.textContent;
@@ -1038,9 +1079,6 @@
     slot.pttText.textContent = slot.receiveOnly
       ? t("multi_receive_only_mode")
       : t("multi_hold_slot", { shortcut: formatShortcut(shortcut) });
-    slot.mute.textContent = slot.muted ? t("multi_unmute") : t("multi_mute");
-    slot.mute.setAttribute("aria-pressed", slot.muted ? "true" : "false");
-    slot.mute.title = slot.muted ? t("multi_unmute") : t("multi_mute");
     slot.shortcut.textContent = formatShortcut(shortcut);
     slot.shortcut.disabled = !state.shortcutEditEnabled;
     slot.shortcut.classList.toggle("editing", state.shortcutEditEnabled);
@@ -1733,7 +1771,17 @@
         editable: isEditableElement(event.target),
       }, event);
     }, true);
-    window.addEventListener("blur", stopAllPTT);
+    window.addEventListener("blur", () => {
+      multiAudioDebug("window-blur", { activeManualSources: state.activeSources.size });
+      // Hold-to-talk has no reliable keyup once focus moves elsewhere. Release
+      // only manual shortcut/button PTTs; embedded audio-file TX is not in
+      // activeSources and intentionally continues in the background.
+      stopAllPTT();
+    });
+    window.addEventListener("focus", () => multiAudioDebug("window-focus"));
+    document.addEventListener("visibilitychange", () => multiAudioDebug("visibilitychange"));
+    window.addEventListener("pagehide", () => multiAudioDebug("pagehide"));
+    window.addEventListener("pageshow", () => multiAudioDebug("pageshow"));
     window.addEventListener("beforeunload", () => {
       stopAllPTT();
       if (state.mic) state.mic.stop();

@@ -324,7 +324,7 @@
         }
         const swPath = basePath ? `${basePath}/sw.js` : "/sw.js";
         const scope = basePath ? `${basePath}/` : "/";
-        const swRegisterPath = `${swPath}?auth_mode=${encodeURIComponent(authMode)}&build=59`;
+        const swRegisterPath = `${swPath}?auth_mode=${encodeURIComponent(authMode)}&build=61`;
         navigator.serviceWorker.register(swRegisterPath, { scope }).catch(() => {});
       });
     }

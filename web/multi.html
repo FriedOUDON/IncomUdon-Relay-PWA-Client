@@ -148,7 +148,7 @@
         const authMode = String(document.body.dataset.authMode || "none").toLowerCase();
         const swPath = `${basePath}/sw.js`;
         const scope = `${basePath}/`;
-        navigator.serviceWorker.register(`${swPath}?auth_mode=${encodeURIComponent(authMode)}&build=59`, { scope }).catch(() => {});
+        navigator.serviceWorker.register(`${swPath}?auth_mode=${encodeURIComponent(authMode)}&build=61`, { scope }).catch(() => {});
       });
     }
   </script>

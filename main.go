@@ -92,6 +92,10 @@ const (
 	authModeNone  authMode = "none"
 	authModeBasic authMode = "basic"
 	authModeOIDC  authMode = "oidc"
+
+	// Audio is 20 ms per WebSocket binary message. Bound the application-level
+	// backlog to about one second when a browser stops consuming writes.
+	websocketWriteQueueCapacity = 48
 )
 
 const (
@@ -559,7 +563,7 @@ func (a *appServer) handleWS(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
-	writeCh := make(chan wsMessage, 256)
+	writeCh := make(chan wsMessage, websocketWriteQueueCapacity)
 	writerDone := make(chan struct{})
 	go wsWriter(conn, writeCh, writerDone)
 

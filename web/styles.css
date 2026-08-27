@@ -859,7 +859,9 @@ button[disabled] {
 }
 
 .multi-slot-card {
-  overflow: hidden;
+  position: relative;
+  isolation: isolate;
+  overflow: visible;
   border: 1px solid var(--line);
   border-radius: 16px;
   background: color-mix(in srgb, var(--card) 94%, white 6%);
@@ -867,38 +869,68 @@ button[disabled] {
   transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
+/* Keep the connection stripe above the status/footer backgrounds. */
+.multi-slot-card::before {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  content: "";
+}
+
+.multi-slot-card:focus-within {
+  z-index: 5;
+}
+
 .multi-slot-card.selected {
   border-color: color-mix(in srgb, var(--accent) 46%, var(--line) 54%);
 }
 
 .multi-slot-card.connected {
-  box-shadow: 0 14px 26px rgba(26, 40, 46, 0.07), inset 4px 0 0 var(--ok);
+  box-shadow: 0 14px 26px rgba(26, 40, 46, 0.07);
+}
+
+.multi-slot-card.connected::before {
+  box-shadow: inset 4px 0 0 var(--ok);
 }
 
 .multi-slot-card.talking {
   border-color: var(--accent);
-  box-shadow: 0 14px 26px rgba(164, 53, 23, 0.16), inset 4px 0 0 var(--accent);
+  box-shadow: 0 14px 26px rgba(164, 53, 23, 0.16);
+}
+
+.multi-slot-card.talking::before {
+  box-shadow: inset 4px 0 0 var(--accent);
 }
 
 .multi-slot-card.connection-error {
   border-color: color-mix(in srgb, var(--err) 62%, var(--line) 38%);
-  box-shadow: 0 14px 26px rgba(168, 57, 57, 0.12), inset 4px 0 0 var(--err);
+  box-shadow: 0 14px 26px rgba(168, 57, 57, 0.12);
+}
+
+.multi-slot-card.connection-error::before {
+  box-shadow: inset 4px 0 0 var(--err);
 }
 
 .multi-slot-card.connection-error.talking {
   border-color: var(--accent);
 }
 
+.multi-slot-card.connection-error.talking::before {
+  box-shadow: inset 4px 0 0 var(--accent);
+}
+
 .multi-slot-card.muted {
-  background: #e8ecee;
+  background: #cbd4d8;
 }
 
 .multi-slot-card.muted .multi-slot-status {
-  background: #e3e8ea;
+  background: #c3ced3;
 }
 
 .multi-slot-card.muted .multi-slot-talker {
-  background: #e1e6e8;
+  background: #bdc8cd;
 }
 
 .multi-slot-card.receive-only .multi-ptt:disabled {
@@ -939,7 +971,7 @@ button[disabled] {
 
 .multi-slot-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
   padding: 12px 13px 10px;
@@ -947,16 +979,32 @@ button[disabled] {
 }
 
 .multi-slot-title {
+  min-width: 0;
   margin: 0;
   font-family: "Avenir Next", "Helvetica Neue", sans-serif;
   font-size: 17px;
 }
 
-.multi-slot-select {
+.multi-slot-head-controls {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 4px;
+  justify-items: start;
+}
+
+.multi-slot-select,
+.multi-slot-mute {
   min-height: 0;
-  color: var(--muted);
   font-size: 11px;
   white-space: nowrap;
+}
+
+.multi-slot-select {
+  color: var(--muted);
+}
+
+.multi-slot-mute {
+  color: var(--ink);
 }
 
 .multi-slot-status {
@@ -989,6 +1037,7 @@ button[disabled] {
 }
 
 .multi-slot-status dd {
+  position: relative;
   overflow: hidden;
   margin: 0;
   color: var(--ink);
@@ -1001,14 +1050,27 @@ button[disabled] {
 
 .multi-slot-status dd:hover,
 .multi-slot-status dd:focus-visible {
-  position: relative;
-  z-index: 2;
+  z-index: 3;
   overflow: visible;
-  border-radius: 4px;
-  background: var(--card);
-  box-shadow: 0 2px 8px rgba(26, 40, 46, 0.16);
   outline: none;
-  padding: 2px 4px;
+}
+
+.multi-slot-status dd:hover::after,
+.multi-slot-status dd:focus-visible::after {
+  position: absolute;
+  z-index: 8;
+  top: calc(100% + 6px);
+  left: -4px;
+  width: max-content;
+  max-width: min(420px, calc(100vw - 48px));
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  box-shadow: 0 4px 12px rgba(26, 40, 46, 0.18);
+  color: var(--ink);
+  content: attr(data-full-text);
+  font: inherit;
   white-space: normal;
   word-break: break-word;
 }
@@ -1019,6 +1081,7 @@ button[disabled] {
   min-width: 0;
   padding: 8px 13px 10px;
   border-top: 1px solid color-mix(in srgb, var(--line) 78%, white 22%);
+  border-radius: 0 0 15px 15px;
   background: color-mix(in srgb, var(--card) 96%, var(--accent) 4%);
 }
 
@@ -1044,19 +1107,9 @@ button[disabled] {
 
 .multi-slot-controls {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 8px;
   padding: 10px 13px;
-}
-
-.multi-mute-button {
-  min-width: 70px;
-}
-
-.multi-mute-button[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--muted) 62%, var(--line) 38%);
-  background: #d8dfe2;
-  color: var(--ink);
 }
 
 .multi-settings-open {

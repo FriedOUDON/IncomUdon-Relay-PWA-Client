@@ -227,6 +227,51 @@ This is a casual UI lock, not an access-control boundary. Anyone with browser-pr
 developer tools can inspect or remove browser storage. Use HTTP Basic or OIDC authentication
 when relay or configuration access must be protected from untrusted users.
 
+## Browser Background Audio
+
+The browser client avoids `window.setInterval(20)` for microphone transmission.
+Microphone frames are emitted by `mic-capture-worklet.js` and sent immediately
+when the WebSocket is writable. If `WebSocket.bufferedAmount` reaches 1 KiB,
+new uplink frames are dropped rather than replayed late. This keeps PTT audio
+real-time when the network is congested.
+
+Audio-file TX is paced by the AudioContext render clock in
+`audio-tx-pacer-worklet.js`; it sends one 20 ms source frame at a time and skips
+frames that became stale while the page main thread was delayed. A browser
+without AudioWorklet uses a `window.setInterval` compatibility fallback.
+
+PCM receive audio uses the continuous `pcm-playback-worklet.js` stream on
+Chrome/Edge desktop and Android. It owns a bounded jitter buffer and a
+windowed-sinc resampler from the relay's 8 kHz PCM stream to the AudioContext
+sample rate. Old buffered receive samples are discarded rather than played
+seconds late.
+
+For diagnostics, open the client with `?audio_debug=1`, or run this in the
+browser console:
+
+```js
+window.__incomudonAudioDebug.setEnabled(true)
+window.__incomudonAudioDebug.snapshot()
+```
+
+Debug output is limited to lifecycle events, frame-gap summaries, backpressure
+frames, and playback underruns. It reports `visibilityState`, focus state,
+WebSocket state/buffered amount, AudioContext state/current time, and stream
+buffer data.
+
+Browser and OS scheduling is not fully under application control. Desktop
+Chrome/Edge normally keep an active AudioContext and WebSocket functioning when
+focus moves to another window. A hidden/minimized page or OS power management
+can still suspend the AudioContext or defer WebSocket/main-thread delivery for
+an extended period; no PWA can guarantee uninterrupted real-time audio in that
+case. The client resumes the output context only when it becomes visible again
+and does not reconnect merely because focus changed.
+
+On the multi-channel page, a `window.blur` event deliberately releases only
+manual hold-to-talk shortcuts/buttons. This prevents a missing `keyup` from
+leaving a transmitter stuck on. Audio-file TX is not part of that manual PTT
+set and continues while the page is unfocused.
+
 ## Multi-Channel Console
 
 The multi-channel page opens independent relay sessions in one browser window and is

@@ -26,6 +26,12 @@
   const codec2BitrateOptions = [450, 700, 1600, 2400, 3200];
   const opusBitrateOptions = [6000, 8000, 12000, 16000, 20000, 64000, 96000, 128000];
   const settingsReconnectDebounceMs = 350;
+  // The media path must prefer current audio over queued, stale frames.
+  const txWebSocketHighWaterBytes = 1024;
+  const txOpusMaxQueuedFrames = 4;
+  const audioFrameDurationSec = 160 / 8000;
+  const audioTxPacerModulePromises = new WeakMap();
+  const audioDebugStorageKey = "incomudon.pwa.audio_debug.v1";
   const embeddedQuery = new URLSearchParams(window.location.search || "");
   const embeddedSlotIndexRaw = Number.parseInt(embeddedQuery.get("slot") || "", 10);
   const isEmbeddedSlot = embeddedQuery.get("embed") === "1" &&
@@ -314,12 +320,18 @@
     micVolumePercent: micVolumeDefaultPercent,
     receiveOnly: false,
     receiveMuted: false,
-    txQueue: [],
-    txTimer: null,
-    txTickMs: 20,
-    txMaxQueue: 48,
+    audioDebugEnabled: readAudioDebugEnabled(),
+    audioStats: {
+      activity: Object.create(null),
+      txSent: 0,
+      txDropped: 0,
+      rxReceived: 0,
+      audioTxTicks: 0,
+      audioTxSkipped: 0,
+    },
     txRampFrames: 1,
     txFrameIndex: 0,
+    txSessionId: 0,
     cuePlayer: null,
     cueFiles: {
       pttOn: null,
@@ -344,6 +356,9 @@
     serverTalkTimeoutSec: 0,
     serverMultiTalkEnabled: false,
     serverMaxActiveTalkers: 1,
+    // A file-TX-to-mic handoff sends PTT_OFF and PTT_ON back-to-back. Ignore
+    // the expected release for the old grant so it is not mistaken for a timeout.
+    expectedLocalTalkReleaseUntilMs: 0,
     txTimeoutRemainingSec: 0,
     txTimeoutDeadlineMs: 0,
     txTimeoutTicker: null,
@@ -369,6 +384,103 @@
     startupLegacyPlainPassword: "",
     lastAuthSessionNoticeMs: 0,
   };
+  function readAudioDebugEnabled() {
+    if (embeddedQuery.get("audio_debug") === "1") {
+      return true;
+    }
+    try {
+      return window.localStorage.getItem(audioDebugStorageKey) === "1";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function audioDebug(event, details = {}) {
+    if (!state.audioDebugEnabled) {
+      return;
+    }
+    const ws = state.ws;
+    console.debug("[IncomUdon audio]", event, {
+      atMs: Math.round(performance.now()),
+      visibility: document.visibilityState,
+      hidden: !!document.hidden,
+      focused: document.hasFocus(),
+      wsReadyState: ws ? ws.readyState : WebSocket.CLOSED,
+      bufferedAmount: ws ? Number(ws.bufferedAmount || 0) : 0,
+      ...details,
+    });
+  }
+
+  function recordAudioActivity(kind, details = {}) {
+    const now = performance.now();
+    const activity = state.audioStats.activity[kind] || {
+      count: 0,
+      lastAtMs: 0,
+      lastLogMs: 0,
+    };
+    const gapMs = activity.lastAtMs > 0 ? now - activity.lastAtMs : 0;
+    activity.count += 1;
+    activity.lastAtMs = now;
+    state.audioStats.activity[kind] = activity;
+    if (state.audioDebugEnabled && (gapMs >= 80 || now - activity.lastLogMs >= 1000)) {
+      activity.lastLogMs = now;
+      audioDebug("frame", {
+        kind,
+        count: activity.count,
+        gapMs: Math.round(gapMs),
+        ...details,
+      });
+    }
+  }
+
+  function noteDroppedTxFrame(reason, details = {}) {
+    state.audioStats.txDropped += 1;
+    audioDebug("tx-drop", {
+      reason,
+      dropped: state.audioStats.txDropped,
+      ...details,
+    });
+  }
+
+  function audioDebugSnapshot() {
+    const ws = state.ws;
+    const player = state.player;
+    const mic = state.mic;
+    return {
+      nowMs: performance.now(),
+      visibilityState: document.visibilityState,
+      hidden: !!document.hidden,
+      hasFocus: document.hasFocus(),
+      websocket: {
+        readyState: ws ? ws.readyState : WebSocket.CLOSED,
+        bufferedAmount: ws ? Number(ws.bufferedAmount || 0) : 0,
+      },
+      playback: player && typeof player.debugState === "function" ? player.debugState() : null,
+      microphone: mic && mic.ctx ? {
+        state: mic.ctx.state,
+        currentTime: mic.ctx.currentTime,
+      } : null,
+      stats: state.audioStats,
+    };
+  }
+
+  function installAudioDebugHook() {
+    window.__incomudonAudioDebug = {
+      snapshot: audioDebugSnapshot,
+      setEnabled(enabled) {
+        state.audioDebugEnabled = !!enabled;
+        try {
+          window.localStorage.setItem(audioDebugStorageKey, state.audioDebugEnabled ? "1" : "0");
+        } catch (_) {
+          // Debug mode still works for this page even if storage is unavailable.
+        }
+        audioDebug("debug-enabled", { enabled: state.audioDebugEnabled });
+      },
+    };
+  }
+
+  installAudioDebugHook();
+
   const senderIDMin = 1;
   const senderIDMax = 0x7fffffff;
   const portableSettingsKeys = [
@@ -402,8 +514,8 @@
     enqueueUplinkPacket(0x01, frame);
   }
 
-  function sendOpusFrame(frame) {
-    enqueueUplinkPacket(0x02, frame);
+  function sendOpusFrame(frame, txSessionId) {
+    enqueueUplinkPacket(0x02, frame, txSessionId);
   }
 
   function normalizePasswordHashToken(value) {
@@ -561,61 +673,75 @@
     return normalized;
   }
 
-  function transmitUplinkFrame(frame) {
-    if (!frame || frame.length < 2) {
+  function transmitUplinkFrame(frame, source = "unknown") {
+    if (!frame || frame.length < 2 || !state.connected || !state.pttPressed) {
       return;
     }
     const shaped = shapeTxFrame(frame);
     if (state.uplinkCodec === "opus" && state.opusEncoder) {
-      state.opusEncoder.encodeFrame(shaped);
+      if (state.opusEncoder.isBackpressured()) {
+        noteDroppedTxFrame("opus-encoder-backpressure", {
+          source,
+          queueSize: state.opusEncoder.queueSize(),
+        });
+        return;
+      }
+      if (!state.opusEncoder.encodeFrame(shaped, state.txSessionId)) {
+        noteDroppedTxFrame("opus-encode-failed", { source });
+      }
       return;
     }
     sendPcmFrame(shaped);
   }
 
-  function enqueueUplinkPacket(type, frame) {
-    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+  function enqueueUplinkPacket(type, frame, txSessionId = null) {
+    if (type === 0x02 && txSessionId !== null && txSessionId !== state.txSessionId) {
+      noteDroppedTxFrame("stale-opus-output", { txSessionId, activeSessionId: state.txSessionId });
+      return;
+    }
+    const ws = state.ws;
+    if (!state.connected || !state.pttPressed || !ws || ws.readyState !== WebSocket.OPEN) {
       return;
     }
     if (!frame || frame.length === 0) {
       return;
     }
+    const bufferedAmount = Number(ws.bufferedAmount || 0);
+    if (bufferedAmount >= txWebSocketHighWaterBytes) {
+      // Do not keep speech that cannot be delivered in real time. The next
+      // AudioWorklet frame represents newer audio and is more useful.
+      noteDroppedTxFrame("websocket-backpressure", { bufferedAmount });
+      return;
+    }
+
     const packet = new Uint8Array(1 + frame.length);
     packet[0] = type;
     packet.set(frame, 1);
-    if (state.txQueue.length >= state.txMaxQueue) {
-      const overflow = state.txQueue.length - state.txMaxQueue + 1;
-      state.txQueue.splice(0, overflow);
-    }
-    state.txQueue.push(packet);
-    ensureTxLoop();
-  }
-
-  function ensureTxLoop() {
-    if (state.txTimer) {
-      return;
-    }
-    state.txTimer = window.setInterval(flushUplinkQueue, state.txTickMs);
-  }
-
-  function stopTxLoop() {
-    if (state.txTimer) {
-      window.clearInterval(state.txTimer);
-      state.txTimer = null;
+    try {
+      ws.send(packet);
+      state.audioStats.txSent += 1;
+      recordAudioActivity("tx-send", {
+        type,
+        bytes: packet.byteLength,
+        bufferedAmount: Number(ws.bufferedAmount || 0),
+      });
+    } catch (err) {
+      noteDroppedTxFrame("websocket-send-failed", {
+        error: err && err.message ? err.message : String(err),
+      });
     }
   }
 
-  function flushUplinkQueue() {
-    if (!state.ws || state.ws.readyState !== WebSocket.OPEN || !state.connected || !state.pttPressed) {
-      state.txQueue = [];
-      stopTxLoop();
-      return;
+  function beginTxSession() {
+    state.txSessionId += 1;
+    if (state.txSessionId > Number.MAX_SAFE_INTEGER - 1) {
+      state.txSessionId = 1;
     }
-    const packet = state.txQueue.shift();
-    if (!packet) {
-      return;
-    }
-    state.ws.send(packet);
+    return state.txSessionId;
+  }
+
+  function invalidateTxSession() {
+    return beginTxSession();
   }
 
   function shapeTxFrame(frame) {
@@ -743,13 +869,32 @@
     setPTT(false);
   });
 
+  function logAudioLifecycle(event) {
+    audioDebug("lifecycle", {
+      event,
+      audioContextState: state.player && state.player.ctx ? state.player.ctx.state : "none",
+      audioContextTime: state.player && state.player.ctx ? state.player.ctx.currentTime : 0,
+    });
+  }
+
   document.addEventListener("visibilitychange", () => {
+    logAudioLifecycle("visibilitychange");
+    // This is only a best-effort recovery for a browser-suspended context. Do
+    // not stop an active transmission or blindly resume while hidden.
     if (!document.hidden && state.player) {
       state.player.resumeIfNeeded();
     }
   });
-
+  window.addEventListener("blur", () => logAudioLifecycle("window-blur"));
+  window.addEventListener("focus", () => {
+    logAudioLifecycle("window-focus");
+    if (state.player) {
+      state.player.resumeIfNeeded();
+    }
+  });
+  window.addEventListener("pagehide", () => logAudioLifecycle("pagehide"));
   window.addEventListener("pageshow", () => {
+    logAudioLifecycle("pageshow");
     if (state.player) {
       state.player.resumeIfNeeded();
     }
@@ -931,7 +1076,8 @@
       if (!frame || !state.connected || !state.pttPressed || !state.ws || state.ws.readyState !== WebSocket.OPEN || state.audioTxTask) {
         return;
       }
-      transmitUplinkFrame(frame);
+      recordAudioActivity("shared-mic-frame", { bytes: frame.byteLength });
+      transmitUplinkFrame(frame, "shared-mic");
     }
   }
 
@@ -1154,6 +1300,7 @@
     setConnectionView({ kind: reconnecting ? "reconnecting" : "connecting", level: "warn" });
 
     ws.onopen = async () => {
+      audioDebug("websocket-open");
       clearReconnectTimer();
       state.reconnectAttempt = 0;
       state.disconnectRequested = false;
@@ -1308,6 +1455,10 @@
     };
 
     ws.onclose = (event) => {
+      audioDebug("websocket-close", {
+        code: event ? Number(event.code || 0) : 0,
+        reason: event ? String(event.reason || "") : "",
+      });
       const unexpected = !state.disconnectRequested;
       if (wsTokenRequired && !currentWSToken()) {
         appendLog(t("log_ws_auth_required"), "error");
@@ -1329,6 +1480,7 @@
     };
 
     ws.onerror = () => {
+      audioDebug("websocket-error");
       appendLog(t("log_ws_error"), "error");
     };
   }
@@ -1370,11 +1522,15 @@
 
     const msgType = bytes[0];
     if (msgType === 0x11 && state.player) {
+      state.audioStats.rxReceived += 1;
+      recordAudioActivity("rx-pcm", { bytes: bytes.byteLength - 1 });
       state.player.playPCM(bytes.subarray(1), 8000);
       return;
     }
 
     if (msgType === 0x12) {
+      state.audioStats.rxReceived += 1;
+      recordAudioActivity("rx-opus", { bytes: bytes.byteLength - 1 });
       if (!state.opusDecoder) {
         if (!state.downlinkOpusWarned) {
           state.downlinkOpusWarned = true;
@@ -1408,6 +1564,7 @@
       state.serverMultiTalkEnabled = false;
       state.serverMaxActiveTalkers = 1;
       stopTxTimeoutCountdown();
+      clearExpectedLocalTalkRelease();
       state.connectionView.host = event.relayHost || "";
       state.connectionView.port = Number(event.relayPort || 0);
       ui.connectBtn.disabled = true;
@@ -1496,10 +1653,14 @@
             .map((value) => Number(value || 0))
             .filter((value) => Number.isFinite(value) && value > 0)
         : [];
-      const localTalkTimedOut =
+      const localTalkReleased =
         prevTalkers.includes(state.selfSenderId) &&
-        !nextTalkers.includes(state.selfSenderId) &&
-        state.pttPressed;
+        !nextTalkers.includes(state.selfSenderId);
+      const expectedLocalTalkRelease = localTalkReleased && consumeExpectedLocalTalkRelease();
+      if (nextTalkers.includes(state.selfSenderId)) {
+        clearExpectedLocalTalkRelease();
+      }
+      const localTalkTimedOut = localTalkReleased && !expectedLocalTalkRelease && state.pttPressed;
       const remoteTalkEnded =
         prevTalkers.some((talkerId) => talkerId !== state.selfSenderId) &&
         !nextTalkers.some((talkerId) => talkerId !== state.selfSenderId);
@@ -1608,10 +1769,9 @@
     state.serverMultiTalkEnabled = false;
     state.serverMaxActiveTalkers = 1;
     stopTxTimeoutCountdown();
+    clearExpectedLocalTalkRelease();
     cancelAudioTxTask(false);
     setPTT(false, false);
-    state.txQueue = [];
-    stopTxLoop();
     state.txFrameIndex = 0;
     state.selfSenderId = 0;
     if (state.player) {
@@ -2868,6 +3028,35 @@
       return;
     }
 
+    // Resume synchronously from the click handler. Later decode/auth awaits are
+    // no longer considered a user gesture by browsers with autoplay policies.
+    let outputResumePromise = Promise.resolve();
+    let txPacerLoadPromise = Promise.resolve(false);
+    try {
+      if (state.player) {
+        outputResumePromise = state.player.resume();
+        // Fetch/compile the clock worklet while authentication and file decoding
+        // are in progress. Starting it only after decoding could otherwise make
+        // the first few 20 ms file frames stale on a cold cache.
+        txPacerLoadPromise = outputResumePromise
+          .then(() => {
+            const ctx = state.player && state.player.ctx;
+            if (!ctx || !ctx.audioWorklet) {
+              return false;
+            }
+            return loadAudioTxPacerModule(ctx).then(() => true);
+          })
+          .catch((err) => {
+            audioDebug("audio-file-clock-preload-unavailable", {
+              error: err && err.message ? err.message : String(err),
+            });
+            return false;
+          });
+      }
+    } catch (_) {
+      // The regular task startup reports an output failure if it remains unusable.
+    }
+
     const loadSequence = state.audioTxLoadSequence + 1;
     state.audioTxLoadSequence = loadSequence;
     state.audioTxLoadingSlot = index;
@@ -2879,8 +3068,13 @@
       if (state.audioTxLoadSequence !== loadSequence || state.audioTxLoadingSlot !== index || state.receiveOnly) {
         return;
       }
+      await outputResumePromise.catch(() => {});
 
       const frames = await decodeAudioFileToFrames(slot.file);
+      // Do not let a cold worklet module turn the beginning of a file into a
+      // timer-sized gap. A failed preload is harmless: startAudioTxClock()
+      // selects its compatibility fallback below.
+      await txPacerLoadPromise;
       if (state.audioTxLoadSequence !== loadSequence || state.audioTxLoadingSlot !== index || state.receiveOnly) {
         return;
       }
@@ -2889,7 +3083,7 @@
       }
       state.audioTxLoadingSlot = -1;
       refreshAudioTxSlotsUI();
-      startAudioTxTask(index, String(slot.name || slot.file.name || "audio"), frames);
+      await startAudioTxTask(index, String(slot.name || slot.file.name || "audio"), frames);
     } finally {
       if (state.audioTxLoadSequence === loadSequence && state.audioTxLoadingSlot === index) {
         state.audioTxLoadingSlot = -1;
@@ -2937,21 +3131,171 @@
     }
   }
 
-  function startAudioTxTask(slotIndex, name, frames) {
+  function loadAudioTxPacerModule(ctx) {
+    let loadPromise = audioTxPacerModulePromises.get(ctx);
+    if (!loadPromise) {
+      loadPromise = ctx.audioWorklet.addModule(resolveWorkletURL("audio-tx-pacer-worklet.js"));
+      audioTxPacerModulePromises.set(ctx, loadPromise);
+      loadPromise.catch(() => {
+        if (audioTxPacerModulePromises.get(ctx) === loadPromise) {
+          audioTxPacerModulePromises.delete(ctx);
+        }
+      });
+    }
+    return loadPromise;
+  }
+
+  class AudioTxPacer {
+    constructor(player, onTick) {
+      this.player = player;
+      this.onTick = onTick;
+      this.node = null;
+      this.stopped = false;
+    }
+
+    async start() {
+      const ctx = this.player && this.player.ctx;
+      if (!ctx || !ctx.audioWorklet || typeof AudioWorkletNode === "undefined") {
+        return false;
+      }
+      // A file may be played repeatedly with one AudioContext. Cache the module
+      // per context so registerProcessor() is never evaluated twice.
+      await loadAudioTxPacerModule(ctx);
+      if (this.stopped) {
+        return false;
+      }
+      const node = new AudioWorkletNode(ctx, "incomudon-audio-tx-pacer", {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+      });
+      node.port.onmessage = (event) => {
+        const message = event && event.data;
+        if (this.stopped || !message || message.type !== "tick") {
+          return;
+        }
+        try {
+          // The message can be delivered late when the page main thread is
+          // deprioritized. currentTime at receipt lets the task skip frames
+          // that are already stale instead of sending an old burst.
+          this.onTick({
+            ...message,
+            receivedAudioTime: ctx.currentTime,
+          });
+        } finally {
+          // Acknowledge one tick at a time. If the page main thread is held,
+          // the worklet deliberately does not build a backlog of old frames.
+          if (!this.stopped) {
+            node.port.postMessage({ type: "ack" });
+          }
+        }
+      };
+      node.connect(ctx.destination);
+      this.node = node;
+      node.port.postMessage({
+        type: "start",
+        frameSamples: 160,
+        sourceSampleRate: 8000,
+      });
+      return true;
+    }
+
+    stop() {
+      this.stopped = true;
+      if (!this.node) {
+        return;
+      }
+      try {
+        this.node.port.postMessage({ type: "stop" });
+        this.node.port.onmessage = null;
+        this.node.disconnect();
+      } catch (_) {
+        // The context may already have been closed during disconnect.
+      }
+      this.node = null;
+    }
+  }
+
+  function audioTxClockTime(task, tick) {
+    if (tick && tick.fallback) {
+      return task.startAudioTime + ((performance.now() - task.startedAtMs) / 1000);
+    }
+    const workletTime = Number(tick && tick.audioTime);
+    const receivedAudioTime = Number(tick && tick.receivedAudioTime);
+    if (Number.isFinite(workletTime) && workletTime >= 0) {
+      return Number.isFinite(receivedAudioTime) && receivedAudioTime >= workletTime
+        ? receivedAudioTime
+        : workletTime;
+    }
+    if (Number.isFinite(receivedAudioTime) && receivedAudioTime >= 0) {
+      return receivedAudioTime;
+    }
+    if (state.player && state.player.ctx) {
+      return state.player.ctx.currentTime;
+    }
+    return (performance.now() - task.startedAtMs) / 1000;
+  }
+
+  async function startAudioTxClock(task) {
+    const pacer = new AudioTxPacer(state.player, (tick) => tickAudioTxTask(tick));
+    task.pacer = pacer;
+    try {
+      if (await pacer.start()) {
+        audioDebug("audio-file-clock", { clock: "AudioWorklet" });
+        return;
+      }
+    } catch (err) {
+      audioDebug("audio-file-clock-unavailable", {
+        error: err && err.message ? err.message : String(err),
+      });
+    }
+    pacer.stop();
+    if (state.audioTxTask !== task || task.finishing) {
+      return;
+    }
+    // Compatibility fallback for browsers without AudioWorklet. Chrome uses
+    // the render-thread clock above, not this throttled window timer.
+    task.timer = window.setInterval(() => tickAudioTxTask({ fallback: true }), 20);
+    audioDebug("audio-file-clock", { clock: "window-timer-fallback" });
+  }
+
+  function stopAudioTxClock(task) {
+    if (!task) {
+      return;
+    }
+    if (task.timer) {
+      window.clearInterval(task.timer);
+      task.timer = null;
+    }
+    if (task.pacer) {
+      task.pacer.stop();
+      task.pacer = null;
+    }
+  }
+
+  async function startAudioTxTask(slotIndex, name, frames) {
     if (state.receiveOnly) {
       return;
     }
     cancelAudioTxTask(false);
     state.txFrameIndex = 0;
-    state.audioTxTask = {
+    clearExpectedLocalTalkRelease();
+    const ctx = state.player && state.player.ctx;
+    const startAudioTime = ctx ? ctx.currentTime : 0;
+    const task = {
       slotIndex,
       name,
       frames,
       next: 0,
       loop: !!(ui.audioTxLoopEnabled && ui.audioTxLoopEnabled.checked),
       timer: null,
+      pacer: null,
       finishing: false,
+      startAudioTime,
+      startedAtMs: performance.now(),
     };
+    state.audioTxTask = task;
+    beginTxSession();
     state.pttPressed = true;
     ui.pttButton.classList.add("active");
     sendCommand({ type: "ptt", pressed: true });
@@ -2960,14 +3304,16 @@
     refreshAudioTxSlotsUI();
     appendLog(t("log_audio_tx_start", { index: slotIndex + 1, name }), "info");
 
-    tickAudioTxTask();
-    const task = state.audioTxTask;
-    if (task) {
-      task.timer = window.setInterval(tickAudioTxTask, 20);
+    // Send the first frame immediately; every later frame is scheduled from
+    // AudioContext.currentTime by the render-thread pacer.
+    tickAudioTxTask({ audioTime: startAudioTime, initial: true });
+    if (state.audioTxTask !== task || task.finishing) {
+      return;
     }
+    await startAudioTxClock(task);
   }
 
-  function tickAudioTxTask() {
+  function tickAudioTxTask(tick) {
     const task = state.audioTxTask;
     if (!task || task.finishing) {
       return;
@@ -2977,19 +3323,31 @@
       cancelAudioTxTask(false);
       return;
     }
-    if (task.next >= task.frames.length) {
-      if (task.loop) {
-        task.next = 0;
-      } else {
-        task.finishing = true;
-        finishAudioTxTask("log_audio_tx_completed", { index: task.slotIndex + 1, name: task.name }, "info");
-        return;
+
+    const nowAudioTime = audioTxClockTime(task, tick);
+    const elapsedSec = Math.max(0, nowAudioTime - task.startAudioTime);
+    const dueFrame = Math.max(0, Math.floor((elapsedSec + 0.0005) / audioFrameDurationSec));
+    if (!tick || !tick.initial) {
+      if (dueFrame > task.next) {
+        const skipped = dueFrame - task.next;
+        task.next = dueFrame;
+        state.audioStats.audioTxSkipped += skipped;
+        audioDebug("audio-file-skip", { skipped, dueFrame, name: task.name });
       }
+      state.audioStats.audioTxTicks += 1;
+      recordAudioActivity("audio-file-tick", { dueFrame });
     }
 
-    const frame = task.frames[task.next];
+    if (!task.loop && task.next >= task.frames.length) {
+      task.finishing = true;
+      void finishAudioTxTask("log_audio_tx_completed", { index: task.slotIndex + 1, name: task.name }, "info");
+      return;
+    }
+
+    const frameIndex = task.loop ? (task.next % task.frames.length) : task.next;
+    const frame = task.frames[frameIndex];
     task.next += 1;
-    transmitUplinkFrame(frame);
+    transmitUplinkFrame(frame, "audio-file");
   }
 
   async function finishAudioTxTask(logKey, params, level) {
@@ -2997,22 +3355,22 @@
     if (!task) {
       return;
     }
-    if (task.timer) {
-      window.clearInterval(task.timer);
-      task.timer = null;
-    }
+    stopAudioTxClock(task);
     await flushAudioTxPipeline();
+    if (state.audioTxTask !== task) {
+      return;
+    }
 
     if (state.pttPressed) {
       sendCommand({ type: "ptt", pressed: false });
       playCue("pttOff");
     }
     state.pttPressed = false;
+    invalidateTxSession();
     ui.pttButton.classList.remove("active");
-    state.txQueue = [];
-    stopTxLoop();
     state.txFrameIndex = 0;
     state.audioTxTask = null;
+    stopTxTimeoutCountdown();
     refreshPTTAvailability();
     refreshAudioTxSlotsUI();
 
@@ -3024,15 +3382,12 @@
   async function flushAudioTxPipeline() {
     if (state.uplinkCodec === "opus" && state.opusEncoder) {
       try {
+        // flush() resolves after the output callback has emitted every prior
+        // packet. WebSocket preserves message order, so no timer drain is needed.
         await state.opusEncoder.flush();
       } catch (_) {
         // Ignore encoder flush errors.
       }
-    }
-
-    const deadline = Date.now() + 1600;
-    while (state.txQueue.length > 0 && Date.now() < deadline) {
-      await new Promise((resolve) => window.setTimeout(resolve, 20));
     }
   }
 
@@ -3045,19 +3400,16 @@
       }
       return;
     }
-    if (task.timer) {
-      window.clearInterval(task.timer);
-      task.timer = null;
-    }
+    stopAudioTxClock(task);
     if (state.pttPressed) {
       sendCommand({ type: "ptt", pressed: false });
       playCue("pttOff");
     }
     state.audioTxTask = null;
     state.pttPressed = false;
+    invalidateTxSession();
     ui.pttButton.classList.remove("active");
-    state.txQueue = [];
-    stopTxLoop();
+    stopTxTimeoutCountdown();
     state.txFrameIndex = 0;
     refreshPTTAvailability();
     refreshAudioTxSlotsUI();
@@ -3201,6 +3553,22 @@
     state.txTimeoutTicker = null;
   }
 
+  function expectLocalTalkRelease() {
+    if (state.selfSenderId > 0 && state.activeTalkers.includes(state.selfSenderId)) {
+      state.expectedLocalTalkReleaseUntilMs = Date.now() + 5000;
+    }
+  }
+
+  function clearExpectedLocalTalkRelease() {
+    state.expectedLocalTalkReleaseUntilMs = 0;
+  }
+
+  function consumeExpectedLocalTalkRelease() {
+    const expected = state.expectedLocalTalkReleaseUntilMs > Date.now();
+    state.expectedLocalTalkReleaseUntilMs = 0;
+    return expected;
+  }
+
   function isLocalTxActiveForTimeout() {
     if (!state.connected) {
       return false;
@@ -3282,18 +3650,15 @@
   function forceStopTransmissionForTimeout() {
     cancelPendingAudioTxLoad();
     const task = state.audioTxTask;
-    if (task && task.timer) {
-      window.clearInterval(task.timer);
-      task.timer = null;
-    }
+    stopAudioTxClock(task);
     state.audioTxTask = null;
+    clearExpectedLocalTalkRelease();
     if (state.pttPressed) {
       sendCommand({ type: "ptt", pressed: false });
     }
     state.pttPressed = false;
+    invalidateTxSession();
     ui.pttButton.classList.remove("active");
-    state.txQueue = [];
-    stopTxLoop();
     state.txFrameIndex = 0;
     refreshPTTAvailability();
     refreshAudioTxSlotsUI();
@@ -4019,6 +4384,7 @@
       }
     }
     refreshPTTAvailability();
+    refreshAudioTxSlotsUI();
     updatePttButtonLabel();
     if (changed) {
       notifyEmbeddedSlotState();
@@ -4603,7 +4969,11 @@
     if (pressed && state.receiveOnly) {
       return;
     }
+    if (!pressed) {
+      clearExpectedLocalTalkRelease();
+    }
     if (pressed && (state.audioTxTask || hasPendingAudioTxLoad())) {
+      expectLocalTalkRelease();
       cancelAudioTxTask(true);
     }
     if (pressed && state.micPermissionDenied && !force) {
@@ -4614,6 +4984,11 @@
       return;
     }
     state.pttPressed = pressed;
+    if (pressed) {
+      beginTxSession();
+    } else {
+      invalidateTxSession();
+    }
     ui.pttButton.classList.toggle("active", pressed);
     updatePttButtonLabel();
 
@@ -4657,8 +5032,6 @@
       if (emitCue) {
         playCue("pttOff");
       }
-      state.txQueue = [];
-      stopTxLoop();
       state.txFrameIndex = 0;
       stopTxTimeoutCountdown();
     }
@@ -4705,6 +5078,12 @@
       });
 
       this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      this.ctx.addEventListener("statechange", () => {
+        audioDebug("microphone-context-state", {
+          state: this.ctx ? this.ctx.state : "closed",
+          currentTime: this.ctx ? this.ctx.currentTime : 0,
+        });
+      });
       this.downsampleRatio = this.ctx.sampleRate / 8000;
 
       this.source = this.ctx.createMediaStreamSource(this.stream);
@@ -4787,7 +5166,9 @@
       if (samples.length < 160) {
         return;
       }
-      this.onFrame(int16ToPCMBytes(samples.subarray(0, 160)));
+      const frame = int16ToPCMBytes(samples.subarray(0, 160));
+      recordAudioActivity("mic-generated", { bytes: frame.byteLength });
+      this.onFrame(frame);
     }
 
     async resume() {
@@ -4885,6 +5266,7 @@
           view.setInt16(i * 2, this.pcmBuffer[this.pcmStart + i], true);
         }
         this.pcmStart += 160;
+        recordAudioActivity("mic-generated", { bytes: frameBytes.byteLength });
         this.onFrame(frameBytes);
       }
       if (this.pcmStart > 2048 && this.pcmStart * 2 >= this.pcmBuffer.length) {
@@ -4900,6 +5282,7 @@
       this.encoder = null;
       this.started = false;
       this.timestampUs = 0;
+      this.packetContexts = [];
       this.sampleRate = 8000;
       this.channels = 1;
       const parsedBitrate = Number.parseInt(String(targetBitrate ?? ""), 10);
@@ -4943,7 +5326,16 @@
         output: (chunk) => {
           const bytes = new Uint8Array(chunk.byteLength);
           chunk.copyTo(bytes);
-          this.onPacket(bytes);
+          const packetContext = this.packetContexts.length > 0
+            ? this.packetContexts.shift()
+            : null;
+          if (packetContext === null) {
+            // Do not let an output emitted after a closed/reset encoder cross
+            // a PTT boundary. Every accepted source frame carries a session.
+            noteDroppedTxFrame("opus-output-without-context");
+            return;
+          }
+          this.onPacket(bytes, packetContext);
         },
         error: (err) => {
           appendLog(t("log_opus_encoder_error", { error: err.message || err }), "warn");
@@ -4962,19 +5354,27 @@
       return this.targetBitrate;
     }
 
-    encodeFrame(pcmFrame) {
+    queueSize() {
+      return this.encoder ? Math.max(0, Number(this.encoder.encodeQueueSize || 0)) : 0;
+    }
+
+    isBackpressured() {
+      return this.queueSize() >= txOpusMaxQueuedFrames;
+    }
+
+    encodeFrame(pcmFrame, packetContext = null) {
       if (!this.started || !this.encoder) {
-        return;
+        return false;
       }
       if (!pcmFrame || pcmFrame.length < 2) {
-        return;
+        return false;
       }
 
       const frameBytes = new Uint8Array(pcmFrame.length);
       frameBytes.set(pcmFrame);
       const frameSamples = Math.floor(frameBytes.length / 2);
       if (frameSamples <= 0) {
-        return;
+        return false;
       }
 
       const audioData = new AudioData({
@@ -4986,9 +5386,17 @@
         data: frameBytes,
       });
 
-      this.encoder.encode(audioData);
-      audioData.close();
-      this.timestampUs += Math.round((frameSamples * 1000000) / this.sampleRate);
+      this.packetContexts.push(packetContext);
+      try {
+        this.encoder.encode(audioData);
+        this.timestampUs += Math.round((frameSamples * 1000000) / this.sampleRate);
+        return true;
+      } catch (_) {
+        this.packetContexts.pop();
+        return false;
+      } finally {
+        audioData.close();
+      }
     }
 
     async flush() {
@@ -5001,6 +5409,7 @@
     close() {
       if (!this.encoder) {
         this.started = false;
+        this.packetContexts = [];
         this.configuredBitrate = 0;
         return;
       }
@@ -5013,6 +5422,7 @@
       this.encoder = null;
       this.started = false;
       this.timestampUs = 0;
+      this.packetContexts = [];
       this.configuredBitrate = 0;
     }
   }
@@ -5174,31 +5584,45 @@
       this.ctx = null;
       this.nextPlayTime = 0;
       this.isAndroid = isAndroidBrowser();
-      this.streamMode = this.isAndroid;
+      // Chrome Desktop used to schedule one short AudioBufferSourceNode per
+      // packet. Use the same continuous AudioWorklet stream on every platform.
+      this.streamMode = true;
       this.streamModeKind = "none";
-      this.startupLeadSec = this.isAndroid ? 0.26 : 0.05;
-      this.catchupLeadSec = this.isAndroid ? 0.12 : 0.03;
-      this.softLagSec = this.isAndroid ? -0.01 : -0.02;
-      this.hardLagSec = this.isAndroid ? -0.25 : -0.12;
-      this.maxLeadSec = this.isAndroid ? 1.2 : 0.8;
-      this.declickSamples = 0;
-      this.prevTailSample = 0;
-      this.hasPrevTailSample = false;
+      this.streamInitPromise = null;
+      this.workletInitAttempted = false;
+      this.workletNode = null;
+      this.streamNode = null;
+      this.streamSourceRate = 8000;
+      this.streamPrimeSamples = this.isAndroid ? 1280 : 640;
+      this.streamMaxSamples = this.isAndroid ? 12000 : 6000;
+      this.workletStats = {
+        bufferedSamples: 0,
+        primed: false,
+        underrunBlocks: 0,
+        underrunEvents: 0,
+      };
+
+      this.pendingRawChunks = [];
+      this.pendingRawSamples = 0;
+      this.scriptChunks = [];
+      this.scriptOffset = 0;
+      this.scriptBufferedSamples = 0;
+      this.scriptPrimed = false;
+      this.scriptHoldSample = 0;
+      this.scriptUnderrunBlocks = 0;
       this.resampleFromRate = 0;
       this.resamplePos = 0;
       this.prevInputSample = 0;
       this.hasPrevInputSample = false;
-      this.streamNode = null;
-      this.workletNode = null;
-      this.workletInitAttempted = false;
-      this.streamChunks = [];
-      this.streamOffset = 0;
-      this.streamBufferedSamples = 0;
-      this.streamPrimeSamples = this.isAndroid ? 8192 : 2048;
-      this.streamMaxSamples = this.isAndroid ? 96000 : 24000;
-      this.streamPrimed = false;
-      this.streamHoldSample = 0;
-      this.streamUnderrunBlocks = 0;
+
+      this.startupLeadSec = 0.05;
+      this.catchupLeadSec = 0.03;
+      this.softLagSec = -0.02;
+      this.hardLagSec = -0.12;
+      this.maxLeadSec = 0.8;
+      this.declickSamples = 0;
+      this.prevTailSample = 0;
+      this.hasPrevTailSample = false;
       this.keepAliveSource = null;
       this.keepAliveGain = null;
       this.lastResumeAttemptMs = 0;
@@ -5213,24 +5637,36 @@
       }
       this.muted = next;
       if (next) {
-        this.directSources.forEach((source) => {
-          try {
-            source.stop();
-          } catch (_) {
-            // Sources may already have completed.
-          }
-        });
-        this.directSources.clear();
+        this.stopDirectSources();
         this.resetTimeline();
       }
     }
 
-    async resume() {
-      if (!this.ctx) {
-        this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    ensureContext() {
+      if (this.ctx) {
+        return this.ctx;
       }
-      if (this.ctx.state !== "running") {
-        await this.ctx.resume();
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) {
+        return null;
+      }
+      this.ctx = new AudioContextClass();
+      this.ctx.addEventListener("statechange", () => {
+        audioDebug("playback-context-state", {
+          state: this.ctx ? this.ctx.state : "closed",
+          currentTime: this.ctx ? this.ctx.currentTime : 0,
+        });
+      });
+      return this.ctx;
+    }
+
+    async resume() {
+      const ctx = this.ensureContext();
+      if (!ctx) {
+        throw new Error("Web Audio API is unavailable");
+      }
+      if (ctx.state !== "running") {
+        await ctx.resume();
       }
       this.ensureKeepAliveSource();
       await this.ensureStreamOutput();
@@ -5244,33 +5680,28 @@
         const gain = this.ctx.createGain();
         gain.gain.value = 0;
         gain.connect(this.ctx.destination);
-
         if (typeof this.ctx.createConstantSource === "function") {
-          const src = this.ctx.createConstantSource();
-          src.offset.value = 0;
-          src.connect(gain);
-          src.start();
-          this.keepAliveSource = src;
+          const source = this.ctx.createConstantSource();
+          source.offset.value = 0;
+          source.connect(gain);
+          source.start();
+          this.keepAliveSource = source;
         } else {
-          const osc = this.ctx.createOscillator();
-          osc.type = "sine";
-          osc.frequency.value = 18;
-          osc.connect(gain);
-          osc.start();
-          this.keepAliveSource = osc;
+          const oscillator = this.ctx.createOscillator();
+          oscillator.type = "sine";
+          oscillator.frequency.value = 18;
+          oscillator.connect(gain);
+          oscillator.start();
+          this.keepAliveSource = oscillator;
         }
         this.keepAliveGain = gain;
       } catch (_) {
-        // Keep running even if keep-alive source is unavailable.
+        // Keep playback usable even if the silent keep-alive source is absent.
       }
     }
 
     resumeIfNeeded() {
-      if (!this.ctx) {
-        return;
-      }
-      const stateName = String(this.ctx.state || "");
-      if (stateName === "running") {
+      if (!this.ctx || String(this.ctx.state || "") === "running") {
         return;
       }
       const now = Date.now();
@@ -5281,6 +5712,7 @@
       this.ctx.resume()
         .then(() => {
           this.ensureKeepAliveSource();
+          return this.ensureStreamOutput();
         })
         .catch(() => {});
     }
@@ -5289,54 +5721,46 @@
       if (!this.streamMode || !this.ctx || this.streamModeKind !== "none") {
         return;
       }
+      if (this.streamInitPromise) {
+        return this.streamInitPromise;
+      }
+      this.streamInitPromise = this.initializeStreamOutput()
+        .finally(() => {
+          this.streamInitPromise = null;
+        });
+      return this.streamInitPromise;
+    }
 
-      if (!this.workletInitAttempted &&
-          this.ctx.audioWorklet &&
-          typeof AudioWorkletNode !== "undefined") {
+    async initializeStreamOutput() {
+      if (!this.ctx) {
+        return;
+      }
+      if (!this.workletInitAttempted && this.ctx.audioWorklet && typeof AudioWorkletNode !== "undefined") {
         this.workletInitAttempted = true;
         try {
           await this.ctx.audioWorklet.addModule(resolveWorkletURL("pcm-playback-worklet.js"));
-          this.workletNode = new AudioWorkletNode(this.ctx, "incomudon-pcm-playback", {
+          const node = new AudioWorkletNode(this.ctx, "incomudon-pcm-playback", {
             numberOfInputs: 0,
             numberOfOutputs: 1,
             outputChannelCount: [1],
           });
-          this.workletNode.port.postMessage({
-            type: "config",
-            primeSamples: this.streamPrimeSamples,
-            maxSamples: this.streamMaxSamples,
-          });
-          if (this.streamBufferedSamples > 0 && this.streamChunks.length > 0) {
-            if (this.streamOffset > 0) {
-              const head = this.streamChunks[0];
-              this.streamChunks[0] = head.subarray(this.streamOffset);
-              this.streamOffset = 0;
-            }
-            for (let i = 0; i < this.streamChunks.length; i += 1) {
-              const chunk = this.streamChunks[i];
-              if (!chunk || chunk.length === 0) {
-                continue;
-              }
-              const payload = new Float32Array(chunk.length);
-              payload.set(chunk);
-              this.workletNode.port.postMessage({ type: "pcm", samples: payload }, [payload.buffer]);
-            }
-            this.streamChunks = [];
-            this.streamOffset = 0;
-            this.streamBufferedSamples = 0;
-            this.streamPrimed = false;
-            this.streamHoldSample = 0;
-            this.streamUnderrunBlocks = 0;
-          }
-          this.workletNode.connect(this.ctx.destination);
+          node.port.onmessage = (event) => this.handleWorkletMessage(event && event.data);
+          node.connect(this.ctx.destination);
+          this.workletNode = node;
           this.streamModeKind = "worklet";
+          this.configureWorklet(this.streamSourceRate);
+          this.flushPendingRawSamples();
+          audioDebug("playback-stream", { mode: "AudioWorklet" });
           return;
-        } catch (_) {
+        } catch (err) {
+          audioDebug("playback-worklet-unavailable", {
+            error: err && err.message ? err.message : String(err),
+          });
           if (this.workletNode) {
             try {
               this.workletNode.disconnect();
             } catch (_) {
-              // Ignore disconnect errors.
+              // Ignore an already disconnected node.
             }
             this.workletNode = null;
           }
@@ -5346,16 +5770,51 @@
       if (typeof this.ctx.createScriptProcessor === "function") {
         const node = this.ctx.createScriptProcessor(2048, 1, 1);
         node.onaudioprocess = (event) => {
-          const out = event.outputBuffer.getChannelData(0);
-          this.fillStreamOutput(out);
+          this.fillScriptOutput(event.outputBuffer.getChannelData(0));
         };
         node.connect(this.ctx.destination);
         this.streamNode = node;
         this.streamModeKind = "script";
+        this.flushPendingRawSamples();
+        audioDebug("playback-stream", { mode: "ScriptProcessor-fallback" });
         return;
       }
 
+      // Very old browsers retain native AudioBufferSourceNode resampling as a
+      // compatibility fallback. Modern Chrome follows the AudioWorklet path.
       this.streamMode = false;
+      this.flushPendingRawSamples();
+      audioDebug("playback-stream", { mode: "native-buffer-fallback" });
+    }
+
+    configureWorklet(sourceSampleRate) {
+      if (!this.workletNode) {
+        return;
+      }
+      this.streamSourceRate = Math.max(1, Number(sourceSampleRate) || 8000);
+      this.workletNode.port.postMessage({
+        type: "config",
+        sourceSampleRate: this.streamSourceRate,
+        primeSamples: this.streamPrimeSamples,
+        maxSamples: this.streamMaxSamples,
+      });
+    }
+
+    handleWorkletMessage(message) {
+      if (!message || message.type !== "stats") {
+        return;
+      }
+      const previousUnderruns = this.workletStats.underrunEvents;
+      this.workletStats = {
+        bufferedSamples: Math.max(0, Number(message.bufferedSamples) || 0),
+        sourceSampleRate: Math.max(0, Number(message.sourceSampleRate) || 0),
+        primed: !!message.primed,
+        underrunBlocks: Math.max(0, Number(message.underrunBlocks) || 0),
+        underrunEvents: Math.max(0, Number(message.underrunEvents) || 0),
+      };
+      if (state.audioDebugEnabled && this.workletStats.underrunEvents > previousUnderruns) {
+        audioDebug("playback-underrun", this.workletStats);
+      }
     }
 
     resetTimeline() {
@@ -5366,19 +5825,99 @@
       this.resamplePos = 0;
       this.prevInputSample = 0;
       this.hasPrevInputSample = false;
-      this.streamChunks = [];
-      this.streamOffset = 0;
-      this.streamBufferedSamples = 0;
-      this.streamPrimed = false;
-      this.streamHoldSample = 0;
-      this.streamUnderrunBlocks = 0;
-      if (this.streamModeKind === "worklet" && this.workletNode) {
+      this.pendingRawChunks = [];
+      this.pendingRawSamples = 0;
+      this.scriptChunks = [];
+      this.scriptOffset = 0;
+      this.scriptBufferedSamples = 0;
+      this.scriptPrimed = false;
+      this.scriptHoldSample = 0;
+      this.scriptUnderrunBlocks = 0;
+      if (this.workletNode) {
         try {
           this.workletNode.port.postMessage({ type: "reset" });
         } catch (_) {
-          // Ignore postMessage errors.
+          // Ignore a worklet that was torn down with the context.
         }
       }
+    }
+
+    stopDirectSources() {
+      this.directSources.forEach((source) => {
+        try {
+          source.stop();
+        } catch (_) {
+          // Sources may already have completed.
+        }
+      });
+      this.directSources.clear();
+    }
+
+    queuePendingRawSamples(samples, sampleRate) {
+      if (!samples || samples.length <= 0) {
+        return;
+      }
+      this.pendingRawChunks.push({ samples, sampleRate });
+      this.pendingRawSamples += samples.length;
+      while (this.pendingRawSamples > this.streamMaxSamples && this.pendingRawChunks.length > 0) {
+        const dropped = this.pendingRawChunks.shift();
+        this.pendingRawSamples -= dropped.samples.length;
+      }
+    }
+
+    flushPendingRawSamples() {
+      const pending = this.pendingRawChunks;
+      this.pendingRawChunks = [];
+      this.pendingRawSamples = 0;
+      pending.forEach((entry) => {
+        if (!entry || !entry.samples || entry.samples.length <= 0) {
+          return;
+        }
+        if (this.streamModeKind === "worklet") {
+          this.sendWorkletSamples(entry.samples, entry.sampleRate);
+        } else if (this.streamModeKind === "script") {
+          const output = this.resampleContinuous(entry.samples, entry.sampleRate, this.ctx.sampleRate);
+          this.enqueueScriptSamples(output);
+        } else {
+          this.scheduleDirectSamples(entry.samples, entry.sampleRate);
+        }
+      });
+    }
+
+    sendWorkletSamples(samples, sourceSampleRate) {
+      if (!this.workletNode || !samples || samples.length <= 0) {
+        return;
+      }
+      const sourceRate = Math.max(1, Number(sourceSampleRate) || 8000);
+      if (sourceRate !== this.streamSourceRate) {
+        // The relay currently always sends 8 kHz. Reset rather than blending
+        // incompatible clocks should a future codec supply a different rate.
+        this.configureWorklet(sourceRate);
+      }
+      try {
+        this.workletNode.port.postMessage({ type: "pcm", samples }, [samples.buffer]);
+      } catch (err) {
+        audioDebug("playback-worklet-post-failed", {
+          error: err && err.message ? err.message : String(err),
+        });
+      }
+    }
+
+    enqueueRawStreamSamples(samples, sourceSampleRate) {
+      if (this.streamModeKind === "worklet") {
+        this.sendWorkletSamples(samples, sourceSampleRate);
+        return;
+      }
+      if (this.streamModeKind === "script") {
+        const output = this.resampleContinuous(samples, sourceSampleRate, this.ctx.sampleRate);
+        this.enqueueScriptSamples(output);
+        return;
+      }
+      if (this.streamMode) {
+        this.queuePendingRawSamples(samples, sourceSampleRate);
+        return;
+      }
+      this.scheduleDirectSamples(samples, sourceSampleRate);
     }
 
     resampleContinuous(input, fromRate, toRate) {
@@ -5392,20 +5931,13 @@
         return input;
       }
 
-      const sampleAt = (idx, prev, src) => {
-        if (idx <= 0) {
-          return prev;
-        }
-        const srcIndex = idx - 1;
-        if (srcIndex < 0) {
-          return prev;
-        }
-        if (srcIndex >= src.length) {
-          return src[src.length - 1];
-        }
-        return src[srcIndex];
+      const sampleAt = (idx, previous, source) => {
+        if (idx <= 0) return previous;
+        const sourceIndex = idx - 1;
+        if (sourceIndex < 0) return previous;
+        if (sourceIndex >= source.length) return source[source.length - 1];
+        return source[sourceIndex];
       };
-
       if (!this.hasPrevInputSample || this.resampleFromRate !== fromRate) {
         this.resampleFromRate = fromRate;
         this.resamplePos = 0;
@@ -5413,215 +5945,171 @@
         this.hasPrevInputSample = true;
       }
 
-      const prev = this.prevInputSample;
+      const previous = this.prevInputSample;
       const step = fromRate / toRate;
-      const extLength = input.length + 1;
-      let pos = this.resamplePos;
-      if (!Number.isFinite(pos) || pos < 0 || pos >= extLength - 1) {
-        pos = 0;
+      const extendedLength = input.length + 1;
+      let position = this.resamplePos;
+      if (!Number.isFinite(position) || position < 0 || position >= extendedLength - 1) {
+        position = 0;
       }
-      const maxOut = Math.max(1, Math.ceil((extLength - 1 - pos) / step) + 1);
-      const output = new Float32Array(maxOut);
-      let outLen = 0;
-      while (pos + 1 < extLength && outLen < output.length) {
-        const i0 = Math.floor(pos);
-        const frac = pos - i0;
-        const a = sampleAt(i0, prev, input);
-        const b = sampleAt(i0 + 1, prev, input);
-        output[outLen] = a + ((b - a) * frac);
-        outLen += 1;
-        pos += step;
+      const output = new Float32Array(Math.max(1, Math.ceil((extendedLength - 1 - position) / step) + 1));
+      let outputLength = 0;
+      while (position + 1 < extendedLength && outputLength < output.length) {
+        const i0 = Math.floor(position);
+        const fraction = position - i0;
+        const a = sampleAt(i0, previous, input);
+        const b = sampleAt(i0 + 1, previous, input);
+        output[outputLength] = a + ((b - a) * fraction);
+        outputLength += 1;
+        position += step;
       }
-
-      this.resamplePos = pos - input.length;
+      this.resamplePos = position - input.length;
       if (!Number.isFinite(this.resamplePos) || this.resamplePos < 0 || this.resamplePos > 1) {
         this.resamplePos = 0;
       }
       this.prevInputSample = input[input.length - 1];
       this.hasPrevInputSample = true;
-
-      if (outLen === output.length) {
-        return output;
-      }
-      const trimmed = new Float32Array(outLen);
-      if (outLen > 0) {
-        trimmed.set(output.subarray(0, outLen));
-      }
-      return trimmed;
+      return outputLength === output.length ? output : output.slice(0, outputLength);
     }
 
-    enqueueStreamSamples(samples) {
+    enqueueScriptSamples(samples) {
       if (!samples || samples.length <= 0) {
         return;
       }
-
-      if (this.streamModeKind === "worklet" && this.workletNode) {
-        try {
-          this.workletNode.port.postMessage({ type: "pcm", samples }, [samples.buffer]);
-        } catch (_) {
-          // Ignore worklet transfer errors and keep going.
-        }
-        return;
-      }
-
-      if (this.streamBufferedSamples > this.streamMaxSamples) {
-        this.streamChunks = [];
-        this.streamOffset = 0;
-        this.streamBufferedSamples = 0;
-        this.streamPrimed = false;
-      }
-
-      let overflow = (this.streamBufferedSamples + samples.length) - this.streamMaxSamples;
-      while (overflow > 0 && this.streamChunks.length > 0) {
-        const head = this.streamChunks[0];
-        const available = head.length - this.streamOffset;
+      let overflow = (this.scriptBufferedSamples + samples.length) - this.streamMaxSamples;
+      while (overflow > 0 && this.scriptChunks.length > 0) {
+        const head = this.scriptChunks[0];
+        const available = head.length - this.scriptOffset;
         if (available <= overflow) {
-          this.streamChunks.shift();
-          this.streamOffset = 0;
-          this.streamBufferedSamples -= available;
+          this.scriptChunks.shift();
+          this.scriptOffset = 0;
+          this.scriptBufferedSamples -= available;
           overflow -= available;
         } else {
-          this.streamOffset += overflow;
-          this.streamBufferedSamples -= overflow;
+          this.scriptOffset += overflow;
+          this.scriptBufferedSamples -= overflow;
           overflow = 0;
         }
       }
-
-      this.streamChunks.push(samples);
-      this.streamBufferedSamples += samples.length;
-      this.streamUnderrunBlocks = 0;
+      this.scriptChunks.push(samples);
+      this.scriptBufferedSamples += samples.length;
+      this.scriptUnderrunBlocks = 0;
     }
 
-    fillStreamOutput(out) {
-      out.fill(0);
-      if (this.streamBufferedSamples <= 0) {
-        if (this.streamPrimed) {
-          let hold = this.streamHoldSample;
-          for (let i = 0; i < out.length; i += 1) {
-            out[i] = hold;
-            hold *= 0.999;
-          }
-          this.streamHoldSample = hold;
-          this.streamUnderrunBlocks += 1;
-          if (this.streamUnderrunBlocks >= 8) {
-            this.streamPrimed = false;
-          }
-        }
-        return;
-      }
-      if (!this.streamPrimed) {
-        if (this.streamBufferedSamples < this.streamPrimeSamples) {
+    fillScriptOutput(output) {
+      output.fill(0);
+      if (!this.scriptPrimed) {
+        if (this.scriptBufferedSamples < this.streamPrimeSamples) {
           return;
         }
-        this.streamPrimed = true;
+        this.scriptPrimed = true;
       }
-
       let write = 0;
-      while (write < out.length && this.streamChunks.length > 0) {
-        const head = this.streamChunks[0];
-        const available = head.length - this.streamOffset;
+      while (write < output.length && this.scriptChunks.length > 0) {
+        const head = this.scriptChunks[0];
+        const available = head.length - this.scriptOffset;
         if (available <= 0) {
-          this.streamChunks.shift();
-          this.streamOffset = 0;
+          this.scriptChunks.shift();
+          this.scriptOffset = 0;
           continue;
         }
-        const n = Math.min(available, out.length - write);
-        out.set(head.subarray(this.streamOffset, this.streamOffset + n), write);
-        write += n;
-        this.streamOffset += n;
-        this.streamBufferedSamples -= n;
-        if (this.streamOffset >= head.length) {
-          this.streamChunks.shift();
-          this.streamOffset = 0;
+        const count = Math.min(available, output.length - write);
+        output.set(head.subarray(this.scriptOffset, this.scriptOffset + count), write);
+        write += count;
+        this.scriptOffset += count;
+        this.scriptBufferedSamples -= count;
+        if (this.scriptOffset >= head.length) {
+          this.scriptChunks.shift();
+          this.scriptOffset = 0;
         }
       }
       if (write > 0) {
-        this.streamHoldSample = out[write - 1];
+        this.scriptHoldSample = output[write - 1];
       }
-      if (write < out.length) {
-        let hold = this.streamHoldSample;
-        for (let i = write; i < out.length; i += 1) {
-          out[i] = hold;
+      if (write < output.length) {
+        let hold = this.scriptHoldSample;
+        for (let i = write; i < output.length; i += 1) {
+          output[i] = hold;
           hold *= 0.999;
         }
-        this.streamHoldSample = hold;
-        this.streamUnderrunBlocks += 1;
+        this.scriptHoldSample = hold;
+        this.scriptUnderrunBlocks += 1;
+        if (this.scriptUnderrunBlocks >= 8) {
+          this.scriptPrimed = false;
+        }
       } else {
-        this.streamUnderrunBlocks = 0;
+        this.scriptUnderrunBlocks = 0;
       }
+    }
+
+    scheduleDirectSamples(samples, sourceRate) {
+      if (!this.ctx || !samples || samples.length <= 0) {
+        return;
+      }
+      const output = samples;
+      if (this.declickSamples > 0 && this.hasPrevTailSample) {
+        const blendCount = Math.min(this.declickSamples, output.length);
+        const previous = this.prevTailSample;
+        for (let i = 0; i < blendCount; i += 1) {
+          const ratio = (i + 1) / (blendCount + 1);
+          output[i] = previous + ((output[i] - previous) * ratio);
+        }
+      }
+      this.prevTailSample = output[output.length - 1];
+      this.hasPrevTailSample = true;
+
+      const now = this.ctx.currentTime;
+      const lead = this.nextPlayTime - now;
+      if (!Number.isFinite(this.nextPlayTime) || lead < this.hardLagSec || lead > this.maxLeadSec) {
+        this.nextPlayTime = now + this.startupLeadSec;
+        this.hasPrevTailSample = false;
+      } else if (lead < this.softLagSec) {
+        this.nextPlayTime = now + this.catchupLeadSec;
+      }
+      const buffer = this.ctx.createBuffer(1, output.length, sourceRate);
+      buffer.copyToChannel(output, 0);
+      const source = this.ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(this.ctx.destination);
+      this.directSources.add(source);
+      source.onended = () => this.directSources.delete(source);
+      source.start(this.nextPlayTime);
+      this.nextPlayTime += buffer.duration;
     }
 
     playPCM(bytes, sampleRate = 8000) {
       if (!bytes || bytes.length < 2 || this.muted) {
         return;
       }
-      if (!this.ctx) {
+      const ctx = this.ensureContext();
+      if (!ctx) {
         return;
       }
       this.resumeIfNeeded();
-
       const sampleCount = Math.floor(bytes.length / 2);
       const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
       const input = new Float32Array(sampleCount);
       for (let i = 0; i < sampleCount; i += 1) {
         input[i] = view.getInt16(i * 2, true) / 32768;
       }
-
-      const fromRate = Number(sampleRate) > 0 ? Number(sampleRate) : 8000;
-      // Let Web Audio perform its native sample-rate conversion for direct
-      // playback.  Its resampler is substantially better than the old linear
-      // interpolation path; Android's continuous stream still needs samples
-      // at the AudioContext rate for its worklet.
-      const output = this.streamMode
-        ? this.resampleContinuous(input, fromRate, this.ctx.sampleRate)
-        : input;
-      const outputRate = this.streamMode ? this.ctx.sampleRate : fromRate;
-      if (output.length <= 0) {
-        return;
-      }
-
-      if (this.declickSamples > 0 && this.hasPrevTailSample) {
-        const blendCount = Math.min(this.declickSamples, output.length);
-        const prev = this.prevTailSample;
-        for (let i = 0; i < blendCount; i += 1) {
-          const t = (i + 1) / (blendCount + 1);
-          output[i] = prev + ((output[i] - prev) * t);
-        }
-      }
-      this.prevTailSample = output[output.length - 1];
-      this.hasPrevTailSample = true;
-
+      const sourceRate = Number(sampleRate) > 0 ? Number(sampleRate) : 8000;
       if (this.streamMode) {
         this.ensureStreamOutput().catch(() => {});
-        this.enqueueStreamSamples(output);
+        this.enqueueRawStreamSamples(input, sourceRate);
         return;
       }
+      this.scheduleDirectSamples(input, sourceRate);
+    }
 
-      const now = this.ctx.currentTime;
-      const lead = this.nextPlayTime - now;
-      if (!Number.isFinite(this.nextPlayTime) ||
-          lead < this.hardLagSec ||
-          lead > this.maxLeadSec) {
-        this.nextPlayTime = now + this.startupLeadSec;
-        this.hasPrevTailSample = false;
-      } else if (lead < this.softLagSec) {
-        // Minor drift: catch up gently without resetting cross-frame continuity.
-        this.nextPlayTime = now + this.catchupLeadSec;
-      }
-
-      const buffer = this.ctx.createBuffer(1, output.length, outputRate);
-      buffer.copyToChannel(output, 0);
-
-      const source = this.ctx.createBufferSource();
-      source.buffer = buffer;
-      source.connect(this.ctx.destination);
-      this.directSources.add(source);
-      source.onended = () => {
-        this.directSources.delete(source);
+    debugState() {
+      return {
+        contextState: this.ctx ? this.ctx.state : "none",
+        currentTime: this.ctx ? this.ctx.currentTime : 0,
+        streamMode: this.streamModeKind,
+        pendingRawSamples: this.pendingRawSamples,
+        worklet: this.workletStats,
+        scriptBufferedSamples: this.scriptBufferedSamples,
       };
-
-      source.start(this.nextPlayTime);
-      this.nextPlayTime += buffer.duration;
     }
   }
 
@@ -5749,7 +6237,7 @@
     if (state.audioTxTask) {
       return;
     }
-    transmitUplinkFrame(frame);
+    transmitUplinkFrame(frame, "mic");
     }, state.micVolumePercent);
   }
   applyMicVolumeFromUI(state.micVolumePercent, false);
