@@ -137,6 +137,7 @@ type appServer struct {
 	basePath          string
 	multiPath         string
 	multiMaxSlots     int
+	multiDefaultSlots int
 	static            http.Handler
 	indexT            *template.Template
 	multiT            *template.Template
@@ -163,7 +164,8 @@ func main() {
 	listenAddr := flag.String("listen", ":8080", "HTTP listen address")
 	basePathFlag := flag.String("base-path", "/", "base path for reverse proxy deployment (e.g. /pwa)")
 	multiPathFlag := flag.String("multi-path", os.Getenv("INCOMUDON_MULTI_PATH"), "multi-channel page URL (default: <base-path>/multi)")
-	multiMaxSlotsFlag := flag.String("multi-max-slots", os.Getenv("INCOMUDON_MULTI_MAX_SLOTS"), "maximum multi-channel slots (1-10, default: 4)")
+	multiMaxSlotsFlag := flag.String("multi-max-slots", os.Getenv("INCOMUDON_MULTI_MAX_SLOTS"), "maximum browser-addable multi-channel slots (1-10, default: 10)")
+	multiDefaultSlotsFlag := flag.String("multi-default-slots", os.Getenv("INCOMUDON_MULTI_DEFAULT_SLOTS"), "initial multi-channel slots for a new browser (1-10, default: 4; capped by max slots)")
 	directoryUDPListenFlag := flag.String("directory-udp-listen", os.Getenv("INCOMUDON_DIRECTORY_UDP_LISTEN"), "UDP listen address for PSK-protected relay directory snapshots (disabled when empty)")
 	directoryPSKFileFlag := flag.String("directory-psk-file", os.Getenv("INCOMUDON_DIRECTORY_PSK_FILE"), "path to base64url directory PSK file")
 	directoryKeyIDFlag := flag.String("directory-key-id", os.Getenv("INCOMUDON_DIRECTORY_KEY_ID"), "expected directory PSK key ID (default pwa-1)")
@@ -192,6 +194,10 @@ func main() {
 	multiMaxSlots, err := parseMultiMaxSlots(*multiMaxSlotsFlag)
 	if err != nil {
 		log.Fatalf("invalid multi-channel slot count: %v", err)
+	}
+	multiDefaultSlots, err := parseMultiDefaultSlots(*multiDefaultSlotsFlag, multiMaxSlots)
+	if err != nil {
+		log.Fatalf("invalid initial multi-channel slot count: %v", err)
 	}
 	fixedRelayHost, fixedRelayPort, fixedRelayEnabled, err := parseFixedRelayConfig(*fixedRelayFlag)
 	if err != nil {
@@ -260,6 +266,7 @@ func main() {
 		basePath:          basePath,
 		multiPath:         multiPath,
 		multiMaxSlots:     multiMaxSlots,
+		multiDefaultSlots: multiDefaultSlots,
 		static:            http.FileServer(http.FS(subFS)),
 		indexT:            indexTemplate,
 		multiT:            multiTemplate,
@@ -322,7 +329,7 @@ func main() {
 		prefix = basePath + "/"
 	}
 	log.Printf("IncomUdon relay PWA client listening on http://0.0.0.0%s%s", *listenAddr, prefix)
-	log.Printf("Multi-channel page is available at %s (max slots=%d)", app.multiPath, app.multiMaxSlots)
+	log.Printf("Multi-channel page is available at %s (default slots=%d, max slots=%d)", app.multiPath, app.multiDefaultSlots, app.multiMaxSlots)
 	if app.fixedRelayEnabled {
 		log.Printf("Fixed relay target is enabled: %s", net.JoinHostPort(app.fixedRelayHost, strconv.Itoa(app.fixedRelayPort)))
 	}
@@ -357,8 +364,9 @@ func normalizeBasePath(value string) string {
 }
 
 const (
-	defaultMultiMaxSlots = 4
-	maximumMultiMaxSlots = 10
+	defaultMultiMaxSlots     = 10
+	defaultMultiDefaultSlots = 4
+	maximumMultiMaxSlots     = 10
 )
 
 func parseMultiMaxSlots(value string) (int, error) {
@@ -369,6 +377,21 @@ func parseMultiMaxSlots(value string) (int, error) {
 	count, err := strconv.Atoi(trimmed)
 	if err != nil || count < 1 || count > maximumMultiMaxSlots {
 		return 0, fmt.Errorf("must be an integer between 1 and %d", maximumMultiMaxSlots)
+	}
+	return count, nil
+}
+
+func parseMultiDefaultSlots(value string, maximum int) (int, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		if defaultMultiDefaultSlots > maximum {
+			return maximum, nil
+		}
+		return defaultMultiDefaultSlots, nil
+	}
+	count, err := strconv.Atoi(trimmed)
+	if err != nil || count < 1 || count > maximum {
+		return 0, fmt.Errorf("must be an integer between 1 and configured maximum %d", maximum)
 	}
 	return count, nil
 }
@@ -467,6 +490,7 @@ type pageTemplateData struct {
 	BasePath          string
 	MultiPath         string
 	MultiMaxSlots     int
+	MultiDefaultSlots int
 	FixedRelayEnabled bool
 	FixedRelayHost    string
 	FixedRelayPort    int
@@ -482,6 +506,7 @@ func (a *appServer) pageData() pageTemplateData {
 		BasePath:          a.basePath,
 		MultiPath:         a.multiPath,
 		MultiMaxSlots:     a.multiMaxSlots,
+		MultiDefaultSlots: a.multiDefaultSlots,
 		FixedRelayEnabled: a.fixedRelayEnabled,
 		FixedRelayHost:    a.fixedRelayHost,
 		FixedRelayPort:    a.fixedRelayPort,

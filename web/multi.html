@@ -13,6 +13,7 @@
   data-base-path="{{.BasePath}}"
   data-multi-path="{{.MultiPath}}"
   data-multi-max-slots="{{.MultiMaxSlots}}"
+  data-multi-default-slots="{{.MultiDefaultSlots}}"
   data-auth-mode="{{.AuthMode}}">
   <div class="backdrop" aria-hidden="true"></div>
   <main id="multiMain" class="layout multi-layout" tabindex="-1">
@@ -27,7 +28,7 @@
             <span id="multiLabelLanguage">Language</span>
             <select id="multiLanguageSelect">
               <option value="en">English</option>
-              <option value="ja">日本語</option>
+              <option value="ja">&#26085;&#26412;&#35486;</option>
             </select>
           </label>
           <a id="singleChannelLink" class="ghost multi-single-link" href="{{.BasePath}}/">Single Channel</a>
@@ -84,6 +85,18 @@
           <p id="multiSettingsLead" class="lead multi-settings-lead">Select a slot to edit its connection, cue sounds, and local audio files.</p>
         </div>
       </div>
+      <section class="multi-slot-management" aria-labelledby="multiSlotManagementHeading">
+        <div class="multi-slot-management-head">
+          <div>
+            <h2 id="multiSlotManagementHeading">Channel Slots</h2>
+            <p id="multiSlotManagementSummary" class="lead multi-slot-management-summary"></p>
+          </div>
+          <div class="multi-slot-management-actions">
+            <button id="multiAddSlot" class="ghost" type="button">Add Slot</button>
+            <button id="multiRemoveSlot" class="ghost" type="button">Remove Slot</button>
+          </div>
+        </div>
+      </section>
       <div id="multiSettingsTabs" class="multi-settings-tabs" role="tablist" aria-label="Slot settings"></div>
       <div id="multiSettingsPanes" class="multi-settings-panes"></div>
     </section>
@@ -98,8 +111,11 @@
         </summary>
         <div class="settings-lock-content">
           <div class="settings-lock-actions">
+            <button id="settingsExportButton" class="ghost" type="button">Export Settings</button>
+            <button id="settingsImportButton" class="ghost" type="button">Import Settings</button>
             <button id="settingsRelockButton" class="ghost" type="button" hidden>Lock Settings</button>
             <button id="settingsDisableButton" class="ghost" type="button" hidden>Disable Settings Lock</button>
+            <input id="settingsImportFile" type="file" accept="application/json,.json" hidden>
           </div>
           <div id="settingsUnlockForm" class="settings-unlock-form" hidden>
             <label>
@@ -132,7 +148,7 @@
         const authMode = String(document.body.dataset.authMode || "none").toLowerCase();
         const swPath = `${basePath}/sw.js`;
         const scope = `${basePath}/`;
-        navigator.serviceWorker.register(`${swPath}?auth_mode=${encodeURIComponent(authMode)}&build=55`, { scope }).catch(() => {});
+        navigator.serviceWorker.register(`${swPath}?auth_mode=${encodeURIComponent(authMode)}&build=59`, { scope }).catch(() => {});
       });
     }
   </script>

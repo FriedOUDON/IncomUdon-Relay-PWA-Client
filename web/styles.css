@@ -509,8 +509,14 @@ button[disabled] {
 }
 
 .audio-tx-config {
+  display: grid;
+  gap: 8px;
   margin-top: 8px;
-  max-width: 200px;
+  max-width: 220px;
+}
+
+.audio-tx-loop-row {
+  min-height: 0;
 }
 
 .audio-tx-config input {
@@ -539,6 +545,17 @@ button[disabled] {
 .audio-tx-slot.active {
   border-color: color-mix(in srgb, var(--accent) 65%, var(--line) 35%);
   box-shadow: inset 0 0 0 1px rgba(210, 71, 30, 0.18);
+}
+
+.audio-tx-slot.loading {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--line) 52%);
+  background: color-mix(in srgb, #fff7ed 72%, var(--card) 28%);
+  box-shadow: inset 0 0 0 1px rgba(210, 71, 30, 0.1);
+}
+
+.audio-tx-slot.loading .audio-tx-slot-file {
+  color: color-mix(in srgb, var(--accent) 68%, var(--muted) 32%);
+  font-weight: 700;
 }
 
 .audio-tx-slot-head {
@@ -863,6 +880,63 @@ button[disabled] {
   box-shadow: 0 14px 26px rgba(164, 53, 23, 0.16), inset 4px 0 0 var(--accent);
 }
 
+.multi-slot-card.connection-error {
+  border-color: color-mix(in srgb, var(--err) 62%, var(--line) 38%);
+  box-shadow: 0 14px 26px rgba(168, 57, 57, 0.12), inset 4px 0 0 var(--err);
+}
+
+.multi-slot-card.connection-error.talking {
+  border-color: var(--accent);
+}
+
+.multi-slot-card.muted {
+  background: #e8ecee;
+}
+
+.multi-slot-card.muted .multi-slot-status {
+  background: #e3e8ea;
+}
+
+.multi-slot-card.muted .multi-slot-talker {
+  background: #e1e6e8;
+}
+
+.multi-slot-card.receive-only .multi-ptt:disabled {
+  border-color: #c5ced2;
+  background: #d7dde0;
+  color: #6d777c;
+  cursor: not-allowed;
+}
+
+.multi-slot-management {
+  padding: 2px 0 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.multi-slot-management-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.multi-slot-management h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.multi-slot-management-summary {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+
+.multi-slot-management-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .multi-slot-head {
   display: flex;
   align-items: center;
@@ -887,7 +961,7 @@ button[disabled] {
 
 .multi-slot-status {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0;
   margin: 0;
   padding: 10px 13px;
@@ -925,11 +999,64 @@ button[disabled] {
   white-space: nowrap;
 }
 
+.multi-slot-status dd:hover,
+.multi-slot-status dd:focus-visible {
+  position: relative;
+  z-index: 2;
+  overflow: visible;
+  border-radius: 4px;
+  background: var(--card);
+  box-shadow: 0 2px 8px rgba(26, 40, 46, 0.16);
+  outline: none;
+  padding: 2px 4px;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.multi-slot-talker {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 13px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 78%, white 22%);
+  background: color-mix(in srgb, var(--card) 96%, var(--accent) 4%);
+}
+
+.multi-slot-talker-label {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.multi-slot-talker-value {
+  min-width: 0;
+  color: var(--ink);
+  font-family: "IBM Plex Mono", "Consolas", monospace;
+  font-size: 12px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .multi-slot-controls {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   gap: 8px;
   padding: 10px 13px;
+}
+
+.multi-mute-button {
+  min-width: 70px;
+}
+
+.multi-mute-button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--muted) 62%, var(--line) 38%);
+  background: #d8dfe2;
+  color: var(--ink);
 }
 
 .multi-settings-open {
@@ -1068,6 +1195,23 @@ body.embedded-slot .connect-grid-advanced {
     grid-auto-flow: row;
     justify-items: start;
     width: 100%;
+  }
+
+  .multi-slot-management-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .multi-slot-management-actions {
+    justify-content: flex-start;
+  }
+
+  .multi-slot-controls {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .multi-settings-open {
+    grid-column: 1 / -1;
   }
 
   .multi-slot-status {

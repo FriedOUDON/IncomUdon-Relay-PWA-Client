@@ -31,7 +31,7 @@
             <span id="labelLanguage">Language</span>
             <select id="languageSelect" aria-label="Language">
               <option value="en">English</option>
-              <option value="ja">日本語</option>
+              <option value="ja">&#26085;&#26412;&#35486;</option>
             </select>
           </label>
           <button id="logoutBtn" class="ghost logout-btn" type="button" hidden>Logout</button>
@@ -90,6 +90,10 @@
                   <input id="micVolume" type="range" min="0" max="300" step="1" value="200">
                   <output id="micVolumeValue" for="micVolume">200%</output>
                 </div>
+              </label>
+              <label class="checkbox-row range-setting">
+                <input id="receiveOnly" type="checkbox">
+                <span id="labelReceiveOnly">Receive-only mode</span>
               </label>
             </div>
           </div>
@@ -237,6 +241,10 @@
             <span id="labelAudioTxSlotCount">Preset Slots</span>
             <input id="audioTxSlotCount" type="text" value="3" inputmode="numeric" autocomplete="off" spellcheck="false">
           </label>
+          <label class="checkbox-row audio-tx-loop-row">
+            <input id="audioTxLoopEnabled" type="checkbox">
+            <span id="labelAudioTxLoopEnabled">Loop playback</span>
+          </label>
         </div>
         <div class="audio-tx-storage-actions">
           <button id="clearSavedMediaBtn" class="ghost" type="button">Clear Saved Files</button>
@@ -263,8 +271,11 @@
         </summary>
         <div class="settings-lock-content">
           <div class="settings-lock-actions">
+            <button id="settingsExportButton" class="ghost" type="button">Export Settings</button>
+            <button id="settingsImportButton" class="ghost" type="button">Import Settings</button>
             <button id="settingsRelockButton" class="ghost" type="button" hidden>Lock Settings</button>
             <button id="settingsDisableButton" class="ghost" type="button" hidden>Disable Settings Lock</button>
+            <input id="settingsImportFile" type="file" accept="application/json,.json" hidden>
           </div>
           <div id="settingsUnlockForm" class="settings-unlock-form" hidden>
             <label>
@@ -313,7 +324,7 @@
         }
         const swPath = basePath ? `${basePath}/sw.js` : "/sw.js";
         const scope = basePath ? `${basePath}/` : "/";
-        const swRegisterPath = `${swPath}?auth_mode=${encodeURIComponent(authMode)}&build=55`;
+        const swRegisterPath = `${swPath}?auth_mode=${encodeURIComponent(authMode)}&build=59`;
         navigator.serviceWorker.register(swRegisterPath, { scope }).catch(() => {});
       });
     }

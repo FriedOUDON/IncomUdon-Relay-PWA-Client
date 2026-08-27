@@ -4,7 +4,9 @@
   const settingsUnlockSessionKey = "incomudon.pwa.settings_lock.unlocked.v1";
   const settingsLockPBKDF2Iterations = 310000;
   const maxSlotsRaw = Number.parseInt(document.body.dataset.multiMaxSlots || "", 10);
-  const maxSlots = Math.min(10, Math.max(1, Number.isFinite(maxSlotsRaw) ? maxSlotsRaw : 4));
+  const defaultSlotsRaw = Number.parseInt(document.body.dataset.multiDefaultSlots || "", 10);
+  const maxSlots = Math.min(10, Math.max(1, Number.isFinite(maxSlotsRaw) ? maxSlotsRaw : 10));
+  const defaultSlots = Math.min(maxSlots, Math.max(1, Number.isFinite(defaultSlotsRaw) ? defaultSlotsRaw : 4));
   const settingsKey = "incomudon.pwa.multi.controls.v1";
   const localeStorageKey = "incomudon.pwa.locale.v1";
   const messageNamespace = "incomudon-slot-";
@@ -40,6 +42,9 @@
     multi_error: "Error",
     multi_none: "None",
     multi_hold_slot: "Hold to Talk ({shortcut})",
+    multi_mute: "Mute",
+    multi_unmute: "Unmute",
+    multi_receive_only_mode: "Receive-only mode",
     multi_slot_settings: "Slot settings and cue sounds",
     multi_settings_lead: "Select a slot to edit its connection, cue sounds, and local audio files.",
     multi_open_settings: "Settings",
@@ -69,6 +74,18 @@
     settings_crypto_unavailable: "This browser cannot create a settings lock because Web Crypto is unavailable.",
     settings_disable_confirm: "Disable the settings lock on this browser?",
     settings_unlock_error: "Unable to update the settings lock: {error}",
+    multi_slot_management: "Channel Slots",
+    multi_slot_count: "{count} / {max} slots",
+    multi_add_slot: "Add Slot",
+    multi_remove_slot: "Remove Slot",
+    multi_slot_limit: "Maximum of {max} slots",
+    multi_reconnecting: "Disconnected (reconnecting...)",
+    settings_export: "Export Settings",
+    settings_import: "Import Settings",
+    settings_import_invalid: "The selected file is not a valid IncomUdon settings export.",
+    settings_import_failed: "Settings import failed: {error}",
+    settings_imported: "Settings imported. Reload the page to apply the updated settings.",
+    settings_export_file: "incomudon-pwa-multi-settings.json",
   };
   let strings = { ...fallbackStrings };
 
@@ -94,6 +111,13 @@
     labelSettingsConfirmMasterPassword: document.getElementById("labelSettingsConfirmMasterPassword"),
     settingsConfirmMasterPassword: document.getElementById("settingsConfirmMasterPassword"),
     settingsEnableButton: document.getElementById("settingsEnableButton"),
+    settingsExportButton: document.getElementById("settingsExportButton"),
+    settingsImportButton: document.getElementById("settingsImportButton"),
+    settingsImportFile: document.getElementById("settingsImportFile"),
+    slotManagementHeading: document.getElementById("multiSlotManagementHeading"),
+    slotManagementSummary: document.getElementById("multiSlotManagementSummary"),
+    addSlot: document.getElementById("multiAddSlot"),
+    removeSlot: document.getElementById("multiRemoveSlot"),
     broadcastHeading: document.getElementById("multiBroadcastHeading"),
     broadcastSummary: document.getElementById("multiBroadcastSummary"),
     broadcastShortcutLabel: document.getElementById("multiBroadcastShortcutLabel"),
@@ -115,6 +139,15 @@
     settingsTabs: document.getElementById("multiSettingsTabs"),
     settingsPanes: document.getElementById("multiSettingsPanes"),
   };
+
+  const portableSlotSettingsKeys = [
+    "relayHost", "relayPort", "channelId", "senderId", "passwordHash",
+    "cryptoMode", "codecMode", "browserCodec", "wsToken", "txCodec",
+    "micVolumePercent", "qosEnabled", "fecEnabled", "codec2Lib", "opusLib",
+    "pcmOnly", "cuePttOnEnabled", "cuePttOffEnabled", "cueCarrierEnabled",
+    "cuePttOnUrl", "cuePttOffUrl", "cueCarrierUrl", "audioTxSlotCount",
+    "receiveOnly", "audioTxLoopEnabled",
+  ];
 
   const state = {
     slots: [],
@@ -323,6 +356,14 @@
       ui.settingsEnableButton.textContent = t("settings_enable");
       ui.settingsEnableButton.disabled = enabled || state.settingsLockBusy;
     }
+    if (ui.settingsExportButton) {
+      ui.settingsExportButton.textContent = t("settings_export");
+      ui.settingsExportButton.disabled = locked || state.settingsLockBusy;
+    }
+    if (ui.settingsImportButton) {
+      ui.settingsImportButton.textContent = t("settings_import");
+      ui.settingsImportButton.disabled = locked || state.settingsLockBusy;
+    }
     if (ui.settingsRelockButton) {
       ui.settingsRelockButton.textContent = t("settings_relock");
       ui.settingsRelockButton.hidden = !enabled || locked;
@@ -346,6 +387,102 @@
         : t(locked ? "settings_locked_message" : "settings_unlocked_message"));
     }
     syncSettingsLockToSlots();
+    updateSlotManagement();
+  }
+
+  function multiSlotSettingsKey(index) {
+    return `incomudon.pwa.multi.slot.${index + 1}.settings.v1`;
+  }
+
+  function readSlotPortableSettings(index) {
+    try {
+      const raw = JSON.parse(localStorage.getItem(multiSlotSettingsKey(index)) || "{}") || {};
+      const settings = {};
+      portableSlotSettingsKeys.forEach((key) => {
+        const value = raw[key];
+        if (["string", "number", "boolean"].includes(typeof value)) settings[key] = value;
+      });
+      return settings;
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function writeSlotPortableSettings(index, settings) {
+    const next = {};
+    portableSlotSettingsKeys.forEach((key) => {
+      const value = settings && settings[key];
+      if (["string", "number", "boolean"].includes(typeof value)) next[key] = value;
+    });
+    localStorage.setItem(multiSlotSettingsKey(index), JSON.stringify(next));
+  }
+
+  function downloadMultiSettings() {
+    if (isSettingsLocked()) return;
+    const slotCount = state.slots.length;
+    const documentData = {
+      format: "incomudon-pwa-settings",
+      version: 1,
+      page: "multi",
+      exportedAt: new Date().toISOString(),
+      controls: {
+        slotCount,
+        slotShortcuts: state.controls.slotShortcuts.slice(0, slotCount),
+        selected: state.controls.selected.slice(0, slotCount),
+        muted: state.controls.muted.slice(0, slotCount),
+        broadcastShortcut: state.controls.broadcastShortcut,
+        activeSettingsSlot: state.controls.activeSettingsSlot,
+      },
+      slots: Array.from({ length: slotCount }, (_, index) => readSlotPortableSettings(index)),
+    };
+    const blob = new Blob([JSON.stringify(documentData, null, 2)], { type: "application/json" });
+    const href = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = href;
+    anchor.download = t("settings_export_file");
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(href), 0);
+  }
+
+  function importMultiSettingsDocument(documentData) {
+    if (!documentData || documentData.format !== "incomudon-pwa-settings" ||
+        documentData.version !== 1 || documentData.page !== "multi" ||
+        !documentData.controls || typeof documentData.controls !== "object" ||
+        !Array.isArray(documentData.slots)) {
+      throw new Error(t("settings_import_invalid"));
+    }
+    const requestedCount = Number.parseInt(documentData.controls.slotCount, 10);
+    const slotCount = Math.min(maxSlots, Math.max(1, Number.isInteger(requestedCount) ? requestedCount : documentData.slots.length || 1));
+    const inputShortcuts = Array.isArray(documentData.controls.slotShortcuts) ? documentData.controls.slotShortcuts : [];
+    const inputSelected = Array.isArray(documentData.controls.selected) ? documentData.controls.selected : [];
+    const inputMuted = Array.isArray(documentData.controls.muted) ? documentData.controls.muted : [];
+    const active = Number.parseInt(documentData.controls.activeSettingsSlot, 10);
+    state.controls = {
+      slotCount,
+      slotShortcuts: Array.from({ length: maxSlots }, (_, index) => normalizeShortcut(inputShortcuts[index]) || defaultSlotShortcut(index)),
+      selected: Array.from({ length: maxSlots }, (_, index) => inputSelected[index] !== false),
+      muted: Array.from({ length: maxSlots }, (_, index) => inputMuted[index] === true),
+      broadcastShortcut: normalizeShortcut(documentData.controls.broadcastShortcut) || "KeyA",
+      activeSettingsSlot: Number.isInteger(active) ? Math.min(slotCount - 1, Math.max(0, active)) : 0,
+    };
+    for (let index = 0; index < slotCount; index += 1) {
+      writeSlotPortableSettings(index, documentData.slots[index] || {});
+    }
+    persistControls();
+  }
+
+  async function importMultiSettingsFile(file) {
+    if (isSettingsLocked() || !file) return;
+    try {
+      importMultiSettingsDocument(JSON.parse(await file.text()));
+      window.alert(t("settings_imported"));
+      window.location.reload();
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err || "");
+      window.alert(message === t("settings_import_invalid")
+        ? message
+        : t("settings_import_failed", { error: message }));
+    }
   }
 
   function bindSettingsLockControls() {
@@ -468,6 +605,13 @@
     });
     ui.settingsRelockButton?.addEventListener("click", relockSettings);
     ui.settingsDisableButton?.addEventListener("click", disableSettingsLock);
+    ui.settingsExportButton?.addEventListener("click", downloadMultiSettings);
+    ui.settingsImportButton?.addEventListener("click", () => ui.settingsImportFile?.click());
+    ui.settingsImportFile?.addEventListener("change", () => {
+      const file = ui.settingsImportFile.files && ui.settingsImportFile.files[0];
+      ui.settingsImportFile.value = "";
+      void importMultiSettingsFile(file);
+    });
   }
 
   function bindSettingsLockStorageSync() {
@@ -504,10 +648,14 @@
       return "";
     }
     const parts = text.split("+").filter(Boolean);
-    const code = parts.pop();
-    if (!code || /^(Control|Shift|Alt|Meta)(Left|Right)?$/.test(code)) {
+    const rawCode = parts.pop();
+    if (!rawCode || /^(Control|Shift|Alt|Meta)(Left|Right)?$/.test(rawCode)) {
       return "";
     }
+    // Treat the number-row and numpad digits as one shortcut so the default
+    // channel shortcuts work on keyboards with or without a numeric keypad.
+    const numpadDigit = /^Numpad([0-9])$/.exec(rawCode);
+    const code = numpadDigit ? `Digit${numpadDigit[1]}` : rawCode;
     const mods = new Set(parts.map((part) => part.toLowerCase()));
     const out = [];
     if (mods.has("ctrl")) out.push("Ctrl");
@@ -531,13 +679,20 @@
     }
     const slotShortcuts = Array.isArray(stored.slotShortcuts) ? stored.slotShortcuts : [];
     const selected = Array.isArray(stored.selected) ? stored.selected : [];
+    const muted = Array.isArray(stored.muted) ? stored.muted : [];
     const activeSettingsSlot = Number.parseInt(stored.activeSettingsSlot, 10);
+    const storedSlotCount = Number.parseInt(stored.slotCount, 10);
+    const slotCount = Number.isInteger(storedSlotCount)
+      ? Math.min(maxSlots, Math.max(1, storedSlotCount))
+      : defaultSlots;
     return {
+      slotCount,
       slotShortcuts: Array.from({ length: maxSlots }, (_, index) => normalizeShortcut(slotShortcuts[index]) || defaultSlotShortcut(index)),
       selected: Array.from({ length: maxSlots }, (_, index) => selected[index] !== false),
-      broadcastShortcut: normalizeShortcut(stored.broadcastShortcut) || "Shift+Digit0",
+      muted: Array.from({ length: maxSlots }, (_, index) => muted[index] === true),
+      broadcastShortcut: normalizeShortcut(stored.broadcastShortcut) || "KeyA",
       activeSettingsSlot: Number.isInteger(activeSettingsSlot)
-        ? Math.min(maxSlots - 1, Math.max(0, activeSettingsSlot))
+        ? Math.min(slotCount - 1, Math.max(0, activeSettingsSlot))
         : 0,
     };
   }
@@ -548,6 +703,61 @@
     } catch (_) {
       // Local shortcut preferences are optional.
     }
+  }
+
+  function updateSlotManagement() {
+    const count = state.slots.length;
+    if (ui.slotManagementSummary) {
+      ui.slotManagementSummary.textContent = t("multi_slot_count", { count, max: maxSlots });
+    }
+    if (ui.addSlot) {
+      ui.addSlot.textContent = t("multi_add_slot");
+      ui.addSlot.disabled = count >= maxSlots || isSettingsLocked();
+      ui.addSlot.title = count >= maxSlots ? t("multi_slot_limit", { max: maxSlots }) : "";
+    }
+    if (ui.removeSlot) {
+      ui.removeSlot.textContent = t("multi_remove_slot");
+      ui.removeSlot.disabled = count <= 1 || isSettingsLocked();
+    }
+  }
+
+  function addSlot() {
+    if (isSettingsLocked() || state.slots.length >= maxSlots) return;
+    const index = state.slots.length;
+    state.controls.slotCount = index + 1;
+    state.slots.push(createSlot(index));
+    activateSettingsSlot(index);
+    persistControls();
+    updateSlotManagement();
+    updateBroadcastView();
+    releaseKeyboardFocus();
+  }
+
+  function removeLastSlot() {
+    if (isSettingsLocked() || state.slots.length <= 1) return;
+    const index = state.slots.length - 1;
+    const slot = state.slots[index];
+    postSlotCommand(slot, { command: "disconnect" });
+    state.activeSources.forEach((targets, source) => {
+      const next = targets.filter((target) => target !== index);
+      if (next.length) state.activeSources.set(source, next);
+      else state.activeSources.delete(source);
+    });
+    state.pressedSlots.delete(index);
+    state.controls.muted[index] = false;
+    if (slot.frame) slot.frame.src = "about:blank";
+    slot.card.remove();
+    slot.settingsTab.remove();
+    slot.settingsPane.remove();
+    state.slots.pop();
+    state.controls.slotCount = state.slots.length;
+    state.controls.activeSettingsSlot = Math.min(state.controls.activeSettingsSlot, state.slots.length - 1);
+    activateSettingsSlot(state.controls.activeSettingsSlot);
+    persistControls();
+    updateSlotManagement();
+    updateBroadcastView();
+    queueReconcile();
+    releaseKeyboardFocus();
   }
 
   function slotFrameURL(index) {
@@ -582,8 +792,17 @@
     const channelPair = makeStatusPair(t("multi_channel"), "-");
     const senderPair = makeStatusPair(t("multi_sender"), "-");
     const connectionPair = makeStatusPair(t("multi_connection"), t("multi_offline"));
-    const talkerPair = makeStatusPair(t("multi_talker"), t("multi_none"));
-    status.append(channelPair.row, senderPair.row, connectionPair.row, talkerPair.row);
+    status.append(channelPair.row, senderPair.row, connectionPair.row);
+
+    const talkerFooter = document.createElement("div");
+    talkerFooter.className = "multi-slot-talker";
+    const talkerLabel = document.createElement("span");
+    talkerLabel.className = "multi-slot-talker-label";
+    talkerLabel.textContent = t("multi_talker");
+    const talkerValue = document.createElement("span");
+    talkerValue.className = "multi-slot-talker-value";
+    talkerValue.textContent = t("multi_none");
+    talkerFooter.append(talkerLabel, talkerValue);
 
     const controls = document.createElement("div");
     controls.className = "multi-slot-controls";
@@ -593,15 +812,18 @@
     ptt.disabled = true;
     const pttText = document.createElement("span");
     ptt.appendChild(pttText);
+    const mute = document.createElement("button");
+    mute.className = "ghost multi-mute-button";
+    mute.type = "button";
     const shortcut = document.createElement("button");
     shortcut.className = "ghost multi-shortcut-button";
     shortcut.type = "button";
     const settingsButton = document.createElement("button");
     settingsButton.className = "ghost multi-settings-open";
     settingsButton.type = "button";
-    controls.append(ptt, shortcut, settingsButton);
+    controls.append(ptt, mute, shortcut, settingsButton);
 
-    card.append(head, status, controls);
+    card.append(head, status, controls, talkerFooter);
     ui.slots.appendChild(card);
 
     const settingsTab = document.createElement("button");
@@ -630,13 +852,15 @@
     const slot = {
       index,
       card,
+      title,
       selected,
       channelValue: channelPair.value,
       senderValue: senderPair.value,
       connectionValue: connectionPair.value,
-      talkerValue: talkerPair.value,
+      talkerValue,
       ptt,
       pttText,
+      mute,
       shortcut,
       settingsButton,
       settingsTab,
@@ -647,12 +871,17 @@
       senderId: 0,
       talkers: [],
       channelLabel: "-",
+      channelName: "",
       senderLabel: "-",
       talkerLabels: Object.create(null),
       selfSenderId: 0,
       talkAllowed: false,
+      receiveOnly: false,
+      muted: !!state.controls.muted[index],
       micVolume: 200,
       ready: false,
+      connectionKind: "offline",
+      reconnectAttempt: 0,
     };
 
     selected.addEventListener("change", () => {
@@ -661,6 +890,14 @@
       updateSlotView(slot);
       updateBroadcastView();
       queueReconcile();
+    });
+    mute.addEventListener("click", () => {
+      state.controls.muted[index] = !state.controls.muted[index];
+      slot.muted = !!state.controls.muted[index];
+      persistControls();
+      postSlotCommand(slot, { command: "set_receive_muted", muted: slot.muted });
+      updateSlotView(slot);
+      releaseKeyboardFocus();
     });
     shortcut.addEventListener("click", () => beginShortcutCapture({ kind: "slot", index }));
     settingsButton.addEventListener("click", () => {
@@ -675,6 +912,7 @@
     frame.addEventListener("load", () => {
       slot.ready = true;
       postSettingsLockState(slot);
+      postSlotCommand(slot, { command: "set_receive_muted", muted: !!state.controls.muted[index] });
       postSlotCommand(slot, { command: "request-state" });
     });
 
@@ -683,7 +921,7 @@
   }
 
   function activateSettingsSlot(index, scrollIntoView = false) {
-    const selectedIndex = Math.min(maxSlots - 1, Math.max(0, Number(index) || 0));
+    const selectedIndex = Math.min(state.slots.length - 1, Math.max(0, Number(index) || 0));
     state.controls.activeSettingsSlot = selectedIndex;
     state.slots.forEach((slot) => {
       const active = slot.index === selectedIndex;
@@ -704,7 +942,9 @@
     const key = document.createElement("dt");
     key.textContent = label;
     const val = document.createElement("dd");
+    val.tabIndex = 0;
     val.textContent = value;
+    val.title = value;
     row.append(key, val);
     return { row, value: val };
   }
@@ -747,19 +987,60 @@
     return label || String(talkerId);
   }
 
+  function setStatusValue(element, value) {
+    if (!element) return;
+    const text = String(value || "-");
+    element.textContent = text;
+    element.title = text;
+  }
+
   function updateSlotView(slot) {
     const shortcut = state.controls.slotShortcuts[slot.index];
+    const channel = slotChannelLabel(slot);
+    const sender = slotSenderLabel(slot);
+    const reconnecting = !slot.connected && slot.connectionKind === "reconnecting";
+    const failed = !slot.connected && (reconnecting || slot.connectionKind === "unexpected-disconnected" || slot.connectionKind === "error");
+    const retainChannelName = slot.connected || reconnecting || slot.connectionKind === "unexpected-disconnected";
+    const channelName = String(slot.channelName || "").trim();
+    slot.muted = !!state.controls.muted[slot.index];
     slot.card.classList.toggle("selected", !!state.controls.selected[slot.index]);
     slot.card.classList.toggle("connected", slot.connected);
     slot.card.classList.toggle("talking", state.pressedSlots.has(slot.index));
+    slot.card.classList.toggle("muted", slot.muted);
+    slot.card.classList.toggle("receive-only", slot.receiveOnly);
+    slot.card.classList.toggle("connection-error", failed);
+    slot.card.classList.toggle("reconnecting", reconnecting);
     slot.selected.checked = !!state.controls.selected[slot.index];
-    slot.channelValue.textContent = slotChannelLabel(slot);
-    slot.senderValue.textContent = slotSenderLabel(slot);
-    slot.connectionValue.textContent = slot.connected ? t("multi_connected") : (slot.ready ? t("multi_offline") : t("multi_connecting"));
-    slot.connectionValue.className = slot.connected ? "ok" : "warn";
-    slot.talkerValue.textContent = remoteTalkerText(slot);
-    slot.ptt.disabled = !slot.connected || state.shortcutEditEnabled;
-    slot.pttText.textContent = t("multi_hold_slot", { shortcut: formatShortcut(shortcut) });
+    if (slot.title) {
+      slot.title.textContent = retainChannelName && channelName ? channel : t("multi_slot", { index: slot.index + 1 });
+      slot.title.title = slot.title.textContent;
+    }
+    setStatusValue(slot.channelValue, channel);
+    setStatusValue(slot.senderValue, sender);
+    let connectionText = t("multi_connecting");
+    let connectionClass = "warn";
+    if (slot.connected) {
+      connectionText = t("multi_connected");
+      connectionClass = "ok";
+    } else if (reconnecting) {
+      connectionText = t("multi_reconnecting");
+      connectionClass = "error";
+    } else if (failed) {
+      connectionText = t("multi_offline");
+      connectionClass = "error";
+    } else if (slot.ready) {
+      connectionText = t("multi_offline");
+    }
+    setStatusValue(slot.connectionValue, connectionText);
+    slot.connectionValue.className = connectionClass;
+    setStatusValue(slot.talkerValue, remoteTalkerText(slot));
+    slot.ptt.disabled = !slot.connected || state.shortcutEditEnabled || slot.receiveOnly;
+    slot.pttText.textContent = slot.receiveOnly
+      ? t("multi_receive_only_mode")
+      : t("multi_hold_slot", { shortcut: formatShortcut(shortcut) });
+    slot.mute.textContent = slot.muted ? t("multi_unmute") : t("multi_mute");
+    slot.mute.setAttribute("aria-pressed", slot.muted ? "true" : "false");
+    slot.mute.title = slot.muted ? t("multi_unmute") : t("multi_mute");
     slot.shortcut.textContent = formatShortcut(shortcut);
     slot.shortcut.disabled = !state.shortcutEditEnabled;
     slot.shortcut.classList.toggle("editing", state.shortcutEditEnabled);
@@ -776,6 +1057,7 @@
   function updateBroadcastView() {
     const selected = state.slots.filter((slot) => state.controls.selected[slot.index]);
     const connected = selected.filter((slot) => slot.connected);
+    const transmittable = connected.filter((slot) => !slot.receiveOnly);
     ui.broadcastSummary.textContent = connected.length
       ? t("multi_selected_connected", { selected: selected.length, connected: connected.length })
       : t("multi_no_selected_connected");
@@ -785,8 +1067,10 @@
     ui.broadcastShortcut.classList.toggle("editing", state.shortcutEditEnabled);
     ui.broadcastShortcut.setAttribute("aria-label", `${t("multi_set_shortcut")}: ${formatShortcut(shortcut)}`);
     ui.broadcastShortcut.title = state.shortcutEditEnabled ? t("multi_set_shortcut") : t("multi_shortcuts_locked");
-    ui.broadcastPtt.disabled = connected.length === 0 || state.shortcutEditEnabled;
-    ui.broadcastPttLabel.textContent = t("multi_hold_broadcast", { shortcut: formatShortcut(shortcut) });
+    ui.broadcastPtt.disabled = transmittable.length === 0 || state.shortcutEditEnabled;
+    ui.broadcastPttLabel.textContent = connected.length > 0 && transmittable.length === 0
+      ? t("multi_receive_only_mode")
+      : t("multi_hold_broadcast", { shortcut: formatShortcut(shortcut) });
     renderReceivingList();
   }
 
@@ -978,10 +1262,10 @@
       return false;
     }
     const slotTargets = state.slots
-      .filter((slot) => state.controls.slotShortcuts[slot.index] === shortcut)
+      .filter((slot) => state.controls.slotShortcuts[slot.index] === shortcut && !slot.receiveOnly)
       .map((slot) => slot.index);
     const broadcast = state.controls.broadcastShortcut === shortcut
-      ? state.slots.filter((slot) => state.controls.selected[slot.index]).map((slot) => slot.index)
+      ? state.slots.filter((slot) => state.controls.selected[slot.index] && !slot.receiveOnly).map((slot) => slot.index)
       : [];
     const targets = Array.from(new Set([...slotTargets, ...broadcast]));
     if (targets.length === 0) {
@@ -1054,7 +1338,7 @@
     state.activeSources.forEach((targets) => {
       targets.forEach((index) => {
         const slot = state.slots[index];
-        if (slot && slot.connected) desired.add(index);
+        if (slot && slot.connected && !slot.receiveOnly) desired.add(index);
       });
     });
     return desired;
@@ -1162,12 +1446,16 @@
         ? snapshot.activeTalkers.map((value) => Number(value) || 0).filter((value) => value > 0)
         : [];
       slot.channelLabel = typeof snapshot.channelLabel === "string" ? snapshot.channelLabel : (slot.channelId > 0 ? String(slot.channelId) : "-");
+      slot.channelName = typeof snapshot.channelName === "string" ? snapshot.channelName.trim() : "";
       slot.senderLabel = typeof snapshot.senderLabel === "string" ? snapshot.senderLabel : (slot.senderId > 0 ? String(slot.senderId) : "-");
       slot.talkerLabels = snapshot.talkerLabels && typeof snapshot.talkerLabels === "object"
         ? snapshot.talkerLabels
         : Object.create(null);
       slot.talkAllowed = !!snapshot.talkAllowed;
+      slot.receiveOnly = !!snapshot.receiveOnly;
       slot.micVolume = Math.min(300, Math.max(0, Number(snapshot.micVolume) || 200));
+      slot.connectionKind = typeof snapshot.connectionKind === "string" ? snapshot.connectionKind : (slot.connected ? "connected" : "offline");
+      slot.reconnectAttempt = Math.max(0, Number(snapshot.reconnectAttempt) || 0);
       updateSlotView(slot);
       updateBroadcastView();
       queueReconcile();
@@ -1251,7 +1539,9 @@
     async tryStartWithWorklet() {
       if (!this.ctx || !this.inputGain || !this.silence || !this.ctx.audioWorklet || typeof AudioWorkletNode === "undefined") return false;
       try {
-        const workletURL = `${basePath}/mic-capture-worklet.js`;
+        const workletURL = basePath
+          ? `${basePath}/worklets/mic-capture-worklet.js`
+          : "worklets/mic-capture-worklet.js";
         await this.ctx.audioWorklet.addModule(workletURL);
         this.workletNode = new AudioWorkletNode(this.ctx, "incomudon-mic-capture", {
           numberOfInputs: 1,
@@ -1383,6 +1673,9 @@
     ui.clearLog.textContent = t("clear");
     ui.settingsHeading.textContent = t("multi_slot_settings");
     ui.settingsLead.textContent = t("multi_settings_lead");
+    if (ui.slotManagementHeading) ui.slotManagementHeading.textContent = t("multi_slot_management");
+    updateSlotManagement();
+    state.slots.forEach(updateSlotView);
     applySettingsLockState();
   }
 
@@ -1391,12 +1684,17 @@
     applyStrings();
     bindSettingsLockControls();
     bindSettingsLockStorageSync();
-    for (let index = 0; index < maxSlots; index += 1) state.slots.push(createSlot(index));
+    for (let index = 0; index < state.controls.slotCount; index += 1) state.slots.push(createSlot(index));
     activateSettingsSlot(state.controls.activeSettingsSlot);
-    bindHoldPTT(ui.broadcastPtt, "broadcast", () => state.slots.filter((slot) => state.controls.selected[slot.index]).map((slot) => slot.index));
+    updateSlotManagement();
+    bindHoldPTT(ui.broadcastPtt, "broadcast", () => state.slots
+      .filter((slot) => state.controls.selected[slot.index] && !slot.receiveOnly)
+      .map((slot) => slot.index));
     updateShortcutEditView();
     ui.broadcastShortcut.addEventListener("click", () => beginShortcutCapture({ kind: "broadcast" }));
     ui.shortcutEditButton.addEventListener("click", () => setShortcutEditEnabled(!state.shortcutEditEnabled));
+    ui.addSlot?.addEventListener("click", addSlot);
+    ui.removeSlot?.addEventListener("click", removeLastSlot);
     ui.stopAll.addEventListener("click", () => {
       stopAllPTT();
       releaseKeyboardFocus();

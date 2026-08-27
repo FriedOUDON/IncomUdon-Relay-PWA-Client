@@ -64,6 +64,9 @@
     labelSettingsConfirmMasterPassword: document.getElementById("labelSettingsConfirmMasterPassword"),
     settingsConfirmMasterPassword: document.getElementById("settingsConfirmMasterPassword"),
     settingsEnableButton: document.getElementById("settingsEnableButton"),
+    settingsExportButton: document.getElementById("settingsExportButton"),
+    settingsImportButton: document.getElementById("settingsImportButton"),
+    settingsImportFile: document.getElementById("settingsImportFile"),
     advancedSettingsDetails: document.getElementById("advancedSettingsDetails"),
     cueSettingsCard: document.getElementById("cueSettingsCard"),
     audioTxSettingsCard: document.getElementById("audioTxSettingsCard"),
@@ -79,6 +82,7 @@
     txCodec: document.getElementById("txCodec"),
     micVolume: document.getElementById("micVolume"),
     micVolumeValue: document.getElementById("micVolumeValue"),
+    receiveOnly: document.getElementById("receiveOnly"),
     qosEnabled: document.getElementById("qosEnabled"),
     fecEnabled: document.getElementById("fecEnabled"),
     optionTxCodecPcm: document.getElementById("optionTxCodecPcm"),
@@ -113,6 +117,7 @@
     cuePttOffReset: document.getElementById("cuePttOffReset"),
     cueCarrierReset: document.getElementById("cueCarrierReset"),
     audioTxSlotCount: document.getElementById("audioTxSlotCount"),
+    audioTxLoopEnabled: document.getElementById("audioTxLoopEnabled"),
     audioTxSlots: document.getElementById("audioTxSlots"),
     clearSavedMediaBtn: document.getElementById("clearSavedMediaBtn"),
     logoutBtn: document.getElementById("logoutBtn"),
@@ -150,6 +155,13 @@
     settings_crypto_unavailable: "This browser cannot create a settings lock because Web Crypto is unavailable.",
     settings_disable_confirm: "Disable the settings lock on this browser?",
     settings_unlock_error: "Unable to update the settings lock: {error}",
+    settings_export: "Export Settings",
+    settings_import: "Import Settings",
+    settings_import_invalid: "The selected file is not a valid IncomUdon settings export.",
+    settings_import_failed: "Settings import failed: {error}",
+    settings_imported: "Settings imported. Reload the page to apply the updated settings.",
+    settings_export_file: "incomudon-pwa-settings.json",
+    settings_value_hidden: "Hidden while settings are locked",
     relay_host: "Relay Host",
     relay_port: "Relay Port",
     channel_id: "Channel ID",
@@ -162,6 +174,8 @@
     ws_token: "WS Token",
     tx_codec: "TX Codec",
     mic_volume: "Mic Volume",
+    receive_only: "Receive-only mode",
+    receive_only_mode: "Receive-only mode",
     tx_codec_pcm: "pcm",
     tx_codec_codec2: "codec2",
     tx_codec_opus: "opus",
@@ -195,6 +209,8 @@
     audio_tx_stop: "Stop",
     audio_tx_select_file: "Select File",
     audio_tx_delete: "Delete",
+    audio_tx_loading: "Loading...",
+    audio_tx_loop: "Loop playback",
     test: "Test",
     default: "Default",
     events: "Events",
@@ -202,6 +218,7 @@
     status_connecting: "Connecting",
     status_offline: "Offline",
     status_error: "Error",
+    status_reconnecting: "Disconnected (reconnecting...)",
     status_connected: "Connected ({host}:{port})",
     talker_none: "None",
     talker_you: "You",
@@ -209,6 +226,7 @@
     log_ws_opened: "websocket opened",
     log_ws_closed: "websocket closed",
     log_ws_error: "websocket error",
+    log_ws_reconnect_attempt: "websocket disconnected; reconnecting ({attempt}/{max})",
     log_ws_auth_required: "websocket token is required; open with ?ws_token=...",
     log_auth_session_required: "authentication session is missing or expired; please sign in again",
     log_auth_session_remaining_connect: "authentication session remaining at connect: {remaining}",
@@ -246,6 +264,7 @@
     log_audio_tx_aborted: "audio file TX aborted",
     log_audio_tx_failed: "audio file TX failed (slot {index}): {error}",
     log_audio_tx_ptt_active: "audio file TX is blocked while PTT is active",
+    log_audio_tx_receive_only: "audio file TX is unavailable in receive-only mode",
     log_tx_timeout_forced_off: "TX timed out; forcing PTT off",
     log_password_hash_failed: "password hash failed: {error}",
     log_reconnecting_settings: "settings changed; reconnecting to apply updates",
@@ -293,6 +312,8 @@
     downlinkOpusWarned: false,
     micPermissionDenied: false,
     micVolumePercent: micVolumeDefaultPercent,
+    receiveOnly: false,
+    receiveMuted: false,
     txQueue: [],
     txTimer: null,
     txTickMs: 20,
@@ -307,6 +328,8 @@
     },
     audioTxSlots: [],
     audioTxTask: null,
+    audioTxLoadingSlot: -1,
+    audioTxLoadSequence: 0,
     mediaFilesReady: false,
     mediaFilesReadyPromise: null,
     mediaStoragePersistenceRequested: false,
@@ -330,6 +353,15 @@
       port: 0,
     },
     settingsReconnectTimer: null,
+    reconnectTimer: null,
+    reconnectAttempt: 0,
+    reconnectMaxAttempts: 3,
+    disconnectRequested: false,
+    hiddenRelaySettings: {
+      relayHost: "",
+      relayPort: "",
+      wsToken: "",
+    },
     settingsLockConfig: loadSettingsLockConfig(),
     settingsUnlocked: false,
     settingsLockBusy: false,
@@ -339,6 +371,14 @@
   };
   const senderIDMin = 1;
   const senderIDMax = 0x7fffffff;
+  const portableSettingsKeys = [
+    "relayHost", "relayPort", "channelId", "senderId", "passwordHash",
+    "cryptoMode", "codecMode", "browserCodec", "wsToken", "txCodec",
+    "micVolumePercent", "qosEnabled", "fecEnabled", "codec2Lib", "opusLib",
+    "pcmOnly", "cuePttOnEnabled", "cuePttOffEnabled", "cueCarrierEnabled",
+    "cuePttOnUrl", "cuePttOffUrl", "cueCarrierUrl", "audioTxSlotCount",
+    "receiveOnly", "audioTxLoopEnabled",
+  ];
   state.settingsUnlocked = isSettingsUnlockSessionValid(state.settingsLockConfig);
 
   applyInitialFormSettings();
@@ -396,7 +436,7 @@
       ui.password.placeholder = "";
       return;
     }
-    ui.password.placeholder = hasPasswordHashToken() ? t("password_unchanged") : "";
+    ui.password.placeholder = t("password_unchanged");
   }
 
   async function sha256Hex(text) {
@@ -722,6 +762,7 @@
       senderId: Number(ui.senderId ? ui.senderId.value : 0) || 0,
       selfSenderId: Number(state.selfSenderId || 0),
       activeTalkers: Array.isArray(state.activeTalkers) ? state.activeTalkers.slice() : [],
+      channelName: directoryChannelName(Number(ui.channelId ? ui.channelId.value : 0) || 0),
       channelLabel: formatDirectoryChannelLabel(Number(ui.channelId ? ui.channelId.value : 0) || 0),
       senderLabel: formatDirectorySpeakerLabel(
         Number(ui.channelId ? ui.channelId.value : 0) || 0,
@@ -736,7 +777,11 @@
       }, Object.create(null)),
       talkAllowed: !!state.talkAllowed,
       pttPressed: !!state.pttPressed,
+      receiveOnly: !!state.receiveOnly,
+      receiveMuted: !!state.receiveMuted,
       micVolume: Number(state.micVolumePercent || micVolumeDefaultPercent),
+      connectionKind: String((state.connectionView && state.connectionView.kind) || "offline"),
+      reconnectAttempt: Number(state.reconnectAttempt || 0),
     };
   }
 
@@ -855,6 +900,13 @@
     if (data.type === "incomudon-slot-command") {
       switch (data.command) {
         case "request-state":
+          notifyEmbeddedSlotState();
+          break;
+        case "set_receive_muted":
+          state.receiveMuted = !!data.muted;
+          if (state.player) {
+            state.player.setMuted(state.receiveMuted);
+          }
           notifyEmbeddedSlotState();
           break;
         case "connect":
@@ -1076,7 +1128,13 @@
     }
   }
 
-  async function connectRelay() {
+  async function connectRelay(options = {}) {
+    const reconnecting = options && options.reconnect === true;
+    if (!reconnecting) {
+      clearReconnectTimer();
+      state.reconnectAttempt = 0;
+      state.disconnectRequested = false;
+    }
     if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
@@ -1093,9 +1151,12 @@
     ws.binaryType = "arraybuffer";
     state.ws = ws;
 
-    setConnectionView({ kind: "connecting", level: "warn" });
+    setConnectionView({ kind: reconnecting ? "reconnecting" : "connecting", level: "warn" });
 
     ws.onopen = async () => {
+      clearReconnectTimer();
+      state.reconnectAttempt = 0;
+      state.disconnectRequested = false;
       appendLog(t("log_ws_opened"), "info");
       state.micPermissionDenied = false;
       const safeSenderID = canonicalizeSenderIDField();
@@ -1198,8 +1259,8 @@
 
       sendCommand({
         type: "connect",
-        relayHost: fixedRelayEnabled ? effectiveFixedRelayHost() : ui.relayHost.value.trim(),
-        relayPort: fixedRelayEnabled ? effectiveFixedRelayPort() : Number(ui.relayPort.value),
+        relayHost: fixedRelayEnabled ? effectiveFixedRelayHost() : currentRelayHost(),
+        relayPort: fixedRelayEnabled ? effectiveFixedRelayPort() : currentRelayPort(),
         channelId: Number(ui.channelId.value),
         senderId: safeSenderID,
         password: passwordToken,
@@ -1247,6 +1308,7 @@
     };
 
     ws.onclose = (event) => {
+      const unexpected = !state.disconnectRequested;
       if (wsTokenRequired && !currentWSToken()) {
         appendLog(t("log_ws_auth_required"), "error");
       }
@@ -1258,7 +1320,12 @@
       } else {
         appendLog(t("log_ws_closed"), "warn");
       }
-      applyDisconnectedState();
+      const willRetry = unexpected && state.reconnectAttempt < state.reconnectMaxAttempts;
+      applyDisconnectedState({
+        connectionKind: willRetry ? "reconnecting" : (unexpected ? "unexpected-disconnected" : "offline"),
+        keepReconnect: willRetry,
+      });
+      if (willRetry) scheduleUnexpectedReconnect();
     };
 
     ws.onerror = () => {
@@ -1267,6 +1334,9 @@
   }
 
   function disconnectRelay() {
+    state.disconnectRequested = true;
+    clearReconnectTimer();
+    state.reconnectAttempt = 0;
     if (state.ws && state.ws.readyState === WebSocket.OPEN) {
       sendCommand({ type: "disconnect" });
       state.ws.close();
@@ -1503,8 +1573,36 @@
     return "info";
   }
 
-  function applyDisconnectedState() {
+  function clearReconnectTimer() {
+    if (!state.reconnectTimer) return;
+    window.clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
+  }
+
+  function scheduleUnexpectedReconnect() {
+    clearReconnectTimer();
+    state.reconnectAttempt += 1;
+    const attempt = state.reconnectAttempt;
+    setConnectionView({ kind: "reconnecting", level: "error" });
+    appendLog(t("log_ws_reconnect_attempt", { attempt, max: state.reconnectMaxAttempts }), "warn");
+    state.reconnectTimer = window.setTimeout(() => {
+      state.reconnectTimer = null;
+      if (state.disconnectRequested || state.connected) return;
+      connectRelay({ reconnect: true }).catch((err) => {
+        appendLog(t("log_connect_failed", { error: err && err.message ? err.message : String(err) }), "error");
+        const retry = state.reconnectAttempt < state.reconnectMaxAttempts;
+        applyDisconnectedState({
+          connectionKind: retry ? "reconnecting" : "unexpected-disconnected",
+          keepReconnect: retry,
+        });
+        if (retry) scheduleUnexpectedReconnect();
+      });
+    }, 900 * attempt);
+  }
+
+  function applyDisconnectedState(options = {}) {
     clearPendingSettingsReconnect();
+    if (!options.keepReconnect) clearReconnectTimer();
     state.connected = false;
     state.serverTalkTimeoutSec = 0;
     state.serverMultiTalkEnabled = false;
@@ -1546,7 +1644,7 @@
     refreshPTTAvailability();
     refreshAudioTxSlotsUI();
     updateTalkerStatus([], false);
-    setConnectionView({ kind: "offline", level: "warn" });
+    setConnectionView({ kind: options.connectionKind || "offline", level: options.connectionKind === "reconnecting" || options.connectionKind === "unexpected-disconnected" ? "error" : "warn" });
     notifyEmbeddedSlotState();
   }
 
@@ -1563,6 +1661,7 @@
       txCodec: initialOpusReady ? txCodecOpus : txCodecPCM,
       wsToken: initialWSToken,
       micVolumePercent: String(micVolumeDefaultPercent),
+      receiveOnly: false,
       qosEnabled: true,
       fecEnabled: true,
       codec2Lib: "",
@@ -1575,6 +1674,7 @@
       cuePttOffUrl: cueDefaults.pttOffUrl,
       cueCarrierUrl: cueDefaults.carrierUrl,
       audioTxSlotCount: "3",
+      audioTxLoopEnabled: false,
     };
     if (fixedRelayEnabled) {
       defaults.relayHost = effectiveFixedRelayHost();
@@ -1649,6 +1749,10 @@
     ui.codec2Lib.value = String(merged.codec2Lib || "");
     ui.opusLib.value = String(merged.opusLib || "");
     applyMicVolumeFromUI(merged.micVolumePercent, false);
+    if (ui.receiveOnly) {
+      ui.receiveOnly.checked = !!merged.receiveOnly;
+    }
+    state.receiveOnly = !!merged.receiveOnly;
     sanitizeSelectedTxCodec(merged.codecMode);
     ui.cuePttOnEnabled.checked = !!merged.cuePttOnEnabled;
     ui.cuePttOffEnabled.checked = !!merged.cuePttOffEnabled;
@@ -1657,6 +1761,9 @@
     ui.cuePttOffUrl.value = String(merged.cuePttOffUrl);
     ui.cueCarrierUrl.value = String(merged.cueCarrierUrl);
     ui.audioTxSlotCount.value = String(normalizeAudioTxSlotCount(merged.audioTxSlotCount));
+    if (ui.audioTxLoopEnabled) {
+      ui.audioTxLoopEnabled.checked = !!merged.audioTxLoopEnabled;
+    }
     setAudioTxSlotCount(merged.audioTxSlotCount, false);
     applyFixedRelayUIState();
     applyPasswordInputPresentation();
@@ -1677,6 +1784,7 @@
       ui.browserCodec,
       ui.wsToken,
       ui.txCodec,
+      ui.receiveOnly,
       ui.qosEnabled,
       ui.fecEnabled,
       ui.codec2Lib,
@@ -1688,6 +1796,7 @@
       ui.cuePttOffUrl,
       ui.cueCarrierUrl,
       ui.audioTxSlotCount,
+      ui.audioTxLoopEnabled,
     ];
 
     persistTargets.forEach((element) => {
@@ -1750,15 +1859,23 @@
       ui.micVolume.addEventListener("input", syncMicVolume);
       ui.micVolume.addEventListener("change", syncMicVolume);
     }
+
+    if (ui.receiveOnly && !ui.receiveOnly.dataset.receiveOnlyBound) {
+      ui.receiveOnly.dataset.receiveOnlyBound = "1";
+      ui.receiveOnly.addEventListener("change", () => {
+        applyReceiveOnlyFromUI(true);
+        persistFormSettings();
+      });
+    }
   }
 
   function hasAutoConnectConfig() {
     const relayHost = fixedRelayEnabled
       ? effectiveFixedRelayHost()
-      : String(ui.relayHost ? ui.relayHost.value : "").trim();
+      : currentRelayHost();
     const relayPort = fixedRelayEnabled
       ? Number(effectiveFixedRelayPort())
-      : Number.parseInt(String(ui.relayPort ? ui.relayPort.value : "").trim(), 10);
+      : currentRelayPort();
     const channelID = Number.parseInt(String(ui.channelId ? ui.channelId.value : "").trim(), 10);
     const passwordHash = normalizePasswordHashToken(state.passwordHash);
     return (
@@ -1862,8 +1979,8 @@
     const selectedTxCodec = sanitizeSelectedTxCodec();
     const passwordHash = normalizePasswordHashToken(state.passwordHash);
     const settings = {
-      relayHost: fixedRelayEnabled ? effectiveFixedRelayHost() : ui.relayHost.value.trim(),
-      relayPort: fixedRelayEnabled ? String(effectiveFixedRelayPort()) : ui.relayPort.value,
+      relayHost: fixedRelayEnabled ? effectiveFixedRelayHost() : currentRelayHost(),
+      relayPort: fixedRelayEnabled ? String(effectiveFixedRelayPort()) : String(currentRelayPort() || ""),
       channelId: ui.channelId.value,
       senderId: ui.senderId.value,
       passwordHash,
@@ -1873,6 +1990,7 @@
       wsToken: currentWSToken(),
       txCodec: selectedTxCodec,
       micVolumePercent: String(normalizeMicVolumePercent(ui.micVolume ? ui.micVolume.value : state.micVolumePercent)),
+      receiveOnly: !!state.receiveOnly,
       qosEnabled: ui.qosEnabled ? !!ui.qosEnabled.checked : true,
       fecEnabled: ui.fecEnabled ? !!ui.fecEnabled.checked : true,
       codec2Lib: ui.codec2Lib.value.trim(),
@@ -1885,6 +2003,7 @@
       cuePttOffUrl: ui.cuePttOffUrl.value.trim(),
       cueCarrierUrl: ui.cueCarrierUrl.value.trim(),
       audioTxSlotCount: String(normalizeAudioTxSlotCount(ui.audioTxSlotCount ? ui.audioTxSlotCount.value : 3)),
+      audioTxLoopEnabled: !!(ui.audioTxLoopEnabled && ui.audioTxLoopEnabled.checked),
     };
     try {
       localStorage.setItem(settingsStorageKey, JSON.stringify(settings));
@@ -2263,7 +2382,7 @@
   }
 
   async function clearAllSavedMediaFiles() {
-    if (state.audioTxTask) {
+    if (state.audioTxTask || hasPendingAudioTxLoad()) {
       return;
     }
     if (typeof window.confirm === "function" && !window.confirm(t("media_clear_saved_confirm"))) {
@@ -2524,9 +2643,30 @@
     refreshAudioTxSlotsUI();
   }
 
+  function hasPendingAudioTxLoad() {
+    return Number.isInteger(state.audioTxLoadingSlot) && state.audioTxLoadingSlot >= 0;
+  }
+
+  function cancelPendingAudioTxLoad() {
+    const hadPendingLoad = hasPendingAudioTxLoad();
+    state.audioTxLoadSequence += 1;
+    if (hadPendingLoad) {
+      state.audioTxLoadingSlot = -1;
+      refreshAudioTxSlotsUI();
+    }
+    return hadPendingLoad;
+  }
+
   function refreshAudioTxSlotsUI() {
+    const audioTxBusy = !!state.audioTxTask || hasPendingAudioTxLoad();
     if (ui.clearSavedMediaBtn) {
-      ui.clearSavedMediaBtn.disabled = !state.mediaFilesReady || !!state.audioTxTask;
+      ui.clearSavedMediaBtn.disabled = !state.mediaFilesReady || audioTxBusy;
+    }
+    if (ui.audioTxSlotCount) {
+      ui.audioTxSlotCount.disabled = audioTxBusy;
+    }
+    if (ui.audioTxLoopEnabled) {
+      ui.audioTxLoopEnabled.disabled = audioTxBusy;
     }
     if (!ui.audioTxSlots) {
       return;
@@ -2542,6 +2682,9 @@
 
     const activeTask = state.audioTxTask;
     const hasActiveTask = !!activeTask;
+    const loadingSlot = state.audioTxLoadingSlot;
+    const hasPendingLoad = hasPendingAudioTxLoad();
+    const hasBusyAudioTx = hasActiveTask || hasPendingLoad;
     const pttBusy = state.pttPressed && !hasActiveTask;
     const mediaFilesLoading = !state.mediaFilesReady;
 
@@ -2549,8 +2692,13 @@
       const slot = state.audioTxSlots[i] || createAudioTxSlotState();
       const row = document.createElement("div");
       row.className = "audio-tx-slot";
-      if (activeTask && activeTask.slotIndex === i) {
+      const isActiveSlot = !!(activeTask && activeTask.slotIndex === i);
+      const isLoadingSlot = loadingSlot === i;
+      if (isActiveSlot) {
         row.classList.add("active");
+      }
+      if (isLoadingSlot) {
+        row.classList.add("loading");
       }
 
       const head = document.createElement("div");
@@ -2571,7 +2719,7 @@
       hiddenInput.type = "file";
       hiddenInput.accept = "audio/*,.wav";
       hiddenInput.className = "audio-tx-file-input";
-      hiddenInput.disabled = hasActiveTask || mediaFilesLoading;
+      hiddenInput.disabled = hasBusyAudioTx || mediaFilesLoading;
       hiddenInput.addEventListener("change", () => {
         const file = hiddenInput.files && hiddenInput.files[0];
         hiddenInput.value = "";
@@ -2588,11 +2736,14 @@
       actions.className = "audio-tx-slot-actions";
 
       const sendBtn = document.createElement("button");
-      const isActiveSlot = !!(activeTask && activeTask.slotIndex === i);
       sendBtn.type = "button";
       sendBtn.className = "btn";
-      sendBtn.textContent = isActiveSlot ? t("audio_tx_stop") : t("audio_tx_send");
-      sendBtn.disabled = isActiveSlot ? false : (!state.connected || !slot.file || hasActiveTask || pttBusy || mediaFilesLoading);
+      sendBtn.textContent = isActiveSlot
+        ? t("audio_tx_stop")
+        : (isLoadingSlot ? t("audio_tx_loading") : t("audio_tx_send"));
+      sendBtn.disabled = isActiveSlot
+        ? false
+        : (!state.connected || !slot.file || hasBusyAudioTx || pttBusy || mediaFilesLoading || state.receiveOnly);
       sendBtn.addEventListener("click", () => {
         if (isActiveSlot) {
           cancelAudioTxTask(true);
@@ -2609,7 +2760,7 @@
       selectBtn.type = "button";
       selectBtn.className = "ghost";
       selectBtn.textContent = t("audio_tx_select_file");
-      selectBtn.disabled = hasActiveTask || mediaFilesLoading;
+      selectBtn.disabled = hasBusyAudioTx || mediaFilesLoading;
       selectBtn.addEventListener("click", () => {
         if (!hiddenInput.disabled) {
           hiddenInput.click();
@@ -2621,7 +2772,7 @@
       deleteBtn.type = "button";
       deleteBtn.className = "ghost";
       deleteBtn.textContent = t("audio_tx_delete");
-      deleteBtn.disabled = hasActiveTask || mediaFilesLoading || !slot.file;
+      deleteBtn.disabled = hasBusyAudioTx || mediaFilesLoading || !slot.file;
       deleteBtn.addEventListener("click", () => {
         clearAudioTxSlotFile(i, true).catch((err) => {
           appendLog(t("log_audio_tx_failed", {
@@ -2695,8 +2846,12 @@
   }
 
   async function startAudioTxFromSlot(index) {
-    if (state.audioTxTask) {
+    if (state.audioTxTask || hasPendingAudioTxLoad()) {
       appendLog(t("log_audio_tx_busy"), "warn");
+      return;
+    }
+    if (state.receiveOnly) {
+      appendLog(t("log_audio_tx_receive_only"), "warn");
       return;
     }
     if (!state.connected || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
@@ -2712,15 +2867,35 @@
       appendLog(t("log_audio_tx_missing_file", { index: index + 1 }), "warn");
       return;
     }
-    if (!(await ensureAuthSessionBeforeTransmit("audio_tx"))) {
-      return;
-    }
 
-    const frames = await decodeAudioFileToFrames(slot.file);
-    if (!frames || frames.length === 0) {
-      throw new Error("decoded audio is empty");
+    const loadSequence = state.audioTxLoadSequence + 1;
+    state.audioTxLoadSequence = loadSequence;
+    state.audioTxLoadingSlot = index;
+    refreshAudioTxSlotsUI();
+    try {
+      if (!(await ensureAuthSessionBeforeTransmit("audio_tx"))) {
+        return;
+      }
+      if (state.audioTxLoadSequence !== loadSequence || state.audioTxLoadingSlot !== index || state.receiveOnly) {
+        return;
+      }
+
+      const frames = await decodeAudioFileToFrames(slot.file);
+      if (state.audioTxLoadSequence !== loadSequence || state.audioTxLoadingSlot !== index || state.receiveOnly) {
+        return;
+      }
+      if (!frames || frames.length === 0) {
+        throw new Error("decoded audio is empty");
+      }
+      state.audioTxLoadingSlot = -1;
+      refreshAudioTxSlotsUI();
+      startAudioTxTask(index, String(slot.name || slot.file.name || "audio"), frames);
+    } finally {
+      if (state.audioTxLoadSequence === loadSequence && state.audioTxLoadingSlot === index) {
+        state.audioTxLoadingSlot = -1;
+        refreshAudioTxSlotsUI();
+      }
     }
-    startAudioTxTask(index, String(slot.name || slot.file.name || "audio"), frames);
   }
 
   async function decodeAudioFileToFrames(file) {
@@ -2763,6 +2938,9 @@
   }
 
   function startAudioTxTask(slotIndex, name, frames) {
+    if (state.receiveOnly) {
+      return;
+    }
     cancelAudioTxTask(false);
     state.txFrameIndex = 0;
     state.audioTxTask = {
@@ -2770,6 +2948,7 @@
       name,
       frames,
       next: 0,
+      loop: !!(ui.audioTxLoopEnabled && ui.audioTxLoopEnabled.checked),
       timer: null,
       finishing: false,
     };
@@ -2799,9 +2978,13 @@
       return;
     }
     if (task.next >= task.frames.length) {
-      task.finishing = true;
-      finishAudioTxTask("log_audio_tx_completed", { index: task.slotIndex + 1, name: task.name }, "info");
-      return;
+      if (task.loop) {
+        task.next = 0;
+      } else {
+        task.finishing = true;
+        finishAudioTxTask("log_audio_tx_completed", { index: task.slotIndex + 1, name: task.name }, "info");
+        return;
+      }
     }
 
     const frame = task.frames[task.next];
@@ -2854,8 +3037,12 @@
   }
 
   function cancelAudioTxTask(emitLog) {
+    const cancelledPendingLoad = cancelPendingAudioTxLoad();
     const task = state.audioTxTask;
     if (!task) {
+      if (cancelledPendingLoad && emitLog) {
+        appendLog(t("log_audio_tx_aborted"), "warn");
+      }
       return;
     }
     if (task.timer) {
@@ -2951,12 +3138,20 @@
     notifyEmbeddedSlotState();
   }
 
+  function directoryChannelName(channelId) {
+    const normalized = Number(channelId) || 0;
+    if (normalized <= 0) {
+      return "";
+    }
+    return String(state.directoryChannels[String(normalized)] || "").trim();
+  }
+
   function formatDirectoryChannelLabel(channelId) {
     const normalized = Number(channelId) || 0;
     if (normalized <= 0) {
       return "-";
     }
-    const name = state.directoryChannels[String(normalized)];
+    const name = directoryChannelName(normalized);
     return name ? `${name} (${normalized})` : String(normalized);
   }
 
@@ -3027,6 +3222,10 @@
     if (!label) {
       return;
     }
+    if (state.receiveOnly) {
+      label.textContent = t("receive_only_mode");
+      return;
+    }
     if (isLocalTxActiveForTimeout() && state.txTimeoutRemainingSec > 0) {
       label.textContent = t("hold_to_talk_remaining", { seconds: state.txTimeoutRemainingSec });
       return;
@@ -3081,6 +3280,7 @@
   }
 
   function forceStopTransmissionForTimeout() {
+    cancelPendingAudioTxLoad();
     const task = state.audioTxTask;
     if (task && task.timer) {
       window.clearInterval(task.timer);
@@ -3131,6 +3331,12 @@
         return;
       case "error":
         setConnectionStatus(t("status_error"), view.level || "error");
+        return;
+      case "reconnecting":
+        setConnectionStatus(t("status_reconnecting"), "error");
+        return;
+      case "unexpected-disconnected":
+        setConnectionStatus(t("status_offline"), "error");
         return;
       default:
         setConnectionStatus(t("status_offline"), view.level || "warn");
@@ -3336,6 +3542,14 @@
       ui.settingsEnableButton.textContent = t("settings_enable");
       ui.settingsEnableButton.disabled = enabled || state.settingsLockBusy;
     }
+    if (ui.settingsExportButton) {
+      ui.settingsExportButton.textContent = t("settings_export");
+      ui.settingsExportButton.disabled = locked || state.settingsLockBusy;
+    }
+    if (ui.settingsImportButton) {
+      ui.settingsImportButton.textContent = t("settings_import");
+      ui.settingsImportButton.disabled = locked || state.settingsLockBusy;
+    }
     if (ui.settingsRelockButton) {
       ui.settingsRelockButton.textContent = t("settings_relock");
       ui.settingsRelockButton.hidden = !enabled || locked;
@@ -3361,11 +3575,12 @@
       }
     });
 
-    [ui.channelId, ui.password, ui.senderId, ui.txCodec].forEach((element) => {
+    [ui.channelId, ui.password, ui.senderId, ui.txCodec, ui.receiveOnly].forEach((element) => {
       if (element) {
         element.disabled = locked;
       }
     });
+    applySensitiveRelayMasking(locked);
     if (ui.advancedSettingsDetails) {
       ui.advancedSettingsDetails.hidden = locked;
       if (locked) {
@@ -3385,6 +3600,66 @@
       } else {
         setSettingsLockStatus(t(locked ? "settings_locked_message" : "settings_unlocked_message"));
       }
+    }
+  }
+
+  function portableSettingsSnapshot() {
+    persistFormSettings();
+    const stored = readStoredSettings();
+    const settings = {};
+    portableSettingsKeys.forEach((key) => {
+      const value = stored[key];
+      if (["string", "number", "boolean"].includes(typeof value)) settings[key] = value;
+    });
+    // Local cue/audio files live in IndexedDB and are deliberately not exported.
+    delete settings.password;
+    return settings;
+  }
+
+  function downloadPortableSettings() {
+    if (isSettingsLocked()) return;
+    const documentData = {
+      format: "incomudon-pwa-settings",
+      version: 1,
+      page: isEmbeddedSlot ? "multi-slot" : "single",
+      exportedAt: new Date().toISOString(),
+      settings: portableSettingsSnapshot(),
+    };
+    const blob = new Blob([JSON.stringify(documentData, null, 2)], { type: "application/json" });
+    const href = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = href;
+    anchor.download = t("settings_export_file");
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(href), 0);
+  }
+
+  function importPortableSettingsDocument(documentData) {
+    if (!documentData || documentData.format !== "incomudon-pwa-settings" ||
+        documentData.version !== 1 || !documentData.settings || typeof documentData.settings !== "object") {
+      throw new Error(t("settings_import_invalid"));
+    }
+    const next = { ...readStoredSettings() };
+    portableSettingsKeys.forEach((key) => {
+      const value = documentData.settings[key];
+      if (["string", "number", "boolean"].includes(typeof value)) next[key] = value;
+    });
+    delete next.password;
+    localStorage.setItem(settingsStorageKey, JSON.stringify(next));
+  }
+
+  async function importPortableSettingsFile(file) {
+    if (isSettingsLocked() || !file) return;
+    try {
+      const parsed = JSON.parse(await file.text());
+      importPortableSettingsDocument(parsed);
+      window.alert(t("settings_imported"));
+      window.location.reload();
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err || "");
+      window.alert(message === t("settings_import_invalid")
+        ? message
+        : t("settings_import_failed", { error: message }));
     }
   }
 
@@ -3518,6 +3793,13 @@
     });
     ui.settingsRelockButton?.addEventListener("click", relockSettings);
     ui.settingsDisableButton?.addEventListener("click", disableSettingsLock);
+    ui.settingsExportButton?.addEventListener("click", downloadPortableSettings);
+    ui.settingsImportButton?.addEventListener("click", () => ui.settingsImportFile?.click());
+    ui.settingsImportFile?.addEventListener("change", () => {
+      const file = ui.settingsImportFile.files && ui.settingsImportFile.files[0];
+      ui.settingsImportFile.value = "";
+      void importPortableSettingsFile(file);
+    });
   }
 
   function bindSettingsLockStorageSync() {
@@ -3550,6 +3832,7 @@
     setText("labelWsToken", t("ws_token"));
     setText("labelTxCodec", t("tx_codec"));
     setText("labelMicVolume", t("mic_volume"));
+    setText("labelReceiveOnly", t("receive_only"));
     setText("labelQosEnabled", t("qos_enabled"));
     setText("labelFecEnabled", t("fec_enabled"));
     setText("optionTxCodecPcm", t("tx_codec_pcm"));
@@ -3582,6 +3865,7 @@
     setText("cueCarrierReset", t("default"));
     setText("headingAudioTx", t("audio_tx_files"));
     setText("labelAudioTxSlotCount", t("audio_tx_slot_count"));
+    setText("labelAudioTxLoopEnabled", t("audio_tx_loop"));
     setText("clearSavedMediaBtn", t("media_clear_saved"));
     setText("headingEvents", t("events"));
     setText("clearLogBtn", t("clear"));
@@ -3723,8 +4007,26 @@
     return message.includes("permission denied") || message.includes("denied permission");
   }
 
+  function applyReceiveOnlyFromUI(stopTransmission) {
+    const enabled = !!(ui.receiveOnly && ui.receiveOnly.checked);
+    const changed = state.receiveOnly !== enabled;
+    state.receiveOnly = enabled;
+    if (enabled && stopTransmission) {
+      const wasTransmitting = state.pttPressed;
+      cancelAudioTxTask(true);
+      if (wasTransmitting && state.pttPressed) {
+        void setPTT(false);
+      }
+    }
+    refreshPTTAvailability();
+    updatePttButtonLabel();
+    if (changed) {
+      notifyEmbeddedSlotState();
+    }
+  }
+
   function refreshPTTAvailability() {
-    ui.pttButton.disabled = !state.connected || state.micPermissionDenied || !!state.audioTxTask;
+    ui.pttButton.disabled = !state.connected || state.micPermissionDenied || state.receiveOnly;
   }
 
   function normalizeBrowserCodec(value) {
@@ -3972,6 +4274,47 @@
     ui.relayPort.disabled = true;
   }
 
+  function sensitiveRelayValue(key, input) {
+    if (input && input.dataset.lockMasked === "1") {
+      return String(state.hiddenRelaySettings[key] || "").trim();
+    }
+    return String(input ? input.value : "").trim();
+  }
+
+  function currentRelayHost() {
+    return sensitiveRelayValue("relayHost", ui.relayHost);
+  }
+
+  function currentRelayPort() {
+    const value = sensitiveRelayValue("relayPort", ui.relayPort);
+    return Number.parseInt(value, 10);
+  }
+
+  function applySensitiveRelayMasking(locked) {
+    const fields = [
+      ["relayHost", ui.relayHost],
+      ["relayPort", ui.relayPort],
+      ["wsToken", ui.wsToken],
+    ];
+    fields.forEach(([key, input]) => {
+      if (!input) return;
+      if (locked) {
+        if (input.dataset.lockMasked !== "1") {
+          state.hiddenRelaySettings[key] = String(input.value || "");
+          input.value = "";
+          input.defaultValue = "";
+          input.dataset.lockMasked = "1";
+        }
+        input.placeholder = t("settings_value_hidden");
+      } else if (input.dataset.lockMasked === "1") {
+        input.value = String(state.hiddenRelaySettings[key] || "");
+        input.defaultValue = "";
+        input.placeholder = "";
+        delete input.dataset.lockMasked;
+      }
+    });
+  }
+
   function initializeWSToken(overrides = startupQueryOverrides) {
     const fromQuery = overrides && overrides.hasWsToken
       ? String(overrides.wsToken || "").trim()
@@ -4008,7 +4351,7 @@
 
   function currentWSToken() {
     if (ui.wsToken) {
-      return String(ui.wsToken.value || "").trim();
+      return sensitiveRelayValue("wsToken", ui.wsToken);
     }
     return String(initialWSToken || "").trim();
   }
@@ -4257,8 +4600,11 @@
   }
 
   async function setPTT(pressed, emitCue = true, force = false) {
-    if (state.audioTxTask && !force) {
+    if (pressed && state.receiveOnly) {
       return;
+    }
+    if (pressed && (state.audioTxTask || hasPendingAudioTxLoad())) {
+      cancelAudioTxTask(true);
     }
     if (pressed && state.micPermissionDenied && !force) {
       return;
@@ -4600,7 +4946,7 @@
           this.onPacket(bytes);
         },
         error: (err) => {
-          appendLog(`opus encoder error: ${err.message || err}`, "warn");
+          appendLog(t("log_opus_encoder_error", { error: err.message || err }), "warn");
         },
       });
       this.encoder.configure(config);
@@ -4856,6 +5202,27 @@
       this.keepAliveSource = null;
       this.keepAliveGain = null;
       this.lastResumeAttemptMs = 0;
+      this.muted = false;
+      this.directSources = new Set();
+    }
+
+    setMuted(muted) {
+      const next = !!muted;
+      if (this.muted === next) {
+        return;
+      }
+      this.muted = next;
+      if (next) {
+        this.directSources.forEach((source) => {
+          try {
+            source.stop();
+          } catch (_) {
+            // Sources may already have completed.
+          }
+        });
+        this.directSources.clear();
+        this.resetTimeline();
+      }
     }
 
     async resume() {
@@ -5185,7 +5552,7 @@
     }
 
     playPCM(bytes, sampleRate = 8000) {
-      if (!bytes || bytes.length < 2) {
+      if (!bytes || bytes.length < 2 || this.muted) {
         return;
       }
       if (!this.ctx) {
@@ -5201,7 +5568,14 @@
       }
 
       const fromRate = Number(sampleRate) > 0 ? Number(sampleRate) : 8000;
-      const output = this.resampleContinuous(input, fromRate, this.ctx.sampleRate);
+      // Let Web Audio perform its native sample-rate conversion for direct
+      // playback.  Its resampler is substantially better than the old linear
+      // interpolation path; Android's continuous stream still needs samples
+      // at the AudioContext rate for its worklet.
+      const output = this.streamMode
+        ? this.resampleContinuous(input, fromRate, this.ctx.sampleRate)
+        : input;
+      const outputRate = this.streamMode ? this.ctx.sampleRate : fromRate;
       if (output.length <= 0) {
         return;
       }
@@ -5235,12 +5609,16 @@
         this.nextPlayTime = now + this.catchupLeadSec;
       }
 
-      const buffer = this.ctx.createBuffer(1, output.length, this.ctx.sampleRate);
+      const buffer = this.ctx.createBuffer(1, output.length, outputRate);
       buffer.copyToChannel(output, 0);
 
       const source = this.ctx.createBufferSource();
       source.buffer = buffer;
       source.connect(this.ctx.destination);
+      this.directSources.add(source);
+      source.onended = () => {
+        this.directSources.delete(source);
+      };
 
       source.start(this.nextPlayTime);
       this.nextPlayTime += buffer.duration;

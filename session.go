@@ -1163,13 +1163,19 @@ func (s *relaySession) handleCodecFrame(senderID uint32, frame []byte) {
 			return
 		default:
 			if codec == nil {
+				// A peer can change its transport codec while this browser session is
+				// active.  Do not let an unavailable stale Codec2 mapping suppress a
+				// later PCM frame (or a newly announced Opus frame) from this sender.
 				s.emitUnsupportedFrame(senderID, len(frame), "codec2 is unavailable")
-				return
-			}
-			decoded, err := codec.Decode(peerCfg.Mode, frame)
-			if err == nil {
-				s.emitDownlinkAudio(senderID, decoded)
-				return
+				s.mu.Lock()
+				delete(s.peerCodec, senderID)
+				s.mu.Unlock()
+			} else {
+				decoded, err := codec.Decode(peerCfg.Mode, frame)
+				if err == nil {
+					s.emitDownlinkAudio(senderID, decoded)
+					return
+				}
 			}
 		}
 	}

@@ -70,3 +70,37 @@ func TestResolveMultiPath(t *testing.T) {
 		})
 	}
 }
+
+func TestParseMultiDefaultSlots(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		maximum int
+		want    int
+		wantErr bool
+	}{
+		{name: "default", input: "", maximum: 10, want: defaultMultiDefaultSlots},
+		{name: "default capped", input: "", maximum: 2, want: 2},
+		{name: "minimum", input: "1", maximum: 10, want: 1},
+		{name: "maximum", input: "6", maximum: 6, want: 6},
+		{name: "too low", input: "0", maximum: 10, wantErr: true},
+		{name: "above configured maximum", input: "7", maximum: 6, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseMultiDefaultSlots(test.input, test.maximum)
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("got %d, want %d", got, test.want)
+			}
+		})
+	}
+}

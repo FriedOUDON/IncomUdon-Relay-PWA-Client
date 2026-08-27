@@ -65,7 +65,8 @@ This project supports optional `libopus.so` bundling.
 - `-fixed-relay host[:port]`
 - `INCOMUDON_FIXED_RELAY=host[:port]`
 - `-multi-max-slots 1..10`
-- `INCOMUDON_MULTI_MAX_SLOTS=1..10` (default: `4`)
+- `INCOMUDON_MULTI_MAX_SLOTS=1..10` (default: `10`)
+- `INCOMUDON_MULTI_DEFAULT_SLOTS=1..10` (default: `4`, capped by the maximum)
 - `-multi-path /custom-multi-page`
 - `INCOMUDON_MULTI_PATH=/custom-multi-page` (default: `<base-path>/multi`)
 - `-auth-mode none|basic|oidc`
@@ -234,8 +235,10 @@ uses a responsive grid and collapses to a single column on narrower screens.
 
 - URL: `<base-path>/multi` by default. For example, `-base-path /incomudon`
   exposes it at `/incomudon/multi`.
-- `INCOMUDON_MULTI_MAX_SLOTS` controls the number of visible slots. The default is
-  `4`; valid values are `1` through `10`.
+- `INCOMUDON_MULTI_MAX_SLOTS` controls the maximum number of slots a browser can add;
+  it defaults to `10` and accepts values from `1` through `10`.
+- `INCOMUDON_MULTI_DEFAULT_SLOTS` controls the initial slot count for a browser without
+  a locally saved slot count. It defaults to `4` and is capped by the configured maximum.
 - `INCOMUDON_MULTI_PATH` changes the URL. A relative value is placed under the
   configured base path; an absolute value begins with `/`.
 - Each slot has isolated connection settings, cue settings, and browser-saved local
@@ -516,8 +519,10 @@ docker compose down
 
 PWA_HOST_PORT controls the host-side port and PWA_LISTEN_PORT controls the
 container listener; both default to 50001. INCOMUDON_BASE_PATH defaults to /.
-INCOMUDON_MULTI_MAX_SLOTS defaults to 4 and INCOMUDON_MULTI_PATH defaults to the
-base path plus /multi.
+INCOMUDON_MULTI_MAX_SLOTS defaults to 10 and limits how many slots a browser can add.
+INCOMUDON_MULTI_DEFAULT_SLOTS defaults to 4 and controls the initial slot count for a
+browser without saved multi-page controls; it is capped by the configured maximum.
+INCOMUDON_MULTI_PATH defaults to the base path plus /multi.
 For HTTPS/reverse-proxy deployment, use the existing docker-compose.nginx.yml
 configuration instead of exposing this standalone service directly to the Internet.
 
