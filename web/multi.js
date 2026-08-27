@@ -1,5 +1,8 @@
 (() => {
   const basePath = document.body.dataset.basePath || "";
+  const settingsLockStorageKey = "incomudon.pwa.settings_lock.v1";
+  const settingsUnlockSessionKey = "incomudon.pwa.settings_lock.unlocked.v1";
+  const settingsLockPBKDF2Iterations = 310000;
   const maxSlotsRaw = Number.parseInt(document.body.dataset.multiMaxSlots || "", 10);
   const maxSlots = Math.min(10, Math.max(1, Number.isFinite(maxSlotsRaw) ? maxSlotsRaw : 4));
   const settingsKey = "incomudon.pwa.multi.controls.v1";
@@ -49,6 +52,23 @@
     clear: "Clear",
     multi_log_main: "Main",
     multi_log_slot: "Slot {slot}",
+    settings_lock: "Settings Lock",
+    settings_master_password: "Master Password",
+    settings_unlock: "Unlock Settings",
+    settings_relock: "Lock Settings",
+    settings_enable: "Enable Settings Lock",
+    settings_disable: "Disable Settings Lock",
+    settings_new_master_password: "New Master Password",
+    settings_confirm_master_password: "Confirm Master Password",
+    settings_disabled_message: "Settings lock is disabled for this browser.",
+    settings_locked_message: "Restricted settings are locked. Enter the master password to view or change them.",
+    settings_unlocked_message: "Restricted settings are unlocked in this browser.",
+    settings_unlock_failed: "Master password is incorrect.",
+    settings_unlock_required: "Enter the master password.",
+    settings_password_mismatch: "The master password confirmation does not match.",
+    settings_crypto_unavailable: "This browser cannot create a settings lock because Web Crypto is unavailable.",
+    settings_disable_confirm: "Disable the settings lock on this browser?",
+    settings_unlock_error: "Unable to update the settings lock: {error}",
   };
   let strings = { ...fallbackStrings };
 
@@ -58,6 +78,22 @@
     languageLabel: document.getElementById("multiLabelLanguage"),
     languageSelect: document.getElementById("multiLanguageSelect"),
     singleChannelLink: document.getElementById("singleChannelLink"),
+    settingsLockCard: document.getElementById("settingsLockCard"),
+    settingsLockDetails: document.getElementById("settingsLockDetails"),
+    settingsLockHeading: document.getElementById("settingsLockHeading"),
+    settingsLockStatus: document.getElementById("settingsLockStatus"),
+    labelSettingsMasterPassword: document.getElementById("labelSettingsMasterPassword"),
+    settingsMasterPassword: document.getElementById("settingsMasterPassword"),
+    settingsUnlockButton: document.getElementById("settingsUnlockButton"),
+    settingsRelockButton: document.getElementById("settingsRelockButton"),
+    settingsDisableButton: document.getElementById("settingsDisableButton"),
+    settingsUnlockForm: document.getElementById("settingsUnlockForm"),
+    settingsLockSetupForm: document.getElementById("settingsLockSetupForm"),
+    labelSettingsNewMasterPassword: document.getElementById("labelSettingsNewMasterPassword"),
+    settingsNewMasterPassword: document.getElementById("settingsNewMasterPassword"),
+    labelSettingsConfirmMasterPassword: document.getElementById("labelSettingsConfirmMasterPassword"),
+    settingsConfirmMasterPassword: document.getElementById("settingsConfirmMasterPassword"),
+    settingsEnableButton: document.getElementById("settingsEnableButton"),
     broadcastHeading: document.getElementById("multiBroadcastHeading"),
     broadcastSummary: document.getElementById("multiBroadcastSummary"),
     broadcastShortcutLabel: document.getElementById("multiBroadcastShortcutLabel"),
@@ -93,11 +129,357 @@
     reconcileQueued: false,
     mic: null,
     micError: "",
+    settingsLockConfig: loadSettingsLockConfig(),
+    settingsUnlocked: false,
+    settingsLockBusy: false,
   };
+
+  state.settingsUnlocked = isSettingsUnlockSessionValid(state.settingsLockConfig);
 
   function t(key, params = null) {
     const source = strings[key] || fallbackStrings[key] || key;
     return source.replace(/\{(\w+)\}/g, (_, name) => (params && params[name] !== undefined ? String(params[name]) : ""));
+  }
+
+  function defaultSettingsLockConfig() {
+    return {
+      version: 1,
+      enabled: false,
+      salt: "",
+      verifier: "",
+      iterations: settingsLockPBKDF2Iterations,
+    };
+  }
+
+  function normalizeSettingsLockConfig(raw) {
+    if (!raw || raw.version !== 1 || raw.enabled !== true ||
+        typeof raw.salt !== "string" || !raw.salt ||
+        typeof raw.verifier !== "string" || !raw.verifier) {
+      return defaultSettingsLockConfig();
+    }
+    const iterations = Number.parseInt(raw.iterations, 10);
+    if (!Number.isFinite(iterations) || iterations < 100000 || iterations > 1000000) {
+      return defaultSettingsLockConfig();
+    }
+    return {
+      version: 1,
+      enabled: true,
+      salt: raw.salt,
+      verifier: raw.verifier,
+      iterations,
+    };
+  }
+
+  function loadSettingsLockConfig() {
+    try {
+      return normalizeSettingsLockConfig(JSON.parse(localStorage.getItem(settingsLockStorageKey) || "null"));
+    } catch (_) {
+      return defaultSettingsLockConfig();
+    }
+  }
+
+  function persistSettingsLockConfig(config) {
+    try {
+      localStorage.setItem(settingsLockStorageKey, JSON.stringify(config));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function clearSettingsLockConfig() {
+    try {
+      localStorage.removeItem(settingsLockStorageKey);
+    } catch (_) {
+      // Storage failures leave the current page state usable until reload.
+    }
+  }
+
+  function isSettingsLockEnabled() {
+    return !!(state.settingsLockConfig && state.settingsLockConfig.enabled);
+  }
+
+  function isSettingsLocked() {
+    return isSettingsLockEnabled() && !state.settingsUnlocked;
+  }
+
+  function isSettingsUnlockSessionValid(config) {
+    if (!config || !config.enabled) {
+      return false;
+    }
+    try {
+      const stored = JSON.parse(sessionStorage.getItem(settingsUnlockSessionKey) || "null");
+      return !!stored && stored.verifier === config.verifier;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function persistSettingsUnlockSession() {
+    if (!isSettingsLockEnabled()) {
+      return;
+    }
+    try {
+      sessionStorage.setItem(settingsUnlockSessionKey, JSON.stringify({ verifier: state.settingsLockConfig.verifier }));
+    } catch (_) {
+      // The current page remains unlocked, but a reload will require the password again.
+    }
+  }
+
+  function clearSettingsUnlockSession() {
+    try {
+      sessionStorage.removeItem(settingsUnlockSessionKey);
+    } catch (_) {
+      // Ignore session storage failures.
+    }
+  }
+
+  function supportsSettingsLockCrypto() {
+    return !!(window.crypto && window.crypto.subtle && typeof window.crypto.getRandomValues === "function");
+  }
+
+  function bytesToBase64(bytes) {
+    let text = "";
+    bytes.forEach((value) => {
+      text += String.fromCharCode(value);
+    });
+    return btoa(text);
+  }
+
+  function base64ToBytes(value) {
+    const text = atob(String(value || ""));
+    const bytes = new Uint8Array(text.length);
+    for (let index = 0; index < text.length; index += 1) {
+      bytes[index] = text.charCodeAt(index);
+    }
+    return bytes;
+  }
+
+  async function deriveSettingsMasterVerifier(password, salt, iterations) {
+    if (!supportsSettingsLockCrypto()) {
+      throw new Error(t("settings_crypto_unavailable"));
+    }
+    const passwordKey = await window.crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(String(password)),
+      "PBKDF2",
+      false,
+      ["deriveBits"],
+    );
+    const bits = await window.crypto.subtle.deriveBits({
+      name: "PBKDF2",
+      hash: "SHA-256",
+      salt,
+      iterations,
+    }, passwordKey, 256);
+    return bytesToBase64(new Uint8Array(bits));
+  }
+
+  function constantTimeTextEqual(left, right) {
+    const a = String(left || "");
+    const b = String(right || "");
+    if (a.length !== b.length) {
+      return false;
+    }
+    let difference = 0;
+    for (let index = 0; index < a.length; index += 1) {
+      difference |= a.charCodeAt(index) ^ b.charCodeAt(index);
+    }
+    return difference === 0;
+  }
+
+  function setSettingsLockStatus(message, isError = false) {
+    if (!ui.settingsLockStatus) {
+      return;
+    }
+    ui.settingsLockStatus.textContent = message;
+    ui.settingsLockStatus.classList.toggle("error", !!isError);
+  }
+
+  function clearSettingsLockInputs() {
+    [ui.settingsMasterPassword, ui.settingsNewMasterPassword, ui.settingsConfirmMasterPassword].forEach((input) => {
+      if (input) {
+        input.value = "";
+      }
+    });
+  }
+
+  function applySettingsLockState(preserveStatus = false) {
+    const enabled = isSettingsLockEnabled();
+    const locked = isSettingsLocked();
+    document.body.classList.toggle("settings-locked", locked);
+
+    if (ui.settingsLockCard) ui.settingsLockCard.hidden = false;
+    if (ui.settingsLockDetails && locked) ui.settingsLockDetails.open = true;
+    if (ui.settingsLockHeading) ui.settingsLockHeading.textContent = t("settings_lock");
+    if (ui.labelSettingsMasterPassword) ui.labelSettingsMasterPassword.textContent = t("settings_master_password");
+    if (ui.labelSettingsNewMasterPassword) ui.labelSettingsNewMasterPassword.textContent = t("settings_new_master_password");
+    if (ui.labelSettingsConfirmMasterPassword) ui.labelSettingsConfirmMasterPassword.textContent = t("settings_confirm_master_password");
+    if (ui.settingsUnlockButton) {
+      ui.settingsUnlockButton.textContent = t("settings_unlock");
+      ui.settingsUnlockButton.disabled = !enabled || !locked || state.settingsLockBusy;
+    }
+    if (ui.settingsEnableButton) {
+      ui.settingsEnableButton.textContent = t("settings_enable");
+      ui.settingsEnableButton.disabled = enabled || state.settingsLockBusy;
+    }
+    if (ui.settingsRelockButton) {
+      ui.settingsRelockButton.textContent = t("settings_relock");
+      ui.settingsRelockButton.hidden = !enabled || locked;
+      ui.settingsRelockButton.disabled = state.settingsLockBusy;
+    }
+    if (ui.settingsDisableButton) {
+      ui.settingsDisableButton.textContent = t("settings_disable");
+      ui.settingsDisableButton.hidden = !enabled || locked;
+      ui.settingsDisableButton.disabled = state.settingsLockBusy;
+    }
+    if (ui.settingsUnlockForm) ui.settingsUnlockForm.hidden = !enabled || !locked;
+    if (ui.settingsLockSetupForm) ui.settingsLockSetupForm.hidden = enabled;
+    if (ui.settingsMasterPassword) ui.settingsMasterPassword.disabled = !enabled || !locked || state.settingsLockBusy;
+    [ui.settingsNewMasterPassword, ui.settingsConfirmMasterPassword].forEach((input) => {
+      if (input) input.disabled = enabled || state.settingsLockBusy;
+    });
+
+    if (!preserveStatus) {
+      setSettingsLockStatus(!enabled
+        ? t("settings_disabled_message")
+        : t(locked ? "settings_locked_message" : "settings_unlocked_message"));
+    }
+    syncSettingsLockToSlots();
+  }
+
+  function bindSettingsLockControls() {
+    const setBusy = (busy, preserveStatus = false) => {
+      state.settingsLockBusy = busy;
+      applySettingsLockState(preserveStatus);
+    };
+
+    const enableSettingsLock = async () => {
+      if (isSettingsLockEnabled() || state.settingsLockBusy) return;
+      const password = String(ui.settingsNewMasterPassword ? ui.settingsNewMasterPassword.value : "");
+      const confirmation = String(ui.settingsConfirmMasterPassword ? ui.settingsConfirmMasterPassword.value : "");
+      if (!password) {
+        setSettingsLockStatus(t("settings_unlock_required"), true);
+        ui.settingsNewMasterPassword?.focus();
+        return;
+      }
+      if (password !== confirmation) {
+        setSettingsLockStatus(t("settings_password_mismatch"), true);
+        ui.settingsConfirmMasterPassword?.focus();
+        return;
+      }
+      if (!supportsSettingsLockCrypto()) {
+        setSettingsLockStatus(t("settings_crypto_unavailable"), true);
+        return;
+      }
+
+      let failed = false;
+      setBusy(true);
+      try {
+        const salt = new Uint8Array(16);
+        window.crypto.getRandomValues(salt);
+        const verifier = await deriveSettingsMasterVerifier(password, salt, settingsLockPBKDF2Iterations);
+        const config = {
+          version: 1,
+          enabled: true,
+          salt: bytesToBase64(salt),
+          verifier,
+          iterations: settingsLockPBKDF2Iterations,
+        };
+        if (!persistSettingsLockConfig(config)) {
+          throw new Error("browser storage is unavailable");
+        }
+        state.settingsLockConfig = config;
+        state.settingsUnlocked = true;
+        persistSettingsUnlockSession();
+        clearSettingsLockInputs();
+      } catch (err) {
+        failed = true;
+        const message = err && err.message ? err.message : String(err || "unknown error");
+        setSettingsLockStatus(t("settings_unlock_error", { error: message }), true);
+      } finally {
+        setBusy(false, failed);
+      }
+    };
+
+    const unlockSettings = async () => {
+      if (!isSettingsLocked() || state.settingsLockBusy) return;
+      const password = String(ui.settingsMasterPassword ? ui.settingsMasterPassword.value : "");
+      if (!password) {
+        setSettingsLockStatus(t("settings_unlock_required"), true);
+        ui.settingsMasterPassword?.focus();
+        return;
+      }
+
+      let failed = false;
+      setBusy(true);
+      try {
+        const config = state.settingsLockConfig;
+        const verifier = await deriveSettingsMasterVerifier(password, base64ToBytes(config.salt), config.iterations);
+        if (!constantTimeTextEqual(verifier, config.verifier)) {
+          failed = true;
+          setSettingsLockStatus(t("settings_unlock_failed"), true);
+          return;
+        }
+        state.settingsUnlocked = true;
+        persistSettingsUnlockSession();
+        clearSettingsLockInputs();
+      } catch (err) {
+        failed = true;
+        const message = err && err.message ? err.message : String(err || "unknown error");
+        setSettingsLockStatus(t("settings_unlock_error", { error: message }), true);
+      } finally {
+        setBusy(false, failed);
+      }
+    };
+
+    const relockSettings = () => {
+      if (!isSettingsLockEnabled() || state.settingsLockBusy) return;
+      state.settingsUnlocked = false;
+      clearSettingsUnlockSession();
+      clearSettingsLockInputs();
+      applySettingsLockState();
+    };
+
+    const disableSettingsLock = () => {
+      if (!isSettingsLockEnabled() || isSettingsLocked() || state.settingsLockBusy) return;
+      if (!window.confirm(t("settings_disable_confirm"))) return;
+      clearSettingsLockConfig();
+      clearSettingsUnlockSession();
+      state.settingsLockConfig = defaultSettingsLockConfig();
+      state.settingsUnlocked = false;
+      clearSettingsLockInputs();
+      applySettingsLockState();
+    };
+
+    ui.settingsEnableButton?.addEventListener("click", () => { enableSettingsLock().catch(() => {}); });
+    ui.settingsUnlockButton?.addEventListener("click", () => { unlockSettings().catch(() => {}); });
+    ui.settingsMasterPassword?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        unlockSettings().catch(() => {});
+      }
+    });
+    ui.settingsConfirmMasterPassword?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        enableSettingsLock().catch(() => {});
+      }
+    });
+    ui.settingsRelockButton?.addEventListener("click", relockSettings);
+    ui.settingsDisableButton?.addEventListener("click", disableSettingsLock);
+  }
+
+  function bindSettingsLockStorageSync() {
+    window.addEventListener("storage", (event) => {
+      if (event.storageArea !== localStorage || event.key !== settingsLockStorageKey) {
+        return;
+      }
+      state.settingsLockConfig = loadSettingsLockConfig();
+      state.settingsUnlocked = isSettingsUnlockSessionValid(state.settingsLockConfig);
+      clearSettingsLockInputs();
+      applySettingsLockState();
+    });
   }
 
   function normalizeLogLevel(level) {
@@ -264,6 +646,9 @@
       channelId: 0,
       senderId: 0,
       talkers: [],
+      channelLabel: "-",
+      senderLabel: "-",
+      talkerLabels: Object.create(null),
       selfSenderId: 0,
       talkAllowed: false,
       micVolume: 200,
@@ -289,6 +674,7 @@
     bindHoldPTT(ptt, `slot:${index}`, () => [index]);
     frame.addEventListener("load", () => {
       slot.ready = true;
+      postSettingsLockState(slot);
       postSlotCommand(slot, { command: "request-state" });
     });
 
@@ -330,14 +716,45 @@
     slot.frame.contentWindow.postMessage({ type: `${messageNamespace}command`, slot: slot.index + 1, ...payload }, targetOrigin);
   }
 
+  function postSettingsLockState(slot) {
+    if (!slot || !slot.frame || !slot.frame.contentWindow) {
+      return;
+    }
+    slot.frame.contentWindow.postMessage({
+      type: `${messageNamespace}settings-lock`,
+      slot: slot.index + 1,
+      unlocked: !isSettingsLocked(),
+    }, targetOrigin);
+  }
+
+  function syncSettingsLockToSlots() {
+    state.slots.forEach((slot) => postSettingsLockState(slot));
+  }
+
+  function slotChannelLabel(slot) {
+    const label = String(slot && slot.channelLabel ? slot.channelLabel : "").trim();
+    return label || (slot && slot.channelId > 0 ? String(slot.channelId) : "-");
+  }
+
+  function slotSenderLabel(slot) {
+    const label = String(slot && slot.senderLabel ? slot.senderLabel : "").trim();
+    return label || (slot && slot.senderId > 0 ? String(slot.senderId) : "-");
+  }
+
+  function slotTalkerLabel(slot, talkerId) {
+    const labels = slot && slot.talkerLabels && typeof slot.talkerLabels === "object" ? slot.talkerLabels : null;
+    const label = labels ? String(labels[String(talkerId)] || "").trim() : "";
+    return label || String(talkerId);
+  }
+
   function updateSlotView(slot) {
     const shortcut = state.controls.slotShortcuts[slot.index];
     slot.card.classList.toggle("selected", !!state.controls.selected[slot.index]);
     slot.card.classList.toggle("connected", slot.connected);
     slot.card.classList.toggle("talking", state.pressedSlots.has(slot.index));
     slot.selected.checked = !!state.controls.selected[slot.index];
-    slot.channelValue.textContent = slot.channelId > 0 ? String(slot.channelId) : "-";
-    slot.senderValue.textContent = slot.senderId > 0 ? String(slot.senderId) : "-";
+    slot.channelValue.textContent = slotChannelLabel(slot);
+    slot.senderValue.textContent = slotSenderLabel(slot);
     slot.connectionValue.textContent = slot.connected ? t("multi_connected") : (slot.ready ? t("multi_offline") : t("multi_connecting"));
     slot.connectionValue.className = slot.connected ? "ok" : "warn";
     slot.talkerValue.textContent = remoteTalkerText(slot);
@@ -353,7 +770,7 @@
 
   function remoteTalkerText(slot) {
     const talkers = Array.isArray(slot.talkers) ? slot.talkers.filter((id) => id > 0 && id !== slot.selfSenderId) : [];
-    return talkers.length ? talkers.join(", ") : t("multi_none");
+    return talkers.length ? talkers.map((talkerId) => slotTalkerLabel(slot, talkerId)).join(", ") : t("multi_none");
   }
 
   function updateBroadcastView() {
@@ -388,7 +805,7 @@
       item.className = "multi-receiving-item";
       item.textContent = t("multi_receiver_slot", {
         slot: slot.index + 1,
-        channel: slot.channelId || "-",
+        channel: slotChannelLabel(slot),
         talkers: remoteTalkerText(slot),
       });
       ui.receivingList.appendChild(item);
@@ -744,6 +1161,11 @@
       slot.talkers = Array.isArray(snapshot.activeTalkers)
         ? snapshot.activeTalkers.map((value) => Number(value) || 0).filter((value) => value > 0)
         : [];
+      slot.channelLabel = typeof snapshot.channelLabel === "string" ? snapshot.channelLabel : (slot.channelId > 0 ? String(slot.channelId) : "-");
+      slot.senderLabel = typeof snapshot.senderLabel === "string" ? snapshot.senderLabel : (slot.senderId > 0 ? String(slot.senderId) : "-");
+      slot.talkerLabels = snapshot.talkerLabels && typeof snapshot.talkerLabels === "object"
+        ? snapshot.talkerLabels
+        : Object.create(null);
       slot.talkAllowed = !!snapshot.talkAllowed;
       slot.micVolume = Math.min(300, Math.max(0, Number(snapshot.micVolume) || 200));
       updateSlotView(slot);
@@ -961,11 +1383,14 @@
     ui.clearLog.textContent = t("clear");
     ui.settingsHeading.textContent = t("multi_slot_settings");
     ui.settingsLead.textContent = t("multi_settings_lead");
+    applySettingsLockState();
   }
 
   async function init() {
     await loadLocale();
     applyStrings();
+    bindSettingsLockControls();
+    bindSettingsLockStorageSync();
     for (let index = 0; index < maxSlots; index += 1) state.slots.push(createSlot(index));
     activateSettingsSlot(state.controls.activeSettingsSlot);
     bindHoldPTT(ui.broadcastPtt, "broadcast", () => state.slots.filter((slot) => state.controls.selected[slot.index]).map((slot) => slot.index));

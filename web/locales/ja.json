@@ -139,5 +139,22 @@
   "log_talker_started": "話中開始: チャンネル={channel} 話者={talker}",
   "log_talker_ended": "話中終了: チャンネル={channel} 話者={talker}",
   "multi_log_main": "メイン",
-  "multi_log_slot": "スロット {slot}"
+  "multi_log_slot": "スロット {slot}",
+  "settings_lock": "設定ロック",
+  "settings_master_password": "マスターパスワード",
+  "settings_unlock": "設定のロック解除",
+  "settings_relock": "設定をロック",
+  "settings_locked_message": "制限された設定はロックされています。閲覧または変更するにはマスターパスワードを入力してください。",
+  "settings_unlocked_message": "このブラウザでは制限された設定のロックが解除されています。",
+  "settings_unlock_failed": "マスターパスワードが正しくありません。",
+  "settings_unlock_required": "マスターパスワードを入力してください。",
+  "settings_unlock_error": "設定ロックを更新できませんでした: {error}",
+  "settings_enable": "設定ロックを有効化",
+  "settings_disable": "設定ロックを無効化",
+  "settings_new_master_password": "新しいマスターパスワード",
+  "settings_confirm_master_password": "マスターパスワード（確認）",
+  "settings_disabled_message": "このブラウザでは設定ロックは無効です。",
+  "settings_password_mismatch": "マスターパスワードの確認が一致しません。",
+  "settings_crypto_unavailable": "このブラウザでは Web Crypto を利用できないため、設定ロックを作成できません。",
+  "settings_disable_confirm": "このブラウザの設定ロックを無効にしますか？"
 }

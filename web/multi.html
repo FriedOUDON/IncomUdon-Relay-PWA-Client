@@ -35,6 +35,7 @@
       </div>
     </header>
 
+
     <section class="card multi-broadcast-card" aria-labelledby="multiBroadcastHeading">
       <div class="multi-broadcast-head">
         <div>
@@ -86,6 +87,41 @@
       <div id="multiSettingsTabs" class="multi-settings-tabs" role="tablist" aria-label="Slot settings"></div>
       <div id="multiSettingsPanes" class="multi-settings-panes"></div>
     </section>
+
+    <section id="settingsLockCard" class="card settings-lock-card" aria-live="polite">
+      <details id="settingsLockDetails" class="settings-lock-details">
+        <summary class="log-head settings-lock-summary">
+          <div>
+            <h2 id="settingsLockHeading" class="settings-lock-title">Settings Lock</h2>
+            <p id="settingsLockStatus" class="lead settings-lock-status"></p>
+          </div>
+        </summary>
+        <div class="settings-lock-content">
+          <div class="settings-lock-actions">
+            <button id="settingsRelockButton" class="ghost" type="button" hidden>Lock Settings</button>
+            <button id="settingsDisableButton" class="ghost" type="button" hidden>Disable Settings Lock</button>
+          </div>
+          <div id="settingsUnlockForm" class="settings-unlock-form" hidden>
+            <label>
+              <span id="labelSettingsMasterPassword">Master Password</span>
+              <input id="settingsMasterPassword" type="password" autocomplete="current-password">
+            </label>
+            <button id="settingsUnlockButton" class="btn btn-primary" type="button">Unlock Settings</button>
+          </div>
+          <div id="settingsLockSetupForm" class="settings-unlock-form" hidden>
+            <label>
+              <span id="labelSettingsNewMasterPassword">New Master Password</span>
+              <input id="settingsNewMasterPassword" type="password" autocomplete="new-password">
+            </label>
+            <label>
+              <span id="labelSettingsConfirmMasterPassword">Confirm Master Password</span>
+              <input id="settingsConfirmMasterPassword" type="password" autocomplete="new-password">
+            </label>
+            <button id="settingsEnableButton" class="btn btn-primary" type="button">Enable Settings Lock</button>
+          </div>
+        </div>
+      </details>
+    </section>
   </main>
 
   <script src="{{.BasePath}}/multi.js"></script>
@@ -96,7 +132,7 @@
         const authMode = String(document.body.dataset.authMode || "none").toLowerCase();
         const swPath = `${basePath}/sw.js`;
         const scope = `${basePath}/`;
-        navigator.serviceWorker.register(`${swPath}?auth_mode=${encodeURIComponent(authMode)}&build=51`, { scope }).catch(() => {});
+        navigator.serviceWorker.register(`${swPath}?auth_mode=${encodeURIComponent(authMode)}&build=55`, { scope }).catch(() => {});
       });
     }
   </script>

@@ -140,5 +140,22 @@
   "log_talker_started": "talk started: channel={channel} talker={talker}",
   "log_talker_ended": "talk ended: channel={channel} talker={talker}",
   "multi_log_main": "Main",
-  "multi_log_slot": "Slot {slot}"
+  "multi_log_slot": "Slot {slot}",
+  "settings_lock": "Settings Lock",
+  "settings_master_password": "Master Password",
+  "settings_unlock": "Unlock Settings",
+  "settings_relock": "Lock Settings",
+  "settings_locked_message": "Restricted settings are locked. Enter the master password to view or change them.",
+  "settings_unlocked_message": "Restricted settings are unlocked in this browser.",
+  "settings_unlock_failed": "Master password is incorrect.",
+  "settings_unlock_required": "Enter the master password.",
+  "settings_unlock_error": "Unable to update the settings lock: {error}",
+  "settings_enable": "Enable Settings Lock",
+  "settings_disable": "Disable Settings Lock",
+  "settings_new_master_password": "New Master Password",
+  "settings_confirm_master_password": "Confirm Master Password",
+  "settings_disabled_message": "Settings lock is disabled for this browser.",
+  "settings_password_mismatch": "The master password confirmation does not match.",
+  "settings_crypto_unavailable": "This browser cannot create a settings lock because Web Crypto is unavailable.",
+  "settings_disable_confirm": "Disable the settings lock on this browser?"
 }

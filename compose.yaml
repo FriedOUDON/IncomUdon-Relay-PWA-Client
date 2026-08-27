@@ -10,6 +10,7 @@ services:
     init: true
     ports:
       - "${PWA_HOST_PORT:-50001}:${PWA_LISTEN_PORT:-50001}"
+      - "${PWA_DIRECTORY_UDP_HOST_PORT:-51000}:${PWA_DIRECTORY_UDP_LISTEN_PORT:-51000}/udp"
     command:
       - -listen
       - ":${PWA_LISTEN_PORT:-50001}"
@@ -32,6 +33,11 @@ services:
       INCOMUDON_OIDC_SESSION_TTL: "${INCOMUDON_OIDC_SESSION_TTL:-72h}"
       INCOMUDON_CODEC2_LIB: "${INCOMUDON_CODEC2_LIB:-}"
       INCOMUDON_OPUS_LIB: "${INCOMUDON_OPUS_LIB:-}"
+      INCOMUDON_DIRECTORY_UDP_LISTEN: "${INCOMUDON_DIRECTORY_UDP_LISTEN:-}"
+      INCOMUDON_DIRECTORY_PSK_FILE: "${INCOMUDON_DIRECTORY_PSK_FILE:-}"
+      INCOMUDON_DIRECTORY_KEY_ID: "${INCOMUDON_DIRECTORY_KEY_ID:-pwa-1}"
+      INCOMUDON_DIRECTORY_UDP_ALLOW_CIDRS: "${INCOMUDON_DIRECTORY_UDP_ALLOW_CIDRS:-}"
     volumes:
       - ./third_party/libcodec2:/opt/libcodec2:ro
       - ./third_party/libopus:/opt/libopus:ro
+      - "${INCOMUDON_DIRECTORY_DATA_DIR:-./directory}:/run/incomudon-directory:ro"

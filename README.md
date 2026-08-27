@@ -49,6 +49,13 @@ This project supports optional `libopus.so` bundling.
 
 ## Runtime Options
 
+- `-directory-udp-listen :51000`
+- `INCOMUDON_DIRECTORY_UDP_LISTEN=:51000`
+- `-directory-psk-file /run/incomudon-directory/directory.psk`
+- `INCOMUDON_DIRECTORY_PSK_FILE=/run/incomudon-directory/directory.psk`
+- `-directory-key-id pwa-1` / `INCOMUDON_DIRECTORY_KEY_ID=pwa-1`
+- `-directory-udp-allow-cidrs 203.0.113.10/32`
+- `INCOMUDON_DIRECTORY_UDP_ALLOW_CIDRS=203.0.113.10/32`
 - `-codec2-lib /path/to/libcodec2.so`
 - `INCOMUDON_CODEC2_LIB=/path/to/libcodec2.so`
 - Web UI field: `Codec2 Library Path (server)`
@@ -115,6 +122,31 @@ Browser Opus requires `WebCodecs AudioEncoder` (uplink) and `WebCodecs AudioDeco
   - Minimum: `-fixed-relay` + `-auth-mode basic` (or `oidc`)
   - Stronger: `-fixed-relay` + `-auth-mode oidc` + `-ws-token`
 
+## PSK Directory Provisioning
+
+The PWA server can receive the Relay Server's PSK-protected UDP directory and
+provision its verified channel/speaker display names to authenticated browser
+WebSocket connections. Browsers never receive the PSK and never directly accept
+UDP packets.
+
+Enable the receiver by configuring both `-directory-udp-listen` and
+`-directory-psk-file`. `-directory-key-id` must match the relay's key ID and
+defaults to `pwa-1`. `-directory-udp-allow-cidrs` is optional in code but
+strongly recommended in production; it accepts a comma-separated CIDR list for
+the relay source address.
+
+The receiver verifies AES-256-GCM authentication before parsing a document. It
+requires an authenticated expiry, rejects entries that exceed protocol limits,
+rejects replays within an epoch, and keeps only a valid unexpired snapshot.
+PWA screens show a provisioned name as `Name (ID)` in active talker state and
+in talk start/end logs; forms still retain their numeric IDs and remain locally
+configured.
+
+Set the PWA and relay to the same key file through a secure out-of-band channel.
+Do not use a raw PSK in an environment variable, query string, browser storage,
+or CSV. Allow inbound UDP only from the relay's fixed IP address, and keep the
+existing HTTPS plus PWA authentication controls enabled for browser access.
+
 ## Authentication Modes
 
 - `none`: no HTTP authentication.
@@ -149,7 +181,7 @@ Scope split:
 ### Basic Example
 
 ```bash
-go run ./main.go \
+go run . \
   -listen :8080 \
   -fixed-relay 192.0.2.10:50000 \
   -auth-mode basic \
@@ -160,7 +192,7 @@ go run ./main.go \
 ### OIDC Example
 
 ```bash
-go run ./main.go \
+go run . \
   -listen :8080 \
   -base-path /incomudon/ \
   -fixed-relay 192.0.2.10:50000 \
@@ -177,6 +209,22 @@ Notes:
 - Register callback URL in your IdP as:
   - no base path: `https://<host>/auth/callback`
   - with `-base-path /incomudon/`: `https://<host>/incomudon/auth/callback`
+
+## Browser Settings Lock
+
+`Settings Lock` is configured independently in each browser profile; it does not require a
+server environment variable, cookie, or API endpoint. Enabling it stores a random salt and a
+PBKDF2-SHA-256 verifier in browser local storage. The raw master password is neither sent to
+nor retained by the server. Unlocking is remembered only for the current browser session.
+
+While locked, the UI permits only transmit bitrate, microphone volume, and multi-channel
+shortcut changes. Channel ID, channel password, sender ID, and transmit codec are disabled;
+Advanced Settings, Cue Sounds, and Audio File TX are hidden. The saved connection settings are
+not encrypted, so auto-connect continues to work without entering the master password.
+
+This is a casual UI lock, not an access-control boundary. Anyone with browser-profile access or
+developer tools can inspect or remove browser storage. Use HTTP Basic or OIDC authentication
+when relay or configuration access must be protected from untrusted users.
 
 ## Multi-Channel Console
 
@@ -280,11 +328,11 @@ The browser UI supports startup-time query overrides for controlled launch links
 ### CLI Examples
 
 ```bash
-go run ./main.go -listen :8080 -codec2-lib /opt/libcodec2/linux-x86_64/libcodec2.so
+go run . -listen :8080 -codec2-lib /opt/libcodec2/linux-x86_64/libcodec2.so
 ```
 
 ```bash
-go run ./main.go -listen :8080 -fixed-relay 192.0.2.10:50000 -ws-token change-me_yMT8rKy26FsPoHm6yN9
+go run . -listen :8080 -fixed-relay 192.0.2.10:50000 -ws-token change-me_yMT8rKy26FsPoHm6yN9
 ```
 
 ```bash
@@ -298,7 +346,7 @@ docker run --rm -p 8080:8080 \
 ## Build
 
 ```bash
-go run ./main.go -listen :8080 -base-path /
+go run . -listen :8080 -base-path /
 ```
 
 ```bash
@@ -479,3 +527,10 @@ Place optional dynamic libraries before starting Compose:
 - third_party/libopus/.../libopus.so is mounted at /opt/libopus.
 
 Keep .env private because it can contain authentication secrets and shared tokens.
+
+When directory provisioning is enabled, Compose mounts `./directory` read-only at
+`/run/incomudon-directory` and publishes `PWA_DIRECTORY_UDP_HOST_PORT` (default
+`51000`) as UDP. Set `INCOMUDON_DIRECTORY_UDP_LISTEN=:51000`,
+`INCOMUDON_DIRECTORY_PSK_FILE=/run/incomudon-directory/directory.psk`, and a
+narrow `INCOMUDON_DIRECTORY_UDP_ALLOW_CIDRS`. Keep `directory/` private; it is
+ignored by Git.

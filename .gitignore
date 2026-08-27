@@ -8,3 +8,4 @@ incomudon-pwa-client.exe
 
 # Local Docker Compose configuration can contain secrets.
 .env
+/directory/
