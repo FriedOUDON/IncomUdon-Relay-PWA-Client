@@ -156,7 +156,8 @@ existing HTTPS plus PWA authentication controls enabled for browser access.
 - `oidc` session persistence can be tuned by `-oidc-session-ttl` / `INCOMUDON_OIDC_SESSION_TTL`.
 - Logout button is shown in UI when `auth-mode` is `basic` or `oidc`.
 - When `auth-mode` is `basic`/`oidc`, Service Worker is still registered (for PWA installability), but cache storage is disabled to avoid stale-auth issues.
-- On mobile browsers, WebSocket can still be closed when app is backgrounded; this does not always mean auth expiry.
+- The server does not apply a Pong-response read deadline, because Android Chrome may freeze background pages long enough to miss control-frame handling. Failed server writes still close unusable sockets promptly.
+- Android browsers or the OS may still close a background WebSocket. When the PWA becomes visible again after an unexpected close, it restarts its bounded reconnect sequence; this does not always mean auth expiry.
 
 ### Authentication Methods Summary
 

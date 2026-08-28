@@ -89,6 +89,7 @@
     micVolume: document.getElementById("micVolume"),
     micVolumeValue: document.getElementById("micVolumeValue"),
     receiveOnly: document.getElementById("receiveOnly"),
+    selfSenderMute: document.getElementById("selfSenderMute"),
     qosEnabled: document.getElementById("qosEnabled"),
     fecEnabled: document.getElementById("fecEnabled"),
     optionTxCodecPcm: document.getElementById("optionTxCodecPcm"),
@@ -182,6 +183,7 @@
     mic_volume: "Mic Volume",
     receive_only: "Receive-only mode",
     receive_only_mode: "Receive-only mode",
+    self_sender_mute: "Mute own sender ID",
     tx_codec_pcm: "pcm",
     tx_codec_codec2: "codec2",
     tx_codec_opus: "opus",
@@ -320,6 +322,7 @@
     micVolumePercent: micVolumeDefaultPercent,
     receiveOnly: false,
     receiveMuted: false,
+    selfSenderMute: true,
     audioDebugEnabled: readAudioDebugEnabled(),
     audioStats: {
       activity: Object.create(null),
@@ -489,7 +492,7 @@
     "micVolumePercent", "qosEnabled", "fecEnabled", "codec2Lib", "opusLib",
     "pcmOnly", "cuePttOnEnabled", "cuePttOffEnabled", "cueCarrierEnabled",
     "cuePttOnUrl", "cuePttOffUrl", "cueCarrierUrl", "audioTxSlotCount",
-    "receiveOnly", "audioTxLoopEnabled",
+    "receiveOnly", "selfSenderMute", "audioTxLoopEnabled",
   ];
   state.settingsUnlocked = isSettingsUnlockSessionValid(state.settingsLockConfig);
 
@@ -884,6 +887,9 @@
     if (!document.hidden && state.player) {
       state.player.resumeIfNeeded();
     }
+    if (!document.hidden) {
+      resumeUnexpectedConnectionOnForeground();
+    }
   });
   window.addEventListener("blur", () => logAudioLifecycle("window-blur"));
   window.addEventListener("focus", () => {
@@ -924,6 +930,7 @@
       pttPressed: !!state.pttPressed,
       receiveOnly: !!state.receiveOnly,
       receiveMuted: !!state.receiveMuted,
+      selfSenderMute: !!state.selfSenderMute,
       micVolume: Number(state.micVolumePercent || micVolumeDefaultPercent),
       connectionKind: String((state.connectionView && state.connectionView.kind) || "offline"),
       reconnectAttempt: Number(state.reconnectAttempt || 0),
@@ -1414,6 +1421,7 @@
         cryptoMode: ui.cryptoMode.value,
         codecMode: selectedCodecMode,
         txCodec: selectedTxCodec,
+        selfMute: !!state.selfSenderMute,
         qosEnabled: ui.qosEnabled ? !!ui.qosEnabled.checked : true,
         fecEnabled: ui.fecEnabled ? !!ui.fecEnabled.checked : true,
         codec2Lib: ui.codec2Lib.value.trim(),
@@ -1761,6 +1769,22 @@
     }, 900 * attempt);
   }
 
+  function resumeUnexpectedConnectionOnForeground() {
+    if (state.disconnectRequested || state.connected || document.hidden) {
+      return;
+    }
+    const kind = String((state.connectionView && state.connectionView.kind) || "");
+    if (kind !== "reconnecting" && kind !== "unexpected-disconnected") {
+      return;
+    }
+    // Android may freeze the page long enough for all scheduled retries to
+    // expire while it is backgrounded. Restart the bounded retry sequence when
+    // the user returns, instead of leaving the UI disconnected indefinitely.
+    clearReconnectTimer();
+    state.reconnectAttempt = 0;
+    scheduleUnexpectedReconnect();
+  }
+
   function applyDisconnectedState(options = {}) {
     clearPendingSettingsReconnect();
     if (!options.keepReconnect) clearReconnectTimer();
@@ -1822,6 +1846,7 @@
       wsToken: initialWSToken,
       micVolumePercent: String(micVolumeDefaultPercent),
       receiveOnly: false,
+      selfSenderMute: true,
       qosEnabled: true,
       fecEnabled: true,
       codec2Lib: "",
@@ -1913,6 +1938,10 @@
       ui.receiveOnly.checked = !!merged.receiveOnly;
     }
     state.receiveOnly = !!merged.receiveOnly;
+    if (ui.selfSenderMute) {
+      ui.selfSenderMute.checked = merged.selfSenderMute !== false;
+    }
+    state.selfSenderMute = ui.selfSenderMute ? !!ui.selfSenderMute.checked : true;
     sanitizeSelectedTxCodec(merged.codecMode);
     ui.cuePttOnEnabled.checked = !!merged.cuePttOnEnabled;
     ui.cuePttOffEnabled.checked = !!merged.cuePttOffEnabled;
@@ -1945,6 +1974,7 @@
       ui.wsToken,
       ui.txCodec,
       ui.receiveOnly,
+      ui.selfSenderMute,
       ui.qosEnabled,
       ui.fecEnabled,
       ui.codec2Lib,
@@ -2024,6 +2054,13 @@
       ui.receiveOnly.dataset.receiveOnlyBound = "1";
       ui.receiveOnly.addEventListener("change", () => {
         applyReceiveOnlyFromUI(true);
+        persistFormSettings();
+      });
+    }
+    if (ui.selfSenderMute && !ui.selfSenderMute.dataset.selfSenderMuteBound) {
+      ui.selfSenderMute.dataset.selfSenderMuteBound = "1";
+      ui.selfSenderMute.addEventListener("change", () => {
+        applySelfSenderMuteFromUI();
         persistFormSettings();
       });
     }
@@ -2151,6 +2188,7 @@
       txCodec: selectedTxCodec,
       micVolumePercent: String(normalizeMicVolumePercent(ui.micVolume ? ui.micVolume.value : state.micVolumePercent)),
       receiveOnly: !!state.receiveOnly,
+      selfSenderMute: !!state.selfSenderMute,
       qosEnabled: ui.qosEnabled ? !!ui.qosEnabled.checked : true,
       fecEnabled: ui.fecEnabled ? !!ui.fecEnabled.checked : true,
       codec2Lib: ui.codec2Lib.value.trim(),
@@ -4208,6 +4246,7 @@
     setText("labelTxCodec", t("tx_codec"));
     setText("labelMicVolume", t("mic_volume"));
     setText("labelReceiveOnly", t("receive_only"));
+    setText("labelSelfSenderMute", t("self_sender_mute"));
     setText("labelQosEnabled", t("qos_enabled"));
     setText("labelFecEnabled", t("fec_enabled"));
     setText("optionTxCodecPcm", t("tx_codec_pcm"));
@@ -4396,6 +4435,18 @@
     refreshPTTAvailability();
     refreshAudioTxSlotsUI();
     updatePttButtonLabel();
+    if (changed) {
+      notifyEmbeddedSlotState();
+    }
+  }
+
+  function applySelfSenderMuteFromUI() {
+    const enabled = ui.selfSenderMute ? !!ui.selfSenderMute.checked : true;
+    const changed = state.selfSenderMute !== enabled;
+    state.selfSenderMute = enabled;
+    if (changed && state.connected) {
+      sendCommand({ type: "set_self_mute", selfMute: enabled });
+    }
     if (changed) {
       notifyEmbeddedSlotState();
     }

@@ -178,6 +178,7 @@
   "multi_reconnecting": "切断（再接続中...）",
   "receive_only": "受信専用モード",
   "receive_only_mode": "受信専用モード",
+  "self_sender_mute": "自局IDミュート",
   "audio_tx_loading": "読込中...",
   "audio_tx_loop": "ループ再生",
   "log_audio_tx_receive_only": "受信専用モード中は音源送信できません",

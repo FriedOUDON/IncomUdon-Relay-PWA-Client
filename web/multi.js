@@ -169,7 +169,7 @@
     "micVolumePercent", "qosEnabled", "fecEnabled", "codec2Lib", "opusLib",
     "pcmOnly", "cuePttOnEnabled", "cuePttOffEnabled", "cueCarrierEnabled",
     "cuePttOnUrl", "cuePttOffUrl", "cueCarrierUrl", "audioTxSlotCount",
-    "receiveOnly", "audioTxLoopEnabled",
+    "receiveOnly", "selfSenderMute", "audioTxLoopEnabled",
   ];
 
   const state = {

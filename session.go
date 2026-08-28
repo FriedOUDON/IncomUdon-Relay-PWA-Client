@@ -23,6 +23,7 @@ type sessionConfig struct {
 	CodecMode     int
 	TxCodec       string
 	PCMOnly       bool
+	SelfMute      bool
 	QosEnabled    bool
 	FecEnabled    bool
 	Codec2LibPath string
@@ -545,6 +546,18 @@ func (s *relaySession) UpdateCodec(codecMode int, pcmOnly bool) {
 	if err := s.sendCodecConfig(); err != nil {
 		s.emitError("failed to update codec config: %v", err)
 	}
+}
+
+// SetSelfMuted excludes frames whose relay sender ID matches this browser's
+// sender ID before per-speaker buffering and the downlink mix.
+func (s *relaySession) SetSelfMuted(enabled bool) {
+	s.mu.Lock()
+	s.cfg.SelfMute = enabled
+	if enabled {
+		delete(s.downlinkPCM, s.cfg.SenderID)
+		delete(s.downlinkQueues, s.cfg.SenderID)
+	}
+	s.mu.Unlock()
 }
 
 func (s *relaySession) SendPCM(frame []byte) {
@@ -1255,6 +1268,13 @@ func (s *relaySession) emitUnsupportedFrame(senderID uint32, size int, reason st
 }
 
 func (s *relaySession) emitDownlinkAudio(senderID uint32, frame []byte) {
+	s.mu.Lock()
+	selfMuted := s.cfg.SelfMute && senderID == s.cfg.SenderID
+	s.mu.Unlock()
+	if selfMuted {
+		return
+	}
+
 	frames := s.collectDownlinkPCMFrames(senderID, frame)
 	if len(frames) == 0 {
 		return

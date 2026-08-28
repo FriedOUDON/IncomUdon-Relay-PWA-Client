@@ -78,6 +78,7 @@ type clientCommand struct {
 	QosEnabled    *bool  `json:"qosEnabled,omitempty"`
 	FecEnabled    *bool  `json:"fecEnabled,omitempty"`
 	PCMOnly       *bool  `json:"pcmOnly,omitempty"`
+	SelfMute      *bool  `json:"selfMute,omitempty"`
 	Pressed       *bool  `json:"pressed,omitempty"`
 }
 
@@ -557,12 +558,6 @@ func (a *appServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
-	conn.SetPongHandler(func(string) error {
-		_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
-		return nil
-	})
-
 	writeCh := make(chan wsMessage, websocketWriteQueueCapacity)
 	writerDone := make(chan struct{})
 	go wsWriter(conn, writeCh, writerDone)
@@ -678,11 +673,15 @@ func wsWriter(conn *websocket.Conn, writeCh <-chan wsMessage, done chan<- struct
 			}
 			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if err := conn.WriteMessage(msg.msgType, msg.payload); err != nil {
+				// A failed control or data write means the peer is no longer usable.
+				// Closing here also unblocks handleWS's ReadMessage call.
+				_ = conn.Close()
 				return
 			}
 		case <-pingTicker.C:
 			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				_ = conn.Close()
 				return
 			}
 		}
@@ -757,6 +756,16 @@ func handleClientCommand(
 		}
 		current.UpdateCodec(mode, pcmOnly)
 		enqueueJSON(serverEvent{Type: "status", Level: "info", Message: "codec config updated"})
+		return current, false
+
+	case "set_self_mute":
+		if current == nil {
+			enqueueJSON(serverEvent{Type: "status", Level: "warn", Message: "self mute ignored: not connected"})
+			return current, false
+		}
+		if cmd.SelfMute != nil {
+			current.SetSelfMuted(*cmd.SelfMute)
+		}
 		return current, false
 
 	default:
@@ -836,6 +845,10 @@ func buildSessionConfig(
 	}
 	codecMode = normalizeCodecModeForTxCodec(codecMode, txCodec)
 	pcmOnly := txCodec == txCodecPCM
+	selfMute := true
+	if cmd.SelfMute != nil {
+		selfMute = *cmd.SelfMute
+	}
 
 	codec2LibPath := strings.TrimSpace(cmd.Codec2Lib)
 	if codec2LibPath == "" {
@@ -856,6 +869,7 @@ func buildSessionConfig(
 		CodecMode:     codecMode,
 		TxCodec:       txCodec,
 		PCMOnly:       pcmOnly,
+		SelfMute:      selfMute,
 		QosEnabled:    qosEnabled,
 		FecEnabled:    fecEnabled,
 		Codec2LibPath: codec2LibPath,

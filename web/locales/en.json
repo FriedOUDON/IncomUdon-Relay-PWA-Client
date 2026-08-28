@@ -178,6 +178,7 @@
   "multi_reconnecting": "Disconnected (reconnecting...)",
   "receive_only": "Receive-only mode",
   "receive_only_mode": "Receive-only mode",
+  "self_sender_mute": "Mute own sender ID",
   "audio_tx_loading": "Loading...",
   "audio_tx_loop": "Loop playback",
   "log_audio_tx_receive_only": "audio file TX is unavailable in receive-only mode",

@@ -42,3 +42,27 @@ func TestAudioFileDecodeUsesRelaySampleRate(t *testing.T) {
 		t.Fatal("audio-file decode must not resample through a default AudioContext before 8 kHz rendering")
 	}
 }
+
+func TestSelfSenderMuteWebControl(t *testing.T) {
+	index, err := fs.ReadFile(webAssets, "web/index.html")
+	if err != nil {
+		t.Fatalf("read web/index.html: %v", err)
+	}
+	if !strings.Contains(string(index), `id="selfSenderMute" type="checkbox" checked`) {
+		t.Fatal("self sender mute control must be enabled by default")
+	}
+
+	app, err := fs.ReadFile(webAssets, "web/app.js")
+	if err != nil {
+		t.Fatalf("read web/app.js: %v", err)
+	}
+	for _, snippet := range []string{
+		`selfMute: !!state.selfSenderMute,`,
+		`type: "set_self_mute", selfMute: enabled`,
+		`"receiveOnly", "selfSenderMute", "audioTxLoopEnabled"`,
+	} {
+		if !strings.Contains(string(app), snippet) {
+			t.Fatalf("self sender mute client path is missing %q", snippet)
+		}
+	}
+}
