@@ -3093,42 +3093,52 @@
   }
 
   async function decodeAudioFileToFrames(file) {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass || typeof OfflineAudioContext === "undefined") {
+    if (typeof OfflineAudioContext === "undefined") {
       throw new Error(t("mic_not_supported"));
     }
     const sourceBytes = await file.arrayBuffer();
-    const decodeContext = new AudioContextClass();
-    try {
-      const decoded = await decodeContext.decodeAudioData(sourceBytes.slice(0));
-      const targetSamples = Math.max(1, Math.ceil(decoded.duration * 8000));
-      const offline = new OfflineAudioContext(1, targetSamples, 8000);
-      const src = offline.createBufferSource();
-      src.buffer = decoded;
-      src.connect(offline.destination);
-      src.start(0);
-      const rendered = await offline.startRendering();
-      const mono = rendered.getChannelData(0);
-      if (!mono || mono.length === 0) {
-        return [];
-      }
-
-      const frameCount = Math.ceil(mono.length / 160);
-      const frames = new Array(frameCount);
-      let offset = 0;
-      for (let i = 0; i < frameCount; i += 1) {
-        const pcm = new Int16Array(160);
-        const remain = Math.min(160, mono.length - offset);
-        for (let j = 0; j < remain; j += 1) {
-          pcm[j] = floatToInt16(mono[offset + j]);
-        }
-        offset += remain;
-        frames[i] = int16ToPCMBytes(pcm);
-      }
-      return frames;
-    } finally {
-      decodeContext.close().catch(() => {});
+    // The relay accepts 160 mono samples per 20 ms frame, so its media clock is
+    // fixed at 8 kHz. Decode directly in an OfflineAudioContext at that rate.
+    // Decoding through a default AudioContext first (normally 44.1/48 kHz) and
+    // then rendering again at 8 kHz performs an unnecessary second resample.
+    // This cannot preserve source content above 4 kHz, but avoids degrading the
+    // narrowband signal before it enters the existing PCM/Codec2/Opus contract.
+    const targetSampleRate = 8000;
+    const decodeContext = new OfflineAudioContext(1, 1, targetSampleRate);
+    const decoded = await decodeContext.decodeAudioData(sourceBytes.slice(0));
+    const targetSamples = Math.max(1, Math.ceil(decoded.duration * targetSampleRate));
+    audioDebug("audio-file-decode", {
+      name: String(file && file.name ? file.name : ""),
+      decodedSampleRate: decoded.sampleRate,
+      decodedChannels: decoded.numberOfChannels,
+      targetSampleRate,
+      targetChannels: 1,
+      durationSec: decoded.duration,
+    });
+    const offline = new OfflineAudioContext(1, targetSamples, targetSampleRate);
+    const src = offline.createBufferSource();
+    src.buffer = decoded;
+    src.connect(offline.destination);
+    src.start(0);
+    const rendered = await offline.startRendering();
+    const mono = rendered.getChannelData(0);
+    if (!mono || mono.length === 0) {
+      return [];
     }
+
+    const frameCount = Math.ceil(mono.length / 160);
+    const frames = new Array(frameCount);
+    let offset = 0;
+    for (let i = 0; i < frameCount; i += 1) {
+      const pcm = new Int16Array(160);
+      const remain = Math.min(160, mono.length - offset);
+      for (let j = 0; j < remain; j += 1) {
+        pcm[j] = floatToInt16(mono[offset + j]);
+      }
+      offset += remain;
+      frames[i] = int16ToPCMBytes(pcm);
+    }
+    return frames;
   }
 
   function loadAudioTxPacerModule(ctx) {
@@ -6247,4 +6257,3 @@
     window.setTimeout(notifyEmbeddedSlotState, 0);
   }
 })();
-

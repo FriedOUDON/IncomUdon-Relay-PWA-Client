@@ -240,6 +240,17 @@ Audio-file TX is paced by the AudioContext render clock in
 frames that became stale while the page main thread was delayed. A browser
 without AudioWorklet uses a `window.setInterval` compatibility fallback.
 
+Audio-file TX is converted to **8 kHz mono PCM** before it enters the selected
+PCM, Codec2, or Opus transport. This is required by the current 160-sample/
+20 ms relay frame contract. Consequently, source content above approximately
+4 kHz cannot be preserved; a high Opus bitrate improves coding artifacts but
+cannot turn this narrowband protocol into full-band audio. The browser decodes
+the file directly into an 8 kHz `OfflineAudioContext` before mono rendering, so
+the source does not first pass through the default 44.1/48 kHz AudioContext and
+an unnecessary second resample. Full-band source playback would require a
+versioned relay/native-client protocol change, including an explicit
+sample-rate negotiation.
+
 PCM receive audio uses the continuous `pcm-playback-worklet.js` stream on
 Chrome/Edge desktop and Android. It owns a bounded jitter buffer and a
 windowed-sinc resampler from the relay's 8 kHz PCM stream to the AudioContext
