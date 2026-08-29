@@ -19,6 +19,7 @@ const (
 	cryptoNoCrypto  cryptoMode = "no-crypto"
 	cryptoLegacyXor cryptoMode = "legacy-xor"
 	cryptoAESGCM    cryptoMode = "aes-gcm"
+	cryptoAESGCMV2  cryptoMode = "aes-gcm-v2"
 )
 
 func parseCryptoMode(value string) (cryptoMode, bool) {
@@ -29,6 +30,8 @@ func parseCryptoMode(value string) (cryptoMode, bool) {
 		return cryptoLegacyXor, true
 	case cryptoAESGCM:
 		return cryptoAESGCM, true
+	case cryptoAESGCMV2:
+		return cryptoAESGCMV2, true
 	default:
 		return "", false
 	}
@@ -58,9 +61,15 @@ func newCryptoContext(mode cryptoMode, password string, channelID uint32) (*cryp
 		ctx.key = append([]byte(nil), okm[:32]...)
 		ctx.nonceBase = binary.BigEndian.Uint64(okm[32:40])
 		return ctx, nil
-	case cryptoAESGCM:
+	case cryptoAESGCM, cryptoAESGCMV2:
 		passwordKey := derivePasswordKey(password, channelID)
-		ctx.key = hkdfSHA256(passwordKey, nil, []byte("incomudon-session-aesgcm"), 32)
+		keyInfo := []byte("incomudon-session-aesgcm")
+		if mode == cryptoAESGCMV2 {
+			// Keep v2 traffic cryptographically separate from legacy AES-GCM.
+			keyInfo = []byte("incomudon-session-aesgcm-v2")
+			ctx.keyID = 2
+		}
+		ctx.key = hkdfSHA256(passwordKey, nil, keyInfo, 32)
 		ctx.nonceBase = randomNonceBase()
 
 		block, err := aes.NewCipher(ctx.key)
@@ -93,7 +102,7 @@ func (c *cryptoContext) encrypt(plaintext []byte, nonce uint64, aad []byte) ([]b
 		ciphertext := xorBytes(plaintext, c.key)
 		tag := legacyTag(c.key, ciphertext, nonce, aad)
 		return ciphertext, tag, nil
-	case cryptoAESGCM:
+	case cryptoAESGCM, cryptoAESGCMV2:
 		if c.gcm == nil {
 			return nil, nil, errors.New("aes-gcm is not initialized")
 		}
@@ -121,7 +130,7 @@ func (c *cryptoContext) decrypt(ciphertext []byte, tag []byte, nonce uint64, aad
 			return nil, errors.New("legacy tag mismatch")
 		}
 		return xorBytes(ciphertext, c.key), nil
-	case cryptoAESGCM:
+	case cryptoAESGCM, cryptoAESGCMV2:
 		if c.gcm == nil {
 			return nil, errors.New("aes-gcm is not initialized")
 		}

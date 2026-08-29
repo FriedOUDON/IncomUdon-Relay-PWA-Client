@@ -9,6 +9,10 @@ const (
 	legacyHeaderSize   = 14
 	securityHeaderSize = 12
 	authTagSize        = 16
+
+	// packetFlagAESGCMV2HeaderAAD marks packets whose fixed and security
+	// headers are authenticated as AES-GCM additional authenticated data.
+	packetFlagAESGCMV2HeaderAAD uint16 = 1 << 0
 )
 
 const (
@@ -59,6 +63,7 @@ type securityHeader struct {
 type parsedPacket struct {
 	Header      packetHeader
 	Sec         securityHeader
+	AAD         []byte
 	Payload     []byte
 	Tag         []byte
 	HasSecurity bool
@@ -120,6 +125,7 @@ func parsePacket(data []byte) (parsedPacket, bool) {
 		return parsedPacket{
 			Header:      header,
 			Sec:         sec,
+			AAD:         append([]byte(nil), data[:offset]...),
 			Payload:     payload,
 			Tag:         tag,
 			HasSecurity: true,
@@ -164,25 +170,14 @@ func buildNoCryptoPacket(pktType uint8, channelID uint32, senderID uint32, seq u
 }
 
 func buildPlainSecurePacket(pktType uint8, channelID uint32, senderID uint32, seq uint16, payload []byte) []byte {
-	packet := make([]byte, 0, fixedHeaderSize+securityHeaderSize+len(payload)+authTagSize)
-	header := make([]byte, fixedHeaderSize)
-	header[0] = protocolVersion
-	header[1] = pktType
-	binary.BigEndian.PutUint16(header[2:4], uint16(fixedHeaderSize+securityHeaderSize))
-	binary.BigEndian.PutUint32(header[4:8], channelID)
-	binary.BigEndian.PutUint32(header[8:12], senderID)
-	binary.BigEndian.PutUint16(header[12:14], seq)
-	binary.BigEndian.PutUint16(header[14:16], 0)
-
-	packet = append(packet, header...)
-	packet = append(packet, make([]byte, securityHeaderSize)...)
+	packet := buildSecurePacketPrefix(pktType, channelID, senderID, seq, 0, 0, 0)
 	packet = append(packet, payload...)
 	packet = append(packet, make([]byte, authTagSize)...)
 	return packet
 }
 
-func buildEncryptedPacket(pktType uint8, channelID uint32, senderID uint32, seq uint16, nonce uint64, keyID uint32, ciphertext []byte, tag []byte) []byte {
-	packet := make([]byte, 0, fixedHeaderSize+securityHeaderSize+len(ciphertext)+len(tag))
+func buildSecurePacketPrefix(pktType uint8, channelID uint32, senderID uint32, seq uint16, nonce uint64, keyID uint32, flags uint16) []byte {
+	packet := make([]byte, 0, fixedHeaderSize+securityHeaderSize)
 	header := make([]byte, fixedHeaderSize)
 	header[0] = protocolVersion
 	header[1] = pktType
@@ -190,15 +185,26 @@ func buildEncryptedPacket(pktType uint8, channelID uint32, senderID uint32, seq 
 	binary.BigEndian.PutUint32(header[4:8], channelID)
 	binary.BigEndian.PutUint32(header[8:12], senderID)
 	binary.BigEndian.PutUint16(header[12:14], seq)
-	binary.BigEndian.PutUint16(header[14:16], 0)
+	binary.BigEndian.PutUint16(header[14:16], flags)
 
 	sec := make([]byte, securityHeaderSize)
 	binary.BigEndian.PutUint64(sec[0:8], nonce)
 	binary.BigEndian.PutUint32(sec[8:12], keyID)
-
 	packet = append(packet, header...)
 	packet = append(packet, sec...)
+	return packet
+}
+
+func buildEncryptedPacket(pktType uint8, channelID uint32, senderID uint32, seq uint16, nonce uint64, keyID uint32, flags uint16, ciphertext []byte, tag []byte) []byte {
+	packet := buildSecurePacketPrefix(pktType, channelID, senderID, seq, nonce, keyID, flags)
 	packet = append(packet, ciphertext...)
 	packet = append(packet, tag...)
 	return packet
+}
+
+func securePacketAAD(pktType uint8, channelID uint32, senderID uint32, seq uint16, nonce uint64, keyID uint32, flags uint16) []byte {
+	if flags&packetFlagAESGCMV2HeaderAAD == 0 {
+		return nil
+	}
+	return buildSecurePacketPrefix(pktType, channelID, senderID, seq, nonce, keyID, flags)
 }

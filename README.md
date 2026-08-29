@@ -101,6 +101,23 @@ Codec2 paths are disabled and PWA falls back to PCM.
 
 Browser Opus requires `WebCodecs AudioEncoder` (uplink) and `WebCodecs AudioDecoder` (downlink).
 
+## Media Encryption Modes
+
+- `aes-gcm`: legacy AES-256-GCM media encryption. Audio/FEC payloads are
+  encrypted, but their UDP headers are not authenticated as AEAD data.
+- `aes-gcm-v2`: AES-256-GCM with the fixed 16-byte and security 12-byte UDP
+  headers supplied as additional authenticated data (AAD). Audio/FEC payloads
+  remain encrypted and packet size is unchanged. Any modification to the
+  packet type, channel ID, sender ID, sequence, flags, nonce, or key ID makes
+  decryption fail.
+- `legacy-xor`: compatibility-only mode.
+
+`aes-gcm-v2` derives a separate media key and is intentionally incompatible
+with `aes-gcm`. Update every participating native/PWA client, then select
+`aes-gcm-v2` for the channel. The Relay forwards v2 media packets without
+decrypting them. PTT/JOIN/LEAVE and other Relay control packets are outside
+the v2 media-AAD scope.
+
 ## Security Hardening (Public Deployment)
 
 - For public deployment, enabling both `-fixed-relay` and an authentication mode (`-auth-mode basic|oidc`) is **strongly recommended**.

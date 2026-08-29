@@ -1310,7 +1310,19 @@ func (s *relaySession) decryptRealtimePayload(pkt parsedPacket) ([]byte, bool) {
 	if !pkt.HasSecurity {
 		return nil, false
 	}
-	decoded, err := s.crypto.decrypt(pkt.Payload, pkt.Tag, pkt.Sec.Nonce, nil)
+
+	var aad []byte
+	if mode == cryptoAESGCMV2 {
+		if pkt.Header.Flags&packetFlagAESGCMV2HeaderAAD == 0 || len(pkt.AAD) != fixedHeaderSize+securityHeaderSize {
+			return nil, false
+		}
+		aad = pkt.AAD
+	} else if pkt.Header.Flags&packetFlagAESGCMV2HeaderAAD != 0 {
+		// Do not silently downgrade a v2 packet into a legacy AAD-free check.
+		return nil, false
+	}
+
+	decoded, err := s.crypto.decrypt(pkt.Payload, pkt.Tag, pkt.Sec.Nonce, aad)
 	if err != nil {
 		return nil, false
 	}
@@ -1783,11 +1795,16 @@ func (s *relaySession) sendAudioFrame(frame []byte, sourceCodecID uint8) error {
 	if mode == cryptoNoCrypto {
 		packet = buildNoCryptoPacket(pktAudio, channelID, senderID, seq, payload)
 	} else {
-		ciphertext, tag, err := s.crypto.encrypt(payload, nonce, nil)
+		flags := uint16(0)
+		if mode == cryptoAESGCMV2 {
+			flags |= packetFlagAESGCMV2HeaderAAD
+		}
+		aad := securePacketAAD(pktAudio, channelID, senderID, seq, nonce, keyID, flags)
+		ciphertext, tag, err := s.crypto.encrypt(payload, nonce, aad)
 		if err != nil {
 			return err
 		}
-		packet = buildEncryptedPacket(pktAudio, channelID, senderID, seq, nonce, keyID, ciphertext, tag)
+		packet = buildEncryptedPacket(pktAudio, channelID, senderID, seq, nonce, keyID, flags, ciphertext, tag)
 	}
 
 	_, err := s.conn.WriteToUDP(packet, addr)
@@ -1823,11 +1840,16 @@ func (s *relaySession) sendAudioFrame(frame []byte, sourceCodecID uint8) error {
 		if mode == cryptoNoCrypto {
 			fecPacket = buildNoCryptoPacket(pktFec, channelID, senderID, fecSeq, fecPayload)
 		} else {
-			ciphertext, tag, encErr := s.crypto.encrypt(fecPayload, fecNonce, nil)
+			flags := uint16(0)
+			if mode == cryptoAESGCMV2 {
+				flags |= packetFlagAESGCMV2HeaderAAD
+			}
+			aad := securePacketAAD(pktFec, channelID, senderID, fecSeq, fecNonce, fecKeyID, flags)
+			ciphertext, tag, encErr := s.crypto.encrypt(fecPayload, fecNonce, aad)
 			if encErr != nil {
 				return encErr
 			}
-			fecPacket = buildEncryptedPacket(pktFec, channelID, senderID, fecSeq, fecNonce, fecKeyID, ciphertext, tag)
+			fecPacket = buildEncryptedPacket(pktFec, channelID, senderID, fecSeq, fecNonce, fecKeyID, flags, ciphertext, tag)
 		}
 
 		if _, err := s.conn.WriteToUDP(fecPacket, addr); err != nil {
