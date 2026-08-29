@@ -450,7 +450,10 @@ func (s *relaySession) emitRelayAddressFallback(from *net.UDPAddr, to *net.UDPAd
 	if strings.TrimSpace(reason) != "" {
 		message += fmt.Sprintf(" (%s)", reason)
 	}
-	s.emitEvent(serverEvent{Type: "status", Level: "debug", Message: message})
+	log.Print(message)
+	// Relay candidates can contain server-managed addresses. Keep the browser
+	// notification useful without exposing those endpoint details.
+	s.emitEvent(serverEvent{Type: "status", Level: "debug", Message: "Relay address fallback applied"})
 }
 
 func (s *relaySession) Start() {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -55,5 +56,28 @@ func TestAdvanceRelayAddressUsesNextCandidate(t *testing.T) {
 	}
 	if !udpAddrEqual(from, ipv6) || !udpAddrEqual(to, ipv4) || !udpAddrEqual(session.relayAddr, ipv4) {
 		t.Fatalf("unexpected relay fallback: from=%v to=%v active=%v", from, to, session.relayAddr)
+	}
+}
+
+func TestRelayAddressFallbackEventOmitsEndpointDetails(t *testing.T) {
+	var event serverEvent
+	session := &relaySession{
+		cb: sessionCallbacks{
+			onEvent: func(next serverEvent) {
+				event = next
+			},
+		},
+	}
+	from := &net.UDPAddr{IP: net.ParseIP("2001:db8::20"), Port: 50000}
+	to := &net.UDPAddr{IP: net.ParseIP("198.51.100.20"), Port: 50000}
+	session.emitRelayAddressFallback(from, to, "join send failed: network is unreachable")
+
+	if event.Type != "status" || event.Level != "debug" || event.Message != "Relay address fallback applied" {
+		t.Fatalf("unexpected relay fallback event: %#v", event)
+	}
+	for _, detail := range []string{from.String(), to.String(), "network is unreachable"} {
+		if strings.Contains(event.Message, detail) {
+			t.Fatalf("relay fallback event exposed endpoint detail %q: %#v", detail, event)
+		}
 	}
 }
