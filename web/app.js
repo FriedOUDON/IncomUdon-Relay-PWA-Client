@@ -2175,7 +2175,7 @@
       channelId: "1",
       senderId: String(randomSenderID()),
       passwordHash: "",
-      cryptoMode: "aes-gcm",
+      cryptoMode: "aes-gcm-v2",
       codecMode: initialOpusReady ? String(defaultOpusBitrate) : "1600",
       browserCodec: "opus",
       txCodec: initialOpusReady ? txCodecOpus : txCodecPCM,

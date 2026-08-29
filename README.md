@@ -105,7 +105,7 @@ Browser Opus requires `WebCodecs AudioEncoder` (uplink) and `WebCodecs AudioDeco
 
 - `aes-gcm`: legacy AES-256-GCM media encryption. Audio/FEC payloads are
   encrypted, but their UDP headers are not authenticated as AEAD data.
-- `aes-gcm-v2`: AES-256-GCM with the fixed 16-byte and security 12-byte UDP
+- `aes-gcm-v2` (default): AES-256-GCM with the fixed 16-byte and security 12-byte UDP
   headers supplied as additional authenticated data (AAD). Audio/FEC payloads
   remain encrypted and packet size is unchanged. Any modification to the
   packet type, channel ID, sender ID, sequence, flags, nonce, or key ID makes
