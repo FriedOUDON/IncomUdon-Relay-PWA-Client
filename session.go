@@ -24,6 +24,7 @@ type sessionConfig struct {
 	TxCodec       string
 	PCMOnly       bool
 	SelfMute      bool
+	PacketDebug   bool
 	QosEnabled    bool
 	FecEnabled    bool
 	Codec2LibPath string
@@ -48,9 +49,65 @@ const (
 )
 
 type sessionCallbacks struct {
-	onEvent func(serverEvent)
-	onPCM   func([]byte)
-	onOpus  func([]byte)
+	onEvent       func(serverEvent)
+	onPCM         func([]byte)
+	onOpus        func([]byte)
+	onPacketStats func(packetDebugStats)
+}
+
+// packetDebugStats is deliberately aggregate-only: it exposes timings and
+// counters without forwarding packet payloads, channel credentials, or keys.
+// Values are cumulative since WebSocket-session creation or the most recent
+// diagnostic reset.
+type packetDebugStats struct {
+	UptimeMs uint64 `json:"uptimeMs"`
+
+	BrowserUplinkPCMFrames  uint64 `json:"browserUplinkPcmFrames"`
+	BrowserUplinkOpusFrames uint64 `json:"browserUplinkOpusFrames"`
+	BrowserUplinkBytes      uint64 `json:"browserUplinkBytes"`
+
+	RelayTxAudioPackets   uint64 `json:"relayTxAudioPackets"`
+	RelayTxAudioBytes     uint64 `json:"relayTxAudioBytes"`
+	RelayTxFecPackets     uint64 `json:"relayTxFecPackets"`
+	RelayTxFecBytes       uint64 `json:"relayTxFecBytes"`
+	RelayTxControlPackets uint64 `json:"relayTxControlPackets"`
+	RelayTxControlBytes   uint64 `json:"relayTxControlBytes"`
+	RelayTxErrors         uint64 `json:"relayTxErrors"`
+
+	RelayRxDatagrams       uint64            `json:"relayRxDatagrams"`
+	RelayRxBytes           uint64            `json:"relayRxBytes"`
+	RelayRxInvalidPackets  uint64            `json:"relayRxInvalidPackets"`
+	RelayRxRejectedPackets uint64            `json:"relayRxRejectedPackets"`
+	RelayRxAudioPackets    uint64            `json:"relayRxAudioPackets"`
+	RelayRxAudioBytes      uint64            `json:"relayRxAudioBytes"`
+	RelayRxFecPackets      uint64            `json:"relayRxFecPackets"`
+	RelayRxFecBytes        uint64            `json:"relayRxFecBytes"`
+	RelayRxAudioBySender   map[uint32]uint64 `json:"relayRxAudioBySender,omitempty"`
+
+	DownlinkDecodedFrames   uint64 `json:"downlinkDecodedFrames"`
+	DownlinkSelfMutedFrames uint64 `json:"downlinkSelfMutedFrames"`
+	DownlinkQueueDrops      uint64 `json:"downlinkQueueDrops"`
+	DownlinkMixedFrames     uint64 `json:"downlinkMixedFrames"`
+	DownlinkMixedInputs     uint64 `json:"downlinkMixedInputs"`
+	DownlinkQueuedFrames    uint64 `json:"downlinkQueuedFrames"`
+	DownlinkQueuedSenders   uint32 `json:"downlinkQueuedSenders"`
+	UnsupportedFrames       uint64 `json:"unsupportedFrames"`
+
+	BrowserDownlinkPCMFrames  uint64 `json:"browserDownlinkPcmFrames"`
+	BrowserDownlinkPCMBytes   uint64 `json:"browserDownlinkPcmBytes"`
+	BrowserDownlinkOpusFrames uint64 `json:"browserDownlinkOpusFrames"`
+	BrowserDownlinkOpusBytes  uint64 `json:"browserDownlinkOpusBytes"`
+
+	WebSocketQueueDepth       uint32 `json:"webSocketQueueDepth"`
+	WebSocketQueuedPCMFrames  uint64 `json:"webSocketQueuedPcmFrames"`
+	WebSocketQueuedPCMBytes   uint64 `json:"webSocketQueuedPcmBytes"`
+	WebSocketQueuedOpusFrames uint64 `json:"webSocketQueuedOpusFrames"`
+	WebSocketQueuedOpusBytes  uint64 `json:"webSocketQueuedOpusBytes"`
+	WebSocketDroppedFrames    uint64 `json:"webSocketDroppedFrames"`
+	WebSocketDroppedBytes     uint64 `json:"webSocketDroppedBytes"`
+	WebSocketWrittenFrames    uint64 `json:"webSocketWrittenFrames"`
+	WebSocketWrittenBytes     uint64 `json:"webSocketWrittenBytes"`
+	WebSocketWriteErrors      uint64 `json:"webSocketWriteErrors"`
 }
 
 type peerCodecConfig struct {
@@ -99,6 +156,9 @@ type relaySession struct {
 	downlinkOpusWarned     bool
 	serverMultiTalkEnabled bool
 	serverMaxActiveTalkers int
+	packetDebug            bool
+	packetStats            packetDebugStats
+	startedAt              time.Time
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -136,6 +196,8 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		downlinkPCM:       make(map[uint32][]byte),
 		downlinkQueues:    make(map[uint32][][]byte),
 		unsupportedFrames: make(map[string]struct{}),
+		packetDebug:       cfg.PacketDebug,
+		startedAt:         time.Now(),
 		done:              make(chan struct{}),
 	}
 
@@ -341,6 +403,10 @@ func (s *relaySession) Start() {
 	go s.joinRetryLoop()
 	go s.codecLoop()
 	go s.downlinkMixLoop()
+	if s.packetDebug && s.cb.onPacketStats != nil {
+		s.wg.Add(1)
+		go s.packetDebugLoop()
+	}
 }
 
 func (s *relaySession) Close() {
@@ -383,6 +449,95 @@ func (s *relaySession) EffectiveConfig() sessionConfig {
 	return s.cfg
 }
 
+func (s *relaySession) packetDebugLoop() {
+	defer s.wg.Done()
+	// One update per second keeps diagnostics useful without adding a
+	// per-packet WebSocket control message to the real-time media path.
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			if s.cb.onPacketStats != nil {
+				s.cb.onPacketStats(s.packetDebugSnapshot())
+			}
+		}
+	}
+}
+
+func (s *relaySession) packetDebugSnapshot() packetDebugStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	snapshot := s.packetStats
+	snapshot.UptimeMs = uint64(time.Since(s.startedAt).Milliseconds())
+	snapshot.DownlinkQueuedSenders = uint32(len(s.downlinkQueues))
+	snapshot.DownlinkQueuedFrames = 0
+	for _, queue := range s.downlinkQueues {
+		snapshot.DownlinkQueuedFrames += uint64(len(queue))
+	}
+	if len(s.packetStats.RelayRxAudioBySender) > 0 {
+		snapshot.RelayRxAudioBySender = make(map[uint32]uint64, len(s.packetStats.RelayRxAudioBySender))
+		for senderID, count := range s.packetStats.RelayRxAudioBySender {
+			snapshot.RelayRxAudioBySender[senderID] = count
+		}
+	}
+	return snapshot
+}
+
+// ResetPacketDebugStats clears aggregate diagnostics without changing media
+// state. It is intentionally separate from the normal session reset paths so
+// an operator can take a fresh measurement while a channel remains connected.
+func (s *relaySession) ResetPacketDebugStats() {
+	s.mu.Lock()
+	s.packetStats = packetDebugStats{}
+	s.startedAt = time.Now()
+	s.mu.Unlock()
+}
+
+func (s *relaySession) noteBrowserUplink(msgType byte, bytes int) {
+	if !s.packetDebug || bytes <= 0 {
+		return
+	}
+	s.mu.Lock()
+	if msgType == clientBinaryOpus {
+		s.packetStats.BrowserUplinkOpusFrames++
+	} else {
+		s.packetStats.BrowserUplinkPCMFrames++
+	}
+	s.packetStats.BrowserUplinkBytes += uint64(bytes)
+	s.mu.Unlock()
+}
+
+func (s *relaySession) noteRelayTx(pktType uint8, bytes int, failed bool) {
+	if !s.packetDebug {
+		return
+	}
+	s.mu.Lock()
+	if failed {
+		s.packetStats.RelayTxErrors++
+		s.mu.Unlock()
+		return
+	}
+	if bytes > 0 {
+		switch pktType {
+		case pktAudio:
+			s.packetStats.RelayTxAudioPackets++
+			s.packetStats.RelayTxAudioBytes += uint64(bytes)
+		case pktFec:
+			s.packetStats.RelayTxFecPackets++
+			s.packetStats.RelayTxFecBytes += uint64(bytes)
+		default:
+			s.packetStats.RelayTxControlPackets++
+			s.packetStats.RelayTxControlBytes += uint64(bytes)
+		}
+	}
+	s.mu.Unlock()
+}
+
 func (s *relaySession) emitConnected() {
 	effective := s.EffectiveConfig()
 	codec2Ready, opusReady := detectRuntimeCodecAvailability(effective.Codec2LibPath, effective.OpusLibPath)
@@ -419,8 +574,10 @@ func (s *relaySession) HandleBrowserBinary(payload []byte) {
 
 	switch msgType {
 	case clientBinaryAudio:
+		s.noteBrowserUplink(msgType, len(body))
 		s.SendPCM(body)
 	case clientBinaryOpus:
+		s.noteBrowserUplink(msgType, len(body))
 		s.mu.Lock()
 		transportCodec := s.activeUplinkTransportCodecLocked()
 		codec := s.cfg.UplinkCodec
@@ -691,6 +848,12 @@ func (s *relaySession) readLoop() {
 
 		datagram := make([]byte, n)
 		copy(datagram, buf[:n])
+		if s.packetDebug {
+			s.mu.Lock()
+			s.packetStats.RelayRxDatagrams++
+			s.packetStats.RelayRxBytes += uint64(n)
+			s.mu.Unlock()
+		}
 		s.handleDatagram(datagram, addr)
 	}
 }
@@ -798,6 +961,10 @@ func (s *relaySession) downlinkMixLoop() {
 					s.downlinkQueues[senderID] = queue[1:]
 				}
 			}
+			if s.packetDebug && len(frames) > 0 {
+				s.packetStats.DownlinkMixedFrames++
+				s.packetStats.DownlinkMixedInputs += uint64(len(frames))
+			}
 			s.mu.Unlock()
 
 			if len(frames) == 0 {
@@ -816,17 +983,38 @@ func (s *relaySession) downlinkMixLoop() {
 func (s *relaySession) handleDatagram(data []byte, from *net.UDPAddr) {
 	pkt, ok := parsePacket(data)
 	if !ok {
+		if s.packetDebug {
+			s.mu.Lock()
+			s.packetStats.RelayRxInvalidPackets++
+			s.mu.Unlock()
+		}
 		return
 	}
 	if pkt.Header.Version != protocolVersion {
+		if s.packetDebug {
+			s.mu.Lock()
+			s.packetStats.RelayRxInvalidPackets++
+			s.mu.Unlock()
+		}
 		return
 	}
 	if pkt.Header.ChannelID != s.cfg.ChannelID {
+		if s.packetDebug {
+			s.mu.Lock()
+			s.packetStats.RelayRxRejectedPackets++
+			s.mu.Unlock()
+		}
 		return
 	}
 	if !s.acceptServerAddress(from) {
+		if s.packetDebug {
+			s.mu.Lock()
+			s.packetStats.RelayRxRejectedPackets++
+			s.mu.Unlock()
+		}
 		return
 	}
+	s.noteRelayRxPacket(pkt.Header.Type, len(data), pkt.Header.SenderID)
 
 	switch pkt.Header.Type {
 	case pktTalkGrant, pktTalkRelease, pktTalkDeny:
@@ -842,6 +1030,30 @@ func (s *relaySession) handleDatagram(data []byte, from *net.UDPAddr) {
 	case pktKeyExchange:
 		s.handleHandshakePacket(pkt)
 	}
+}
+
+func (s *relaySession) noteRelayRxPacket(pktType uint8, bytes int, senderID uint32) {
+	if !s.packetDebug || bytes <= 0 {
+		return
+	}
+	s.mu.Lock()
+	switch pktType {
+	case pktAudio:
+		s.packetStats.RelayRxAudioPackets++
+		s.packetStats.RelayRxAudioBytes += uint64(bytes)
+		if senderID != 0 {
+			if s.packetStats.RelayRxAudioBySender == nil {
+				s.packetStats.RelayRxAudioBySender = make(map[uint32]uint64)
+			}
+			if _, known := s.packetStats.RelayRxAudioBySender[senderID]; known || len(s.packetStats.RelayRxAudioBySender) < 16 {
+				s.packetStats.RelayRxAudioBySender[senderID]++
+			}
+		}
+	case pktFec:
+		s.packetStats.RelayRxFecPackets++
+		s.packetStats.RelayRxFecBytes += uint64(bytes)
+	}
+	s.mu.Unlock()
 }
 
 func (s *relaySession) acceptServerAddress(from *net.UDPAddr) bool {
@@ -1248,6 +1460,9 @@ func (s *relaySession) emitUnsupportedFrame(senderID uint32, size int, reason st
 		return
 	}
 	s.unsupportedFrames[key] = struct{}{}
+	if s.packetDebug {
+		s.packetStats.UnsupportedFrames++
+	}
 	s.mu.Unlock()
 
 	message := fmt.Sprintf(
@@ -1270,6 +1485,9 @@ func (s *relaySession) emitUnsupportedFrame(senderID uint32, size int, reason st
 func (s *relaySession) emitDownlinkAudio(senderID uint32, frame []byte) {
 	s.mu.Lock()
 	selfMuted := s.cfg.SelfMute && senderID == s.cfg.SenderID
+	if s.packetDebug && selfMuted {
+		s.packetStats.DownlinkSelfMutedFrames++
+	}
 	s.mu.Unlock()
 	if selfMuted {
 		return
@@ -1288,8 +1506,14 @@ func (s *relaySession) emitDownlinkAudio(senderID uint32, frame []byte) {
 	for _, pcm := range frames {
 		if len(queue) >= 48 {
 			queue = queue[1:]
+			if s.packetDebug {
+				s.packetStats.DownlinkQueueDrops++
+			}
 		}
 		queue = append(queue, pcm)
+		if s.packetDebug {
+			s.packetStats.DownlinkDecodedFrames++
+		}
 	}
 	s.downlinkQueues[senderID] = queue
 	s.mu.Unlock()
@@ -1309,6 +1533,12 @@ func (s *relaySession) emitMixedDownlinkAudio(pcm []byte) {
 	if downlinkCodec == downlinkCodecOpus && encoder != nil && s.cb.onOpus != nil {
 		packet, err := encoder.Encode(pcm)
 		if err == nil {
+			if s.packetDebug {
+				s.mu.Lock()
+				s.packetStats.BrowserDownlinkOpusFrames++
+				s.packetStats.BrowserDownlinkOpusBytes += uint64(len(packet))
+				s.mu.Unlock()
+			}
 			s.cb.onOpus(packet)
 			return
 		}
@@ -1330,6 +1560,12 @@ func (s *relaySession) emitMixedDownlinkAudio(pcm []byte) {
 	}
 
 	if s.cb.onPCM != nil {
+		if s.packetDebug {
+			s.mu.Lock()
+			s.packetStats.BrowserDownlinkPCMFrames++
+			s.packetStats.BrowserDownlinkPCMBytes += uint64(len(pcm))
+			s.mu.Unlock()
+		}
 		s.cb.onPCM(pcm)
 	}
 }
@@ -1467,6 +1703,7 @@ func (s *relaySession) sendControlPacket(pktType uint8, payload []byte) error {
 	}
 
 	_, err := s.conn.WriteToUDP(packet, addr)
+	s.noteRelayTx(pktType, len(packet), err != nil)
 	return err
 }
 
@@ -1555,8 +1792,10 @@ func (s *relaySession) sendAudioFrame(frame []byte, sourceCodecID uint8) error {
 
 	_, err := s.conn.WriteToUDP(packet, addr)
 	if err != nil {
+		s.noteRelayTx(pktAudio, len(packet), true)
 		return err
 	}
+	s.noteRelayTx(pktAudio, len(packet), false)
 
 	if !fecEnabled || fec == nil {
 		return nil
@@ -1592,8 +1831,10 @@ func (s *relaySession) sendAudioFrame(frame []byte, sourceCodecID uint8) error {
 		}
 
 		if _, err := s.conn.WriteToUDP(fecPacket, addr); err != nil {
+			s.noteRelayTx(pktFec, len(fecPacket), true)
 			return err
 		}
+		s.noteRelayTx(pktFec, len(fecPacket), false)
 	}
 
 	return nil

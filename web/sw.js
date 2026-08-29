@@ -1,4 +1,4 @@
-const CACHE_NAME = "incomudon-pwa-v61";
+const CACHE_NAME = "incomudon-pwa-v62";
 const CACHE_PREFIX = "incomudon-pwa-";
 const swURL = new URL(self.location.href);
 const authMode = String(swURL.searchParams.get("auth_mode") || "none").toLowerCase();

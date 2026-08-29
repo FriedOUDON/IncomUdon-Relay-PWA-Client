@@ -19,6 +19,7 @@ class IncomudonPCMPlaybackProcessor extends AudioWorkletProcessor {
     this.holdSample = 0;
     this.underrunBlocks = 0;
     this.underrunEvents = 0;
+    this.droppedSamples = 0;
     this.inUnderrun = false;
     this.lastStatsTime = -Infinity;
     this.resampleRadius = 12;
@@ -52,6 +53,13 @@ class IncomudonPCMPlaybackProcessor extends AudioWorkletProcessor {
       return;
     }
 
+    if (message.type === "debug-reset") {
+      this.underrunEvents = 0;
+      this.droppedSamples = 0;
+      this.postStats(true);
+      return;
+    }
+
     if (message.type !== "pcm") {
       return;
     }
@@ -79,6 +87,7 @@ class IncomudonPCMPlaybackProcessor extends AudioWorkletProcessor {
     if (overflow > 0) {
       // Live audio must catch up instead of replaying an old backlog.
       this.discardSamples(overflow);
+      this.droppedSamples += overflow;
       if (this.sourcePosition < this.baseSampleIndex) {
         this.sourcePosition = this.baseSampleIndex;
       }
@@ -182,6 +191,7 @@ class IncomudonPCMPlaybackProcessor extends AudioWorkletProcessor {
       primed: this.primed,
       underrunBlocks: this.underrunBlocks,
       underrunEvents: this.underrunEvents,
+      droppedSamples: this.droppedSamples,
     });
   }
 

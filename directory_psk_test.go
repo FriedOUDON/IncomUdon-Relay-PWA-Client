@@ -75,11 +75,47 @@ func TestDirectoryReceiverRejectsTamperedCiphertext(t *testing.T) {
 	}
 }
 
+func TestDirectoryReceiverAcceptsParticipantsDocument(t *testing.T) {
+	psk := []byte(strings.Repeat("q", directoryPSKBytes))
+	now := time.Now()
+	document := directoryParticipantsDocument{
+		Version:   directoryProtocolVersion,
+		IssuedAt:  now.Unix(),
+		ExpiresAt: now.Add(time.Minute).Unix(),
+		Participants: []directoryParticipant{
+			{ChannelID: 101, SenderID: 1001, LastSeenAt: now.Unix(), Talking: true},
+			{ChannelID: 101, SenderID: 1002, LastSeenAt: now.Unix()},
+		},
+	}
+	document.Revision = directoryParticipantsDocumentRevision(document)
+	payload, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := sealDirectoryEnvelopeForType(t, psk, "pwa-1", []byte("directory-epoch!"), 2, document.ExpiresAt, payload, directoryEnvelopeParticipants)
+	packet, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := &directoryReceiver{psk: psk, keyID: "pwa-1", replay: make(map[string]directoryReplayState)}
+	got, err := receiver.openParticipantsDocument(packet)
+	if err != nil {
+		t.Fatalf("openParticipantsDocument() error = %v", err)
+	}
+	if len(got.Participants) != 2 || !got.Participants[0].Talking {
+		t.Fatalf("openParticipantsDocument() = %#v", got)
+	}
+}
+
 func sealDirectoryEnvelopeForTest(t *testing.T, psk []byte, keyID string, epoch []byte, sequence uint64, expiresAt int64, payload []byte) directoryEnvelope {
+	return sealDirectoryEnvelopeForType(t, psk, keyID, epoch, sequence, expiresAt, payload, directoryEnvelopeSnapshot)
+}
+
+func sealDirectoryEnvelopeForType(t *testing.T, psk []byte, keyID string, epoch []byte, sequence uint64, expiresAt int64, payload []byte, envelopeType string) directoryEnvelope {
 	t.Helper()
 	envelope := directoryEnvelope{
 		Version:   directoryProtocolVersion,
-		Type:      directoryEnvelopeSnapshot,
+		Type:      envelopeType,
 		KeyID:     keyID,
 		Epoch:     base64.RawURLEncoding.EncodeToString(epoch),
 		Sequence:  sequence,

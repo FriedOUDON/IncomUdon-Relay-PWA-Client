@@ -38,6 +38,7 @@ services:
       INCOMUDON_DIRECTORY_PSK_FILE: "${INCOMUDON_DIRECTORY_PSK_FILE:-}"
       INCOMUDON_DIRECTORY_KEY_ID: "${INCOMUDON_DIRECTORY_KEY_ID:-pwa-1}"
       INCOMUDON_DIRECTORY_UDP_ALLOW_CIDRS: "${INCOMUDON_DIRECTORY_UDP_ALLOW_CIDRS:-}"
+      INCOMUDON_DIRECTORY_RELAY_UDP_TARGET: "${INCOMUDON_DIRECTORY_RELAY_UDP_TARGET:-}"
     volumes:
       - ./third_party/libcodec2:/opt/libcodec2:ro
       - ./third_party/libopus:/opt/libopus:ro

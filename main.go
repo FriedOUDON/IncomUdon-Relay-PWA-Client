@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -34,30 +35,32 @@ import (
 var webAssets embed.FS
 
 type serverEvent struct {
-	Type             string             `json:"type"`
-	Level            string             `json:"level,omitempty"`
-	Message          string             `json:"message,omitempty"`
-	ChannelID        uint32             `json:"channelId,omitempty"`
-	SenderID         uint32             `json:"senderId,omitempty"`
-	TalkerID         uint32             `json:"talkerId,omitempty"`
-	ActiveTalkers    []uint32           `json:"activeTalkers,omitempty"`
-	TalkAllowed      bool               `json:"talkAllowed,omitempty"`
-	TalkTimeoutSec   uint32             `json:"talkTimeoutSec,omitempty"`
-	MultiTalkEnabled bool               `json:"multiTalkEnabled,omitempty"`
-	MaxActiveTalkers uint32             `json:"maxActiveTalkers,omitempty"`
-	RelayHost        string             `json:"relayHost,omitempty"`
-	RelayPort        int                `json:"relayPort,omitempty"`
-	CryptoMode       string             `json:"cryptoMode,omitempty"`
-	CodecMode        int                `json:"codecMode,omitempty"`
-	TxCodec          string             `json:"txCodec,omitempty"`
-	PCMOnly          bool               `json:"pcmOnly,omitempty"`
-	QosEnabled       *bool              `json:"qosEnabled,omitempty"`
-	FecEnabled       *bool              `json:"fecEnabled,omitempty"`
-	UplinkCodec      string             `json:"uplinkCodec,omitempty"`
-	DownlinkCodec    string             `json:"downlinkCodec,omitempty"`
-	Codec2Ready      bool               `json:"codec2Ready,omitempty"`
-	OpusReady        bool               `json:"opusReady,omitempty"`
-	Directory        *directoryDocument `json:"directory,omitempty"`
+	Type                  string                         `json:"type"`
+	Level                 string                         `json:"level,omitempty"`
+	Message               string                         `json:"message,omitempty"`
+	ChannelID             uint32                         `json:"channelId,omitempty"`
+	SenderID              uint32                         `json:"senderId,omitempty"`
+	TalkerID              uint32                         `json:"talkerId,omitempty"`
+	ActiveTalkers         []uint32                       `json:"activeTalkers,omitempty"`
+	TalkAllowed           bool                           `json:"talkAllowed,omitempty"`
+	TalkTimeoutSec        uint32                         `json:"talkTimeoutSec,omitempty"`
+	MultiTalkEnabled      bool                           `json:"multiTalkEnabled,omitempty"`
+	MaxActiveTalkers      uint32                         `json:"maxActiveTalkers,omitempty"`
+	RelayHost             string                         `json:"relayHost,omitempty"`
+	RelayPort             int                            `json:"relayPort,omitempty"`
+	CryptoMode            string                         `json:"cryptoMode,omitempty"`
+	CodecMode             int                            `json:"codecMode,omitempty"`
+	TxCodec               string                         `json:"txCodec,omitempty"`
+	PCMOnly               bool                           `json:"pcmOnly,omitempty"`
+	QosEnabled            *bool                          `json:"qosEnabled,omitempty"`
+	FecEnabled            *bool                          `json:"fecEnabled,omitempty"`
+	UplinkCodec           string                         `json:"uplinkCodec,omitempty"`
+	DownlinkCodec         string                         `json:"downlinkCodec,omitempty"`
+	Codec2Ready           bool                           `json:"codec2Ready,omitempty"`
+	OpusReady             bool                           `json:"opusReady,omitempty"`
+	Directory             *directoryDocument             `json:"directory,omitempty"`
+	DirectoryParticipants *directoryParticipantsDocument `json:"directoryParticipants,omitempty"`
+	PacketStats           *packetDebugStats              `json:"packetStats,omitempty"`
 }
 
 type clientCommand struct {
@@ -79,12 +82,119 @@ type clientCommand struct {
 	FecEnabled    *bool  `json:"fecEnabled,omitempty"`
 	PCMOnly       *bool  `json:"pcmOnly,omitempty"`
 	SelfMute      *bool  `json:"selfMute,omitempty"`
+	PacketDebug   *bool  `json:"packetDebug,omitempty"`
 	Pressed       *bool  `json:"pressed,omitempty"`
 }
 
 type wsMessage struct {
 	msgType int
 	payload []byte
+}
+
+// websocketPacketDebugStats covers the PWA server's last hop.  Relay-session
+// statistics cannot see frames dropped by the bounded WebSocket write queue.
+type websocketPacketDebugStats struct {
+	mu      sync.Mutex
+	enabled atomic.Bool
+
+	queuedPCMFrames  uint64
+	queuedPCMBytes   uint64
+	queuedOpusFrames uint64
+	queuedOpusBytes  uint64
+	droppedFrames    uint64
+	droppedBytes     uint64
+	writtenFrames    uint64
+	writtenBytes     uint64
+	writeErrors      uint64
+}
+
+func (s *websocketPacketDebugStats) setEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.enabled.Store(enabled)
+	if enabled {
+		s.reset()
+	}
+}
+
+func (s *websocketPacketDebugStats) noteQueued(msgType, bytes int) {
+	if s == nil || !s.enabled.Load() || bytes <= 0 {
+		return
+	}
+	s.mu.Lock()
+	if msgType == serverBinaryOpus {
+		s.queuedOpusFrames++
+		s.queuedOpusBytes += uint64(bytes)
+	} else {
+		s.queuedPCMFrames++
+		s.queuedPCMBytes += uint64(bytes)
+	}
+	s.mu.Unlock()
+}
+
+func (s *websocketPacketDebugStats) noteDropped(bytes int) {
+	if s == nil || !s.enabled.Load() || bytes <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.droppedFrames++
+	s.droppedBytes += uint64(bytes)
+	s.mu.Unlock()
+}
+
+func (s *websocketPacketDebugStats) noteWritten(msg wsMessage) {
+	if s == nil || !s.enabled.Load() || msg.msgType != websocket.BinaryMessage || len(msg.payload) < 2 {
+		return
+	}
+	s.mu.Lock()
+	s.writtenFrames++
+	s.writtenBytes += uint64(len(msg.payload) - 1)
+	s.mu.Unlock()
+}
+
+func (s *websocketPacketDebugStats) noteWriteError() {
+	if s == nil || !s.enabled.Load() {
+		return
+	}
+	s.mu.Lock()
+	s.writeErrors++
+	s.mu.Unlock()
+}
+
+func (s *websocketPacketDebugStats) apply(snapshot *packetDebugStats, queueDepth int) {
+	if s == nil || !s.enabled.Load() || snapshot == nil {
+		return
+	}
+	s.mu.Lock()
+	snapshot.WebSocketQueueDepth = uint32(max(queueDepth, 0))
+	snapshot.WebSocketQueuedPCMFrames = s.queuedPCMFrames
+	snapshot.WebSocketQueuedPCMBytes = s.queuedPCMBytes
+	snapshot.WebSocketQueuedOpusFrames = s.queuedOpusFrames
+	snapshot.WebSocketQueuedOpusBytes = s.queuedOpusBytes
+	snapshot.WebSocketDroppedFrames = s.droppedFrames
+	snapshot.WebSocketDroppedBytes = s.droppedBytes
+	snapshot.WebSocketWrittenFrames = s.writtenFrames
+	snapshot.WebSocketWrittenBytes = s.writtenBytes
+	snapshot.WebSocketWriteErrors = s.writeErrors
+	s.mu.Unlock()
+}
+
+func (s *websocketPacketDebugStats) reset() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.queuedPCMFrames = 0
+	s.queuedPCMBytes = 0
+	s.queuedOpusFrames = 0
+	s.queuedOpusBytes = 0
+	s.droppedFrames = 0
+	s.droppedBytes = 0
+	s.writtenFrames = 0
+	s.writtenBytes = 0
+	s.writeErrors = 0
+	s.mu.Unlock()
 }
 
 type authMode string
@@ -161,6 +271,7 @@ type appServer struct {
 	oidcRefreshTokens map[string]oidcRefreshTokenEntry
 	directoryStore    *directoryStore
 	directoryHub      *directoryHub
+	directoryReceiver *directoryReceiver
 
 	upgrader websocket.Upgrader
 }
@@ -175,6 +286,7 @@ func main() {
 	directoryPSKFileFlag := flag.String("directory-psk-file", os.Getenv("INCOMUDON_DIRECTORY_PSK_FILE"), "path to base64url directory PSK file")
 	directoryKeyIDFlag := flag.String("directory-key-id", os.Getenv("INCOMUDON_DIRECTORY_KEY_ID"), "expected directory PSK key ID (default pwa-1)")
 	directoryAllowCIDRsFlag := flag.String("directory-udp-allow-cidrs", os.Getenv("INCOMUDON_DIRECTORY_UDP_ALLOW_CIDRS"), "optional comma-separated source CIDRs allowed to send directory snapshots")
+	directoryRelayTargetFlag := flag.String("directory-relay-udp-target", os.Getenv("INCOMUDON_DIRECTORY_RELAY_UDP_TARGET"), "optional relay directory UDP address for authenticated participant pull requests")
 	codec2LibFlag := flag.String("codec2-lib", os.Getenv("INCOMUDON_CODEC2_LIB"), "optional path to user-provided libcodec2.so")
 	opusLibFlag := flag.String("opus-lib", os.Getenv("INCOMUDON_OPUS_LIB"), "optional path to user-provided libopus.so")
 	fixedRelayFlag := flag.String("fixed-relay", os.Getenv("INCOMUDON_FIXED_RELAY"), "optional fixed relay host[:port]; when set, browser relay host/port is ignored")
@@ -304,20 +416,28 @@ func main() {
 		PSKFile:       *directoryPSKFileFlag,
 		KeyID:         *directoryKeyIDFlag,
 		AllowCIDRs:    *directoryAllowCIDRsFlag,
+		RelayTarget:   *directoryRelayTargetFlag,
 	})
 	if err != nil {
 		log.Fatalf("invalid directory receiving configuration: %v", err)
 	}
 	if directoryReceiver != nil {
 		defer directoryReceiver.Close()
-		log.Printf("PSK directory receiving enabled: listen=%s key_id=%s", *directoryUDPListenFlag, directoryReceiver.keyID)
+		app.directoryReceiver = directoryReceiver
+		log.Printf("PSK directory receiving enabled: listen=%s key_id=%s pull_target=%s", *directoryUDPListenFlag, directoryReceiver.keyID, *directoryRelayTargetFlag)
 		if len(directoryReceiver.allowed) == 0 {
 			log.Printf("PSK directory source CIDR filtering is disabled; configure -directory-udp-allow-cidrs to reduce unauthenticated UDP load")
 		}
-		go directoryReceiver.Run(func(document *directoryDocument) {
-			app.directoryStore.Set(document)
-			app.directoryHub.Publish(document)
-		})
+		go directoryReceiver.Run(
+			func(document *directoryDocument) {
+				app.directoryStore.Set(document)
+				app.directoryHub.Publish(document)
+			},
+			func(document *directoryParticipantsDocument) {
+				app.directoryStore.SetParticipants(document)
+				app.directoryHub.PublishParticipants(document)
+			},
+		)
 	}
 
 	mux := http.NewServeMux()
@@ -559,8 +679,9 @@ func (a *appServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	writeCh := make(chan wsMessage, websocketWriteQueueCapacity)
+	wsStats := &websocketPacketDebugStats{}
 	writerDone := make(chan struct{})
-	go wsWriter(conn, writeCh, writerDone)
+	go wsWriter(conn, writeCh, writerDone, wsStats)
 
 	closeWriter := sync.Once{}
 	shutdownWriter := func() {
@@ -591,8 +712,10 @@ func (a *appServer) handleWS(w http.ResponseWriter, r *http.Request) {
 		copy(payload[1:], frame)
 		select {
 		case writeCh <- wsMessage{msgType: websocket.BinaryMessage, payload: payload}:
+			wsStats.noteQueued(serverBinaryAudio, len(frame))
 		default:
 			// Drop audio frames under backpressure.
+			wsStats.noteDropped(len(frame))
 		}
 	}
 	enqueueOpus := func(packet []byte) {
@@ -601,14 +724,29 @@ func (a *appServer) handleWS(w http.ResponseWriter, r *http.Request) {
 		copy(payload[1:], packet)
 		select {
 		case writeCh <- wsMessage{msgType: websocket.BinaryMessage, payload: payload}:
+			wsStats.noteQueued(serverBinaryOpus, len(packet))
 		default:
 			// Drop audio frames under backpressure.
+			wsStats.noteDropped(len(packet))
 		}
+	}
+	enqueuePacketStats := func(stats packetDebugStats) {
+		wsStats.apply(&stats, len(writeCh))
+		enqueueJSON(serverEvent{Type: "packet_debug", PacketStats: &stats})
+	}
+	resetPacketStats := func() {
+		wsStats.reset()
+	}
+	setPacketDebugEnabled := func(enabled bool) {
+		wsStats.setEnabled(enabled)
 	}
 
 	enqueueJSON(serverEvent{Type: "ready", Message: "websocket connected"})
 	if document := a.directoryStore.Current(); document != nil {
 		enqueueJSON(serverEvent{Type: "directory", Directory: document})
+	}
+	if document := a.directoryStore.CurrentParticipants(); document != nil {
+		enqueueJSON(serverEvent{Type: "directory_participants", DirectoryParticipants: document})
 	}
 
 	var session *relaySession
@@ -637,6 +775,15 @@ func (a *appServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				enqueueJSON,
 				enqueuePCM,
 				enqueueOpus,
+				enqueuePacketStats,
+				resetPacketStats,
+				setPacketDebugEnabled,
+				func() error {
+					if a.directoryReceiver == nil {
+						return fmt.Errorf("relay directory pull is not configured")
+					}
+					return a.directoryReceiver.RequestParticipants()
+				},
 				a.codec2LibDefault,
 				a.opusLibDefault,
 				a.fixedRelayEnabled,
@@ -657,7 +804,7 @@ func (a *appServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func wsWriter(conn *websocket.Conn, writeCh <-chan wsMessage, done chan<- struct{}) {
+func wsWriter(conn *websocket.Conn, writeCh <-chan wsMessage, done chan<- struct{}, stats *websocketPacketDebugStats) {
 	defer close(done)
 
 	pingTicker := time.NewTicker(25 * time.Second)
@@ -675,12 +822,15 @@ func wsWriter(conn *websocket.Conn, writeCh <-chan wsMessage, done chan<- struct
 			if err := conn.WriteMessage(msg.msgType, msg.payload); err != nil {
 				// A failed control or data write means the peer is no longer usable.
 				// Closing here also unblocks handleWS's ReadMessage call.
+				stats.noteWriteError()
 				_ = conn.Close()
 				return
 			}
+			stats.noteWritten(msg)
 		case <-pingTicker.C:
 			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				stats.noteWriteError()
 				_ = conn.Close()
 				return
 			}
@@ -701,6 +851,10 @@ func handleClientCommand(
 	enqueueJSON func(serverEvent),
 	enqueuePCM func([]byte),
 	enqueueOpus func([]byte),
+	enqueuePacketStats func(packetDebugStats),
+	resetPacketStats func(),
+	setPacketDebugEnabled func(bool),
+	requestDirectoryParticipants func() error,
 	defaultCodec2Lib string,
 	defaultOpusLib string,
 	fixedRelayEnabled bool,
@@ -714,11 +868,15 @@ func handleClientCommand(
 			enqueueJSON(serverEvent{Type: "status", Level: "error", Message: err.Error()})
 			return current, false
 		}
+		if setPacketDebugEnabled != nil {
+			setPacketDebugEnabled(cfg.PacketDebug)
+		}
 
 		newSession, err := newRelaySession(cfg, sessionCallbacks{
-			onEvent: enqueueJSON,
-			onPCM:   enqueuePCM,
-			onOpus:  enqueueOpus,
+			onEvent:       enqueueJSON,
+			onPCM:         enqueuePCM,
+			onOpus:        enqueueOpus,
+			onPacketStats: enqueuePacketStats,
 		})
 		if err != nil {
 			enqueueJSON(serverEvent{Type: "status", Level: "error", Message: err.Error()})
@@ -766,6 +924,28 @@ func handleClientCommand(
 		if cmd.SelfMute != nil {
 			current.SetSelfMuted(*cmd.SelfMute)
 		}
+		return current, false
+
+	case "reset_packet_debug":
+		if current == nil {
+			return current, false
+		}
+		current.ResetPacketDebugStats()
+		if resetPacketStats != nil {
+			resetPacketStats()
+		}
+		return current, false
+
+	case "request_directory_participants":
+		if requestDirectoryParticipants == nil {
+			enqueueJSON(serverEvent{Type: "status", Level: "warn", Message: "relay directory pull is not configured"})
+			return current, false
+		}
+		if err := requestDirectoryParticipants(); err != nil {
+			enqueueJSON(serverEvent{Type: "status", Level: "warn", Message: err.Error()})
+			return current, false
+		}
+		enqueueJSON(serverEvent{Type: "status", Level: "info", Message: "directory participant pull requested"})
 		return current, false
 
 	default:
@@ -849,6 +1029,10 @@ func buildSessionConfig(
 	if cmd.SelfMute != nil {
 		selfMute = *cmd.SelfMute
 	}
+	packetDebug := false
+	if cmd.PacketDebug != nil {
+		packetDebug = *cmd.PacketDebug
+	}
 
 	codec2LibPath := strings.TrimSpace(cmd.Codec2Lib)
 	if codec2LibPath == "" {
@@ -870,6 +1054,7 @@ func buildSessionConfig(
 		TxCodec:       txCodec,
 		PCMOnly:       pcmOnly,
 		SelfMute:      selfMute,
+		PacketDebug:   packetDebug,
 		QosEnabled:    qosEnabled,
 		FecEnabled:    fecEnabled,
 		Codec2LibPath: codec2LibPath,

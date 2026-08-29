@@ -184,5 +184,22 @@
   "log_audio_tx_receive_only": "audio file TX is unavailable in receive-only mode",
   "multi_mute": "Mute",
   "multi_unmute": "Unmute",
-  "multi_receive_only_mode": "Receive-only mode"
+  "multi_receive_only_mode": "Receive-only mode",
+  "packet_debug": "Packet Debug",
+  "packet_debug_reset": "Reset counters",
+  "packet_debug_ws": "WebSocket",
+  "packet_debug_page": "Page",
+  "packet_debug_context": "Audio contexts",
+  "packet_debug_tx_generated": "TX generated",
+  "packet_debug_tx_sent": "TX sent",
+  "packet_debug_tx_dropped": "TX dropped",
+  "packet_debug_rx_received": "RX received",
+  "packet_debug_rx_dropped": "RX dropped",
+  "packet_debug_playback": "Playback",
+  "packet_debug_server_ws": "Server WebSocket",
+  "packet_debug_relay_rx": "Relay RX",
+  "packet_debug_relay_tx": "Relay TX",
+  "packet_debug_mix": "Mix / decode",
+  "packet_debug_talkers": "RX talkers",
+  "packet_debug_waiting": "Waiting for packet debug data..."
 }

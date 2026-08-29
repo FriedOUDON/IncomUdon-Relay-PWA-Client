@@ -66,3 +66,44 @@ func TestSelfSenderMuteWebControl(t *testing.T) {
 		}
 	}
 }
+
+func TestPacketDebugAssets(t *testing.T) {
+	index, err := fs.ReadFile(webAssets, "web/index.html")
+	if err != nil {
+		t.Fatalf("read web/index.html: %v", err)
+	}
+	if !strings.Contains(string(index), `id="packetDebugCard"`) {
+		t.Fatal("packet debug card is missing from the single-channel page")
+	}
+
+	app, err := fs.ReadFile(webAssets, "web/app.js")
+	if err != nil {
+		t.Fatalf("read web/app.js: %v", err)
+	}
+	for _, snippet := range []string{
+		`get("packet_debug") === "1"`,
+		`packetDebug: !!state.packetDebugEnabled,`,
+		`type: "reset_packet_debug"`,
+		`type === "packet_debug"`,
+		`type === "incomudon-slot-packet-debug-request"`,
+	} {
+		if !strings.Contains(string(app), snippet) {
+			t.Fatalf("packet debug client path is missing %q", snippet)
+		}
+	}
+
+	multi, err := fs.ReadFile(webAssets, "web/multi.js")
+	if err != nil {
+		t.Fatalf("read web/multi.js: %v", err)
+	}
+	for _, snippet := range []string{
+		`url.searchParams.set("packet_debug", "1")`,
+		`incomudon-slot-packet-debug`,
+		`incomudon-slot-packet-debug-request`,
+		`multi-slot-packet-debug`,
+	} {
+		if !strings.Contains(string(multi), snippet) {
+			t.Fatalf("packet debug multi-slot path is missing %q", snippet)
+		}
+	}
+}

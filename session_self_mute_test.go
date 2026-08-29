@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
 
 func TestBuildSessionConfigDefaultsToSelfMute(t *testing.T) {
 	base := clientCommand{
@@ -25,6 +30,78 @@ func TestBuildSessionConfigDefaultsToSelfMute(t *testing.T) {
 	}
 	if cfg.SelfMute {
 		t.Fatal("explicit self mute=false must be preserved")
+	}
+}
+
+func TestBuildSessionConfigPreservesPacketDebugFlag(t *testing.T) {
+	enabled := true
+	cfg, err := buildSessionConfig(clientCommand{
+		RelayHost:   "127.0.0.1",
+		RelayPort:   50000,
+		ChannelID:   1,
+		PacketDebug: &enabled,
+	}, "", "", false, "", 0)
+	if err != nil {
+		t.Fatalf("build packet debug session config: %v", err)
+	}
+	if !cfg.PacketDebug {
+		t.Fatal("packet debug must be enabled when explicitly requested")
+	}
+}
+
+func TestPacketDebugSnapshotAndReset(t *testing.T) {
+	session := &relaySession{
+		startedAt: time.Now().Add(-time.Second),
+		packetStats: packetDebugStats{
+			RelayRxAudioPackets:  3,
+			RelayRxAudioBySender: map[uint32]uint64{42: 3},
+		},
+		downlinkQueues: map[uint32][][]byte{
+			10: {make([]byte, 1), make([]byte, 1)},
+		},
+	}
+
+	snapshot := session.packetDebugSnapshot()
+	if snapshot.UptimeMs == 0 {
+		t.Fatal("packet debug snapshot must report session uptime")
+	}
+	if snapshot.DownlinkQueuedFrames != 2 || snapshot.DownlinkQueuedSenders != 1 {
+		t.Fatalf("unexpected queued downlink stats: %#v", snapshot)
+	}
+	if snapshot.RelayRxAudioBySender[42] != 3 {
+		t.Fatalf("sender packet counter was not copied: %#v", snapshot.RelayRxAudioBySender)
+	}
+
+	session.ResetPacketDebugStats()
+	reset := session.packetDebugSnapshot()
+	if reset.RelayRxAudioPackets != 0 || len(reset.RelayRxAudioBySender) != 0 {
+		t.Fatalf("packet debug reset retained counters: %#v", reset)
+	}
+}
+
+func TestWebsocketPacketDebugStatsOnlyCollectsWhenEnabled(t *testing.T) {
+	stats := &websocketPacketDebugStats{}
+	stats.noteQueued(serverBinaryAudio, 320)
+
+	snapshot := packetDebugStats{}
+	stats.apply(&snapshot, 3)
+	if snapshot.WebSocketQueuedPCMFrames != 0 {
+		t.Fatal("disabled WebSocket packet debug must not collect audio counters")
+	}
+
+	stats.setEnabled(true)
+	stats.noteQueued(serverBinaryAudio, 320)
+	stats.noteDropped(320)
+	stats.noteWritten(wsMessage{msgType: websocket.BinaryMessage, payload: make([]byte, 321)})
+	stats.apply(&snapshot, 3)
+	if snapshot.WebSocketQueueDepth != 3 || snapshot.WebSocketQueuedPCMFrames != 1 || snapshot.WebSocketDroppedFrames != 1 || snapshot.WebSocketWrittenFrames != 1 {
+		t.Fatalf("unexpected WebSocket packet debug stats: %#v", snapshot)
+	}
+
+	stats.reset()
+	stats.apply(&snapshot, 0)
+	if snapshot.WebSocketQueuedPCMFrames != 0 || snapshot.WebSocketDroppedFrames != 0 || snapshot.WebSocketWrittenFrames != 0 {
+		t.Fatalf("WebSocket packet debug reset retained counters: %#v", snapshot)
 	}
 }
 

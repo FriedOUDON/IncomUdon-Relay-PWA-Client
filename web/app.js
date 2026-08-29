@@ -33,6 +33,7 @@
   const audioTxPacerModulePromises = new WeakMap();
   const audioDebugStorageKey = "incomudon.pwa.audio_debug.v1";
   const embeddedQuery = new URLSearchParams(window.location.search || "");
+  const packetDebugQuery = embeddedQuery.get("packet_debug") === "1";
   const embeddedSlotIndexRaw = Number.parseInt(embeddedQuery.get("slot") || "", 10);
   const isEmbeddedSlot = embeddedQuery.get("embed") === "1" &&
     Number.isInteger(embeddedSlotIndexRaw) && embeddedSlotIndexRaw > 0;
@@ -104,6 +105,9 @@
     clearLogBtn: document.getElementById("clearLogBtn"),
     connectionStatus: document.getElementById("connectionStatus"),
     talkerStatus: document.getElementById("talkerStatus"),
+    packetDebugCard: document.getElementById("packetDebugCard"),
+    packetDebugOutput: document.getElementById("packetDebugOutput"),
+    packetDebugReset: document.getElementById("packetDebugReset"),
     logBox: document.getElementById("logBox"),
     cuePttOnEnabled: document.getElementById("cuePttOnEnabled"),
     cuePttOffEnabled: document.getElementById("cuePttOffEnabled"),
@@ -223,6 +227,22 @@
     default: "Default",
     events: "Events",
     clear: "Clear",
+    packet_debug: "Packet Debug",
+    packet_debug_reset: "Reset counters",
+    packet_debug_ws: "WebSocket",
+    packet_debug_page: "Page",
+    packet_debug_context: "Audio contexts",
+    packet_debug_tx_generated: "TX generated",
+    packet_debug_tx_sent: "TX sent",
+    packet_debug_tx_dropped: "TX dropped",
+    packet_debug_rx_received: "RX received",
+    packet_debug_rx_dropped: "RX dropped",
+    packet_debug_playback: "Playback",
+    packet_debug_server_ws: "Server WebSocket",
+    packet_debug_relay_rx: "Relay RX",
+    packet_debug_relay_tx: "Relay TX",
+    packet_debug_mix: "Mix / decode",
+    packet_debug_talkers: "RX talkers",
     status_connecting: "Connecting",
     status_offline: "Offline",
     status_error: "Error",
@@ -323,12 +343,18 @@
     receiveOnly: false,
     receiveMuted: false,
     selfSenderMute: true,
+    packetDebugEnabled: packetDebugQuery,
+    packetDebugTimer: null,
+    packetDebugLastSnapshot: null,
+    serverPacketStats: null,
     audioDebugEnabled: readAudioDebugEnabled(),
     audioStats: {
       activity: Object.create(null),
       txSent: 0,
       txDropped: 0,
+      txDropReasons: Object.create(null),
       rxReceived: 0,
+      rxDropped: Object.create(null),
       audioTxTicks: 0,
       audioTxSkipped: 0,
     },
@@ -418,11 +444,26 @@
     const now = performance.now();
     const activity = state.audioStats.activity[kind] || {
       count: 0,
+      bytes: 0,
       lastAtMs: 0,
       lastLogMs: 0,
+      lastGapMs: 0,
+      intervalSamples: 0,
+      intervalTotalMs: 0,
+      intervalMaxMs: 0,
     };
     const gapMs = activity.lastAtMs > 0 ? now - activity.lastAtMs : 0;
     activity.count += 1;
+    const bytes = Number(details.bytes);
+    if (Number.isFinite(bytes) && bytes > 0) {
+      activity.bytes += Math.floor(bytes);
+    }
+    if (gapMs > 0) {
+      activity.lastGapMs = gapMs;
+      activity.intervalSamples += 1;
+      activity.intervalTotalMs += gapMs;
+      activity.intervalMaxMs = Math.max(activity.intervalMaxMs, gapMs);
+    }
     activity.lastAtMs = now;
     state.audioStats.activity[kind] = activity;
     if (state.audioDebugEnabled && (gapMs >= 80 || now - activity.lastLogMs >= 1000)) {
@@ -438,9 +479,22 @@
 
   function noteDroppedTxFrame(reason, details = {}) {
     state.audioStats.txDropped += 1;
+    const key = String(reason || "unknown");
+    state.audioStats.txDropReasons[key] = Number(state.audioStats.txDropReasons[key] || 0) + 1;
     audioDebug("tx-drop", {
-      reason,
+      reason: key,
       dropped: state.audioStats.txDropped,
+      ...details,
+    });
+  }
+
+  function noteDroppedRxFrame(reason, details = {}) {
+    const key = String(reason || "unknown");
+    const current = Number(state.audioStats.rxDropped[key] || 0);
+    state.audioStats.rxDropped[key] = current + 1;
+    audioDebug("rx-drop", {
+      reason: key,
+      dropped: state.audioStats.rxDropped[key],
       ...details,
     });
   }
@@ -463,8 +517,22 @@
         state: mic.ctx.state,
         currentTime: mic.ctx.currentTime,
       } : null,
-      stats: state.audioStats,
+      stats: {
+        ...state.audioStats,
+        activity: cloneAudioActivities(state.audioStats.activity),
+        txDropReasons: { ...state.audioStats.txDropReasons },
+        rxDropped: { ...state.audioStats.rxDropped },
+      },
+      serverPacketStats: state.serverPacketStats ? { ...state.serverPacketStats } : null,
     };
+  }
+
+  function cloneAudioActivities(activity) {
+    const out = Object.create(null);
+    Object.entries(activity || {}).forEach(([kind, value]) => {
+      out[kind] = { ...value };
+    });
+    return out;
   }
 
   function installAudioDebugHook() {
@@ -483,6 +551,248 @@
   }
 
   installAudioDebugHook();
+
+  function createAudioStats() {
+    return {
+      activity: Object.create(null),
+      txSent: 0,
+      txDropped: 0,
+      txDropReasons: Object.create(null),
+      rxReceived: 0,
+      rxDropped: Object.create(null),
+      audioTxTicks: 0,
+      audioTxSkipped: 0,
+    };
+  }
+
+  function packetDebugReadyStateName(value) {
+    switch (Number(value)) {
+      case WebSocket.CONNECTING: return "CONNECTING";
+      case WebSocket.OPEN: return "OPEN";
+      case WebSocket.CLOSING: return "CLOSING";
+      default: return "CLOSED";
+    }
+  }
+
+  function packetDebugSnapshot() {
+    const ws = state.ws;
+    const player = state.player;
+    const mic = state.mic;
+    return {
+      atMs: performance.now(),
+      startedAtMs: Number(state.packetDebugStartedAtMs || performance.now()),
+      visibilityState: document.visibilityState,
+      hasFocus: document.hasFocus(),
+      websocket: {
+        readyState: ws ? ws.readyState : WebSocket.CLOSED,
+        bufferedAmount: ws ? Number(ws.bufferedAmount || 0) : 0,
+        reconnectAttempt: Number(state.reconnectAttempt || 0),
+      },
+      playback: player && typeof player.debugState === "function" ? player.debugState() : null,
+      microphone: mic && mic.ctx ? {
+        state: String(mic.ctx.state || "none"),
+        sampleRate: Number(mic.ctx.sampleRate || 0),
+        currentTime: Number(mic.ctx.currentTime || 0),
+      } : null,
+      audio: {
+        txSent: Number(state.audioStats.txSent || 0),
+        txDropped: Number(state.audioStats.txDropped || 0),
+        txDropReasons: { ...state.audioStats.txDropReasons },
+        rxReceived: Number(state.audioStats.rxReceived || 0),
+        rxDropped: { ...state.audioStats.rxDropped },
+        audioTxTicks: Number(state.audioStats.audioTxTicks || 0),
+        audioTxSkipped: Number(state.audioStats.audioTxSkipped || 0),
+        activity: cloneAudioActivities(state.audioStats.activity),
+      },
+      server: state.serverPacketStats && typeof state.serverPacketStats === "object"
+        ? { ...state.serverPacketStats }
+        : null,
+    };
+  }
+
+  function packetDebugNumber(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : 0;
+  }
+
+  function packetDebugRate(current, previous, key, elapsedSec) {
+    if (!previous || elapsedSec <= 0) return 0;
+    return Math.max(0, (packetDebugNumber(current && current[key]) - packetDebugNumber(previous && previous[key])) / elapsedSec);
+  }
+
+  function packetDebugActivity(snapshot, previous, names) {
+    const currentActivity = snapshot && snapshot.audio && snapshot.audio.activity ? snapshot.audio.activity : {};
+    const previousActivity = previous && previous.audio && previous.audio.activity ? previous.audio.activity : {};
+    const elapsedSec = previous ? Math.max(0.001, (snapshot.atMs - previous.atMs) / 1000) : 0;
+    const nameList = Array.isArray(names) ? names : [names];
+    let count = 0;
+    let bytes = 0;
+    let previousCount = 0;
+    let previousBytes = 0;
+    let lastGapMs = 0;
+    let intervalSamples = 0;
+    let intervalTotalMs = 0;
+    let intervalMaxMs = 0;
+    nameList.forEach((name) => {
+      const item = currentActivity[name] || {};
+      const previousItem = previousActivity[name] || {};
+      count += packetDebugNumber(item.count);
+      bytes += packetDebugNumber(item.bytes);
+      previousCount += packetDebugNumber(previousItem.count);
+      previousBytes += packetDebugNumber(previousItem.bytes);
+      lastGapMs = Math.max(lastGapMs, packetDebugNumber(item.lastGapMs));
+      intervalSamples += packetDebugNumber(item.intervalSamples);
+      intervalTotalMs += packetDebugNumber(item.intervalTotalMs);
+      intervalMaxMs = Math.max(intervalMaxMs, packetDebugNumber(item.intervalMaxMs));
+    });
+    return {
+      count,
+      bytes,
+      rate: elapsedSec > 0 ? Math.max(0, (count - previousCount) / elapsedSec) : 0,
+      bytesPerSec: elapsedSec > 0 ? Math.max(0, (bytes - previousBytes) / elapsedSec) : 0,
+      lastGapMs,
+      averageGapMs: intervalSamples > 0 ? intervalTotalMs / intervalSamples : 0,
+      maxGapMs: intervalMaxMs,
+    };
+  }
+
+  function formatPacketDebugRate(value, suffix = "fps") {
+    return `${packetDebugNumber(value).toFixed(1)} ${suffix}`;
+  }
+
+  function formatPacketDebugBytes(value) {
+    const bytes = packetDebugNumber(value);
+    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MiB`;
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+    return `${Math.round(bytes)} B`;
+  }
+
+  function formatPacketDebugInterval(activity) {
+    if (!activity || activity.count <= 1) return "-";
+    return `last ${activity.lastGapMs.toFixed(1)} / avg ${activity.averageGapMs.toFixed(1)} / max ${activity.maxGapMs.toFixed(1)} ms`;
+  }
+
+  function formatPacketDebugBreakdown(values) {
+    const entries = Object.entries(values || {})
+      .map(([key, value]) => [String(key), packetDebugNumber(value)])
+      .filter(([, value]) => value > 0)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    return entries.length ? entries.map(([key, value]) => `${key}=${value}`).join(", ") : "-";
+  }
+
+  function formatPacketDebugTalkers(values) {
+    const entries = Object.entries(values || {})
+      .map(([sender, count]) => [Number(sender), packetDebugNumber(count)])
+      .filter(([sender, count]) => Number.isFinite(sender) && sender > 0 && count > 0)
+      .sort((a, b) => a[0] - b[0]);
+    return entries.length ? entries.map(([sender, count]) => `${sender}:${count}`).join("  ") : "-";
+  }
+
+  function formatPacketDebugReport(snapshot, previous) {
+    const elapsedSec = previous ? Math.max(0.001, (snapshot.atMs - previous.atMs) / 1000) : 0;
+    const server = snapshot.server || {};
+    const previousServer = previous && previous.server ? previous.server : null;
+    const generatedMic = packetDebugActivity(snapshot, previous, "mic-generated");
+    const generatedSharedMic = packetDebugActivity(snapshot, previous, "shared-mic-frame");
+    const generatedFile = packetDebugActivity(snapshot, previous, "audio-file-tick");
+    const sent = packetDebugActivity(snapshot, previous, "tx-send");
+    const received = packetDebugActivity(snapshot, previous, ["rx-pcm", "rx-opus"]);
+    const playback = snapshot.playback || {};
+    const worklet = playback.worklet || {};
+    const playerRate = packetDebugNumber(worklet.sourceSampleRate || playback.sourceSampleRate || 8000);
+    const bufferedMs = playerRate > 0 ? (packetDebugNumber(worklet.bufferedSamples) * 1000) / playerRate : 0;
+    const targetMs = packetDebugNumber(playback.jitterTargetMs);
+    const maxMs = packetDebugNumber(playback.jitterMaxMs);
+    const serverRxRate = packetDebugRate(server, previousServer, "relayRxDatagrams", elapsedSec);
+    const serverTxRate = packetDebugRate(server, previousServer, "relayTxAudioPackets", elapsedSec);
+    const serverOutRate = packetDebugRate(server, previousServer, "webSocketWrittenFrames", elapsedSec);
+    const serverMixRate = packetDebugRate(server, previousServer, "downlinkMixedFrames", elapsedSec);
+    const uptimeSec = Math.max(0, (snapshot.atMs - snapshot.startedAtMs) / 1000);
+    const ws = snapshot.websocket || {};
+    const mic = snapshot.microphone || {};
+
+    return [
+      `${t("packet_debug_ws")}: ${packetDebugReadyStateName(ws.readyState)} | uptime ${uptimeSec.toFixed(1)} s | buffered ${formatPacketDebugBytes(ws.bufferedAmount)} | reconnect ${packetDebugNumber(ws.reconnectAttempt)}`,
+      `${t("packet_debug_page")}: ${snapshot.visibilityState} | focus ${snapshot.hasFocus ? "yes" : "no"}`,
+      `${t("packet_debug_context")}: output=${playback.contextState || "none"}@${packetDebugNumber(playback.sampleRate || 0)}Hz/${playback.streamMode || "none"} | mic=${mic.state || "none"}@${packetDebugNumber(mic.sampleRate)}Hz`,
+      `${t("packet_debug_tx_generated")}: mic ${formatPacketDebugRate(generatedMic.rate)} (${formatPacketDebugInterval(generatedMic)}) | shared ${formatPacketDebugRate(generatedSharedMic.rate)} | file ${formatPacketDebugRate(generatedFile.rate)} (${formatPacketDebugInterval(generatedFile)})`,
+      `${t("packet_debug_tx_sent")}: ${formatPacketDebugRate(sent.rate)} | ${formatPacketDebugBytes(sent.bytesPerSec)}/s | interval ${formatPacketDebugInterval(sent)} | total ${snapshot.audio.txSent}`,
+      `${t("packet_debug_tx_dropped")}: ${snapshot.audio.txDropped} | file skipped ${snapshot.audio.audioTxSkipped} | ${formatPacketDebugBreakdown(snapshot.audio.txDropReasons)}`,
+      `${t("packet_debug_rx_received")}: ${formatPacketDebugRate(received.rate)} | ${formatPacketDebugBytes(received.bytesPerSec)}/s | interval ${formatPacketDebugInterval(received)} | total ${snapshot.audio.rxReceived}`,
+      `${t("packet_debug_rx_dropped")}: ${formatPacketDebugBreakdown(snapshot.audio.rxDropped)}`,
+      `${t("packet_debug_playback")}: buffer ${bufferedMs.toFixed(1)} / target ${targetMs.toFixed(1)} / max ${maxMs.toFixed(1)} ms | underrun ${packetDebugNumber(worklet.underrunEvents)} | discard ${packetDebugNumber(playback.droppedSamples)} samples`,
+      `${t("packet_debug_server_ws")}: queue ${packetDebugNumber(server.webSocketQueueDepth)}/48 | written ${formatPacketDebugRate(serverOutRate)} | queued pcm=${packetDebugNumber(server.webSocketQueuedPcmFrames)} opus=${packetDebugNumber(server.webSocketQueuedOpusFrames)} | drop ${packetDebugNumber(server.webSocketDroppedFrames)} | errors ${packetDebugNumber(server.webSocketWriteErrors)}`,
+      `${t("packet_debug_relay_rx")}: ${formatPacketDebugRate(serverRxRate, "pkt/s")} | audio ${packetDebugNumber(server.relayRxAudioPackets)} | fec ${packetDebugNumber(server.relayRxFecPackets)} | ${formatPacketDebugBytes(packetDebugRate(server, previousServer, "relayRxBytes", elapsedSec))}/s | invalid ${packetDebugNumber(server.relayRxInvalidPackets)} rejected ${packetDebugNumber(server.relayRxRejectedPackets)}`,
+      `${t("packet_debug_relay_tx")}: audio ${formatPacketDebugRate(serverTxRate, "pkt/s")} | total ${packetDebugNumber(server.relayTxAudioPackets)} | fec ${packetDebugNumber(server.relayTxFecPackets)} | control ${packetDebugNumber(server.relayTxControlPackets)} | errors ${packetDebugNumber(server.relayTxErrors)}`,
+      `${t("packet_debug_mix")}: ${formatPacketDebugRate(serverMixRate)} | decoded ${packetDebugNumber(server.downlinkDecodedFrames)} | inputs ${packetDebugNumber(server.downlinkMixedInputs)} | queue ${packetDebugNumber(server.downlinkQueuedFrames)} frames/${packetDebugNumber(server.downlinkQueuedSenders)} senders | queue drop ${packetDebugNumber(server.downlinkQueueDrops)} | self mute ${packetDebugNumber(server.downlinkSelfMutedFrames)} | unsupported ${packetDebugNumber(server.unsupportedFrames)}`,
+      `${t("packet_debug_talkers")}: ${formatPacketDebugTalkers(server.relayRxAudioBySender)}`,
+    ].join("\n");
+  }
+
+  function refreshPacketDebugView() {
+    if (!state.packetDebugEnabled) {
+      return;
+    }
+    const snapshot = packetDebugSnapshot();
+    const output = formatPacketDebugReport(snapshot, state.packetDebugLastSnapshot);
+    state.packetDebugLastSnapshot = snapshot;
+    if (ui.packetDebugOutput) {
+      ui.packetDebugOutput.textContent = output;
+    }
+    return snapshot;
+  }
+
+  function notifyEmbeddedPacketDebug(snapshot = null) {
+    if (!isEmbeddedSlot || !state.packetDebugEnabled || !window.parent || window.parent === window) {
+      return;
+    }
+    try {
+      window.parent.postMessage({
+        type: "incomudon-slot-packet-debug",
+        slot: embeddedSlotIndex,
+        snapshot: snapshot || packetDebugSnapshot(),
+        text: ui.packetDebugOutput ? ui.packetDebugOutput.textContent : "",
+      }, window.location.origin);
+    } catch (_) {
+      // Monitoring is optional and must not affect the audio path.
+    }
+  }
+
+  function publishEmbeddedPacketDebug() {
+    if (!state.packetDebugEnabled) {
+      return;
+    }
+    const snapshot = refreshPacketDebugView();
+    notifyEmbeddedPacketDebug(snapshot);
+  }
+
+  function resetPacketDebugCounters() {
+    state.audioStats = createAudioStats();
+    state.serverPacketStats = null;
+    state.packetDebugLastSnapshot = null;
+    state.packetDebugStartedAtMs = performance.now();
+    if (state.player && typeof state.player.resetDebugStats === "function") {
+      state.player.resetDebugStats();
+    }
+    if (state.connected) {
+      sendCommand({ type: "reset_packet_debug" });
+    }
+    publishEmbeddedPacketDebug();
+  }
+
+  function startPacketDebugMonitor() {
+    if (ui.packetDebugCard) {
+      ui.packetDebugCard.hidden = !state.packetDebugEnabled;
+    }
+    if (!state.packetDebugEnabled) {
+      return;
+    }
+    resetPacketDebugCounters();
+    if (state.packetDebugTimer) {
+      window.clearInterval(state.packetDebugTimer);
+    }
+    state.packetDebugTimer = window.setInterval(publishEmbeddedPacketDebug, 1000);
+  }
 
   const senderIDMin = 1;
   const senderIDMax = 0x7fffffff;
@@ -510,6 +820,7 @@
   initI18n()
     .catch(() => {})
     .finally(() => {
+      startPacketDebugMonitor();
       maybeAutoConnectOnStartup().catch(() => {});
     });
 
@@ -801,6 +1112,10 @@
     releaseKeyboardFocus();
     ui.logBox.textContent = "";
   });
+  ui.packetDebugReset?.addEventListener("click", () => {
+    releaseKeyboardFocus();
+    resetPacketDebugCounters();
+  });
 
   bindPTT(ui.pttButton);
   installKeyboardFocusRelease();
@@ -1032,6 +1347,13 @@
     }
     const data = event.data;
     if (Number(data.slot) !== embeddedSlotIndex) {
+      return;
+    }
+    if (data.type === "incomudon-slot-packet-debug-request") {
+      // The parent sends this after the iframe load event. It closes the race
+      // where this slot published its first snapshot before the parent had
+      // registered its message listener, without affecting audio processing.
+      publishEmbeddedPacketDebug();
       return;
     }
     if (data.type === "incomudon-slot-settings-lock") {
@@ -1350,7 +1672,9 @@
         if (opusReady) {
           try {
             state.opusDecoder = new OpusDownlinkDecoder((frame) => {
-              if (state.player) {
+              if (state.receiveMuted) {
+                noteDroppedRxFrame("local-receive-mute", { bytes: frame && frame.bytes ? frame.bytes.byteLength : 0 });
+              } else if (state.player) {
                 state.player.playPCM(frame.bytes, frame.sampleRate);
               }
             });
@@ -1422,6 +1746,7 @@
         codecMode: selectedCodecMode,
         txCodec: selectedTxCodec,
         selfMute: !!state.selfSenderMute,
+        packetDebug: !!state.packetDebugEnabled,
         qosEnabled: ui.qosEnabled ? !!ui.qosEnabled.checked : true,
         fecEnabled: ui.fecEnabled ? !!ui.fecEnabled.checked : true,
         codec2Lib: ui.codec2Lib.value.trim(),
@@ -1532,7 +1857,11 @@
     if (msgType === 0x11 && state.player) {
       state.audioStats.rxReceived += 1;
       recordAudioActivity("rx-pcm", { bytes: bytes.byteLength - 1 });
-      state.player.playPCM(bytes.subarray(1), 8000);
+      if (state.receiveMuted) {
+        noteDroppedRxFrame("local-receive-mute", { bytes: bytes.byteLength - 1 });
+      } else {
+        state.player.playPCM(bytes.subarray(1), 8000);
+      }
       return;
     }
 
@@ -1559,6 +1888,13 @@
 
     if (event.type === "directory") {
       applyDirectoryProvisioning(event.directory);
+      return;
+    }
+
+    if (event.type === "packet_debug") {
+      state.serverPacketStats = event.packetStats && typeof event.packetStats === "object"
+        ? event.packetStats
+        : null;
       return;
     }
 
@@ -3383,7 +3719,7 @@
         audioDebug("audio-file-skip", { skipped, dueFrame, name: task.name });
       }
       state.audioStats.audioTxTicks += 1;
-      recordAudioActivity("audio-file-tick", { dueFrame });
+      recordAudioActivity("audio-file-tick", { dueFrame, bytes: 320 });
     }
 
     if (!task.loop && task.next >= task.frames.length) {
@@ -4259,6 +4595,8 @@
     setText("logoutBtn", t("logout"));
     setText("labelConnection", t("connection"));
     setText("labelTalker", t("talker"));
+    setText("headingPacketDebug", t("packet_debug"));
+    setText("packetDebugReset", t("packet_debug_reset"));
     updatePttButtonLabel();
     setText("headingCueSounds", t("cue_sounds"));
     setText("labelCuePttOn", t("cue_ptt_on"));
@@ -4290,6 +4628,7 @@
     applyConnectionView();
     refreshAudioTxSlotsUI();
     applySettingsLockState();
+    refreshPacketDebugView();
   }
 
   function normalizeLocale(raw) {
@@ -4880,6 +5219,11 @@
     url.search = "";
     if (startupQueryOverrides.hasWsToken) {
       url.searchParams.set("ws_token", startupQueryOverrides.wsToken);
+    }
+    if (state.packetDebugEnabled) {
+      // Keep this opt-in diagnostic query across a reload. Unlike credentials,
+      // it is safe to retain and is needed to restart the monitor.
+      url.searchParams.set("packet_debug", "1");
     }
     if (isEmbeddedSlot) {
       url.searchParams.set("embed", "1");
@@ -5658,9 +6002,11 @@
       this.streamMaxSamples = this.isAndroid ? 12000 : 6000;
       this.workletStats = {
         bufferedSamples: 0,
+        sourceSampleRate: 8000,
         primed: false,
         underrunBlocks: 0,
         underrunEvents: 0,
+        droppedSamples: 0,
       };
 
       this.pendingRawChunks = [];
@@ -5671,6 +6017,8 @@
       this.scriptPrimed = false;
       this.scriptHoldSample = 0;
       this.scriptUnderrunBlocks = 0;
+      this.pendingDroppedSamples = 0;
+      this.scriptDroppedSamples = 0;
       this.resampleFromRate = 0;
       this.resamplePos = 0;
       this.prevInputSample = 0;
@@ -5872,6 +6220,7 @@
         primed: !!message.primed,
         underrunBlocks: Math.max(0, Number(message.underrunBlocks) || 0),
         underrunEvents: Math.max(0, Number(message.underrunEvents) || 0),
+        droppedSamples: Math.max(0, Number(message.droppedSamples) || 0),
       };
       if (state.audioDebugEnabled && this.workletStats.underrunEvents > previousUnderruns) {
         audioDebug("playback-underrun", this.workletStats);
@@ -5903,6 +6252,18 @@
       }
     }
 
+    resetDebugStats() {
+      this.pendingDroppedSamples = 0;
+      this.scriptDroppedSamples = 0;
+      if (this.workletNode) {
+        try {
+          this.workletNode.port.postMessage({ type: "debug-reset" });
+        } catch (_) {
+          // A diagnostic reset must not alter the active audio stream.
+        }
+      }
+    }
+
     stopDirectSources() {
       this.directSources.forEach((source) => {
         try {
@@ -5923,6 +6284,7 @@
       while (this.pendingRawSamples > this.streamMaxSamples && this.pendingRawChunks.length > 0) {
         const dropped = this.pendingRawChunks.shift();
         this.pendingRawSamples -= dropped.samples.length;
+        this.pendingDroppedSamples += dropped.samples.length;
       }
     }
 
@@ -6045,10 +6407,12 @@
           this.scriptChunks.shift();
           this.scriptOffset = 0;
           this.scriptBufferedSamples -= available;
+          this.scriptDroppedSamples += available;
           overflow -= available;
         } else {
           this.scriptOffset += overflow;
           this.scriptBufferedSamples -= overflow;
+          this.scriptDroppedSamples += overflow;
           overflow = 0;
         }
       }
@@ -6163,13 +6527,21 @@
     }
 
     debugState() {
+      const droppedSamples = this.streamModeKind === "worklet"
+        ? Math.max(0, Number(this.workletStats.droppedSamples) || 0)
+        : this.pendingDroppedSamples + this.scriptDroppedSamples;
       return {
         contextState: this.ctx ? this.ctx.state : "none",
         currentTime: this.ctx ? this.ctx.currentTime : 0,
+        sampleRate: this.ctx ? this.ctx.sampleRate : 0,
         streamMode: this.streamModeKind,
+        sourceSampleRate: this.streamSourceRate,
+        jitterTargetMs: (this.streamPrimeSamples * 1000) / Math.max(1, this.streamSourceRate),
+        jitterMaxMs: (this.streamMaxSamples * 1000) / Math.max(1, this.streamSourceRate),
         pendingRawSamples: this.pendingRawSamples,
         worklet: this.workletStats,
         scriptBufferedSamples: this.scriptBufferedSamples,
+        droppedSamples,
       };
     }
   }

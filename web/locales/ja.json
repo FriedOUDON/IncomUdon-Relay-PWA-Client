@@ -184,5 +184,22 @@
   "log_audio_tx_receive_only": "受信専用モード中は音源送信できません",
   "multi_mute": "ミュート",
   "multi_unmute": "ミュート解除",
-  "multi_receive_only_mode": "受信専用モード"
+  "multi_receive_only_mode": "受信専用モード",
+  "packet_debug": "パケットデバッグ",
+  "packet_debug_reset": "カウンターをリセット",
+  "packet_debug_ws": "WebSocket",
+  "packet_debug_page": "ページ状態",
+  "packet_debug_context": "AudioContext",
+  "packet_debug_tx_generated": "送信フレーム生成",
+  "packet_debug_tx_sent": "送信",
+  "packet_debug_tx_dropped": "送信破棄",
+  "packet_debug_rx_received": "受信",
+  "packet_debug_rx_dropped": "受信破棄",
+  "packet_debug_playback": "再生",
+  "packet_debug_server_ws": "PWAサーバー WebSocket",
+  "packet_debug_relay_rx": "Relay 受信",
+  "packet_debug_relay_tx": "Relay 送信",
+  "packet_debug_mix": "ミックス / デコード",
+  "packet_debug_talkers": "受信話者",
+  "packet_debug_waiting": "パケットデバッグ情報を待機中..."
 }

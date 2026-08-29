@@ -1105,6 +1105,49 @@ button[disabled] {
   white-space: nowrap;
 }
 
+.multi-slot-packet-debug {
+  position: relative;
+  z-index: 1;
+  max-height: 258px;
+  margin: 0;
+  padding: 9px 13px;
+  overflow: auto;
+  border-top: 1px solid color-mix(in srgb, var(--line) 78%, white 22%);
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 78%, white 22%);
+  background: #142329;
+  color: #dcecf0;
+  font-family: "IBM Plex Mono", "Consolas", monospace;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.packet-debug-card {
+  padding-bottom: 0;
+}
+
+.packet-debug-head {
+  margin-bottom: 10px;
+}
+
+.packet-debug-output {
+  max-height: 390px;
+  margin: 0 -16px;
+  padding: 12px 16px;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  background: #142329;
+  color: #dcecf0;
+  font-family: "IBM Plex Mono", "Consolas", monospace;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .multi-slot-controls {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -1194,6 +1237,7 @@ body.embedded-slot .backdrop,
 body.embedded-slot .hero,
 body.embedded-slot .settings-lock-card,
 body.embedded-slot .control-card,
+body.embedded-slot .packet-debug-card,
 body.embedded-slot .ptt-dock,
 body.embedded-slot .layout > .card:last-of-type {
   display: none;

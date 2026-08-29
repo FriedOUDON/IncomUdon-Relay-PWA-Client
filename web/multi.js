@@ -5,6 +5,7 @@
   const settingsLockPBKDF2Iterations = 310000;
   const audioDebugStorageKey = "incomudon.pwa.audio_debug.v1";
   const audioDebugQuery = new URLSearchParams(window.location.search || "").get("audio_debug") === "1";
+  const packetDebugQuery = new URLSearchParams(window.location.search || "").get("packet_debug") === "1";
   const maxSlotsRaw = Number.parseInt(document.body.dataset.multiMaxSlots || "", 10);
   const defaultSlotsRaw = Number.parseInt(document.body.dataset.multiDefaultSlots || "", 10);
   const maxSlots = Math.min(10, Math.max(1, Number.isFinite(maxSlotsRaw) ? maxSlotsRaw : 10));
@@ -88,6 +89,7 @@
     settings_import_failed: "Settings import failed: {error}",
     settings_imported: "Settings imported. Reload the page to apply the updated settings.",
     settings_export_file: "incomudon-pwa-multi-settings.json",
+    packet_debug_waiting: "Waiting for packet debug data...",
   };
   let strings = { ...fallbackStrings };
 
@@ -790,7 +792,24 @@
     if (audioDebugQuery) {
       url.searchParams.set("audio_debug", "1");
     }
+    if (packetDebugQuery) {
+      url.searchParams.set("packet_debug", "1");
+    }
     return url.toString();
+  }
+
+  function requestSlotPacketDebug(slot) {
+    if (!packetDebugQuery || !slot || !slot.frame || !slot.frame.contentWindow) {
+      return;
+    }
+    try {
+      slot.frame.contentWindow.postMessage({
+        type: "incomudon-slot-packet-debug-request",
+        slot: slot.index + 1,
+      }, targetOrigin);
+    } catch (_) {
+      // Packet monitoring must never affect an embedded slot's operation.
+    }
   }
 
   function createSlot(index) {
@@ -857,7 +876,18 @@
     settingsButton.type = "button";
     controls.append(ptt, shortcut, settingsButton);
 
-    card.append(head, status, controls, talkerFooter);
+    let packetDebugOutput = null;
+    if (packetDebugQuery) {
+      packetDebugOutput = document.createElement("pre");
+      packetDebugOutput.className = "multi-slot-packet-debug";
+      packetDebugOutput.textContent = t("packet_debug_waiting");
+    }
+
+    card.append(head, status, controls);
+    if (packetDebugOutput) {
+      card.appendChild(packetDebugOutput);
+    }
+    card.appendChild(talkerFooter);
     ui.slots.appendChild(card);
 
     const settingsTab = document.createElement("button");
@@ -895,6 +925,7 @@
       senderValue: senderPair.value,
       connectionValue: connectionPair.value,
       talkerValue,
+      packetDebugOutput,
       ptt,
       pttText,
       shortcut,
@@ -950,6 +981,7 @@
       postSettingsLockState(slot);
       postSlotCommand(slot, { command: "set_receive_muted", muted: !!state.controls.muted[index] });
       postSlotCommand(slot, { command: "request-state" });
+      requestSlotPacketDebug(slot);
     });
 
     updateSlotView(slot);
@@ -1471,6 +1503,15 @@
   function handleSlotMessage(event) {
     if (event.origin !== targetOrigin || !event.data || typeof event.data !== "object") return;
     const data = event.data;
+    if (data.type === "incomudon-slot-packet-debug") {
+      const slot = state.slots.find((item) => item.frame && item.frame.contentWindow === event.source);
+      if (slot && Number(data.slot) === slot.index + 1 && slot.packetDebugOutput) {
+        slot.packetDebugOutput.textContent = typeof data.text === "string" && data.text.trim()
+          ? data.text
+          : t("packet_debug_waiting");
+      }
+      return;
+    }
     if (data.type === `${messageNamespace}state`) {
       const slot = state.slots.find((item) => item.frame && item.frame.contentWindow === event.source);
       if (!slot || Number(data.slot) !== slot.index + 1) return;
@@ -1722,6 +1763,9 @@
     applyStrings();
     bindSettingsLockControls();
     bindSettingsLockStorageSync();
+    // Register before creating slot iframes so their first status/debug
+    // messages cannot be lost while the parent page is still initializing.
+    window.addEventListener("message", handleSlotMessage);
     for (let index = 0; index < state.controls.slotCount; index += 1) state.slots.push(createSlot(index));
     activateSettingsSlot(state.controls.activeSettingsSlot);
     updateSlotManagement();
@@ -1746,7 +1790,6 @@
       try { localStorage.setItem(localeStorageKey, locale); } catch (_) {}
       if (locale !== state.locale) window.location.reload();
     });
-    window.addEventListener("message", handleSlotMessage);
     installKeyboardFocusRelease();
     window.addEventListener("keydown", (event) => {
       if (event.repeat) return;

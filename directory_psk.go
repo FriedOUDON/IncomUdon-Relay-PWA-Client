@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -26,18 +27,22 @@ import (
 )
 
 const (
-	directoryProtocolVersion    = 1
-	directoryEnvelopeSnapshot   = "snapshot"
-	directoryPSKBytes           = 32
-	directoryEpochBytes         = 16
-	directoryMaxDatagramBytes   = 2048
-	directoryMaxChannels        = 256
-	directoryMaxSpeakers        = 4096
-	directoryMaxNameRunes       = 128
-	directoryMaxKeyIDBytes      = 64
-	directoryMaxValidity        = 5 * time.Minute
-	directoryDefaultKeyID       = "pwa-1"
-	directoryKeyDerivationLabel = "IncomUdon directory PSK v1 relay-to-pwa"
+	directoryProtocolVersion      = 1
+	directoryEnvelopeSnapshot     = "snapshot"
+	directoryEnvelopeParticipants = "participants"
+	directoryEnvelopeRequest      = "request"
+	directoryPSKBytes             = 32
+	directoryEpochBytes           = 16
+	directoryMaxDatagramBytes     = 2048
+	directoryMaxChannels          = 256
+	directoryMaxSpeakers          = 4096
+	directoryMaxParticipants      = 128
+	directoryMaxNameRunes         = 128
+	directoryMaxKeyIDBytes        = 64
+	directoryMaxValidity          = 5 * time.Minute
+	directoryDefaultKeyID         = "pwa-1"
+	directoryRequestTTL           = 30 * time.Second
+	directoryKeyDerivationLabel   = "IncomUdon directory PSK v1 relay-to-pwa"
 )
 
 type directoryChannel struct {
@@ -60,6 +65,30 @@ type directoryDocument struct {
 	Speakers  []directorySpeaker `json:"speakers"`
 }
 
+// directoryParticipant contains only public relay presence metadata. It is
+// intentionally independent from PWA/browser state so native clients can use
+// the same directory envelope in a later implementation.
+type directoryParticipant struct {
+	ChannelID  uint32 `json:"channelId"`
+	SenderID   uint32 `json:"senderId"`
+	LastSeenAt int64  `json:"lastSeenAt"`
+	Talking    bool   `json:"talking"`
+}
+
+type directoryParticipantsDocument struct {
+	Version      int                    `json:"version"`
+	Revision     string                 `json:"revision"`
+	IssuedAt     int64                  `json:"issuedAt"`
+	ExpiresAt    int64                  `json:"expiresAt"`
+	Participants []directoryParticipant `json:"participants"`
+}
+
+type directoryRequest struct {
+	Version   int   `json:"version"`
+	IssuedAt  int64 `json:"issuedAt"`
+	ExpiresAt int64 `json:"expiresAt"`
+}
+
 type directoryEnvelope struct {
 	Version    int    `json:"v"`
 	Type       string `json:"type"`
@@ -75,6 +104,7 @@ type directoryReceiverConfig struct {
 	PSKFile       string
 	KeyID         string
 	AllowCIDRs    string
+	RelayTarget   string
 }
 
 type directoryReplayState struct {
@@ -83,17 +113,22 @@ type directoryReplayState struct {
 }
 
 type directoryReceiver struct {
-	conn     *net.UDPConn
-	psk      []byte
-	keyID    string
-	allowed  []*net.IPNet
-	replayMu sync.Mutex
-	replay   map[string]directoryReplayState
+	conn            *net.UDPConn
+	psk             []byte
+	keyID           string
+	allowed         []*net.IPNet
+	relayTarget     *net.UDPAddr
+	requestEpoch    []byte
+	requestMu       sync.Mutex
+	requestSequence uint64
+	replayMu        sync.Mutex
+	replay          map[string]directoryReplayState
 }
 
 type directoryStore struct {
-	mu       sync.RWMutex
-	document *directoryDocument
+	mu           sync.RWMutex
+	document     *directoryDocument
+	participants *directoryParticipantsDocument
 }
 
 type directoryHub struct {
@@ -105,10 +140,11 @@ func newDirectoryReceiver(config directoryReceiverConfig) (*directoryReceiver, e
 	config.ListenAddress = strings.TrimSpace(config.ListenAddress)
 	config.PSKFile = strings.TrimSpace(config.PSKFile)
 	config.KeyID = strings.TrimSpace(config.KeyID)
+	config.RelayTarget = strings.TrimSpace(config.RelayTarget)
 	if config.KeyID == "" {
 		config.KeyID = directoryDefaultKeyID
 	}
-	configured := config.ListenAddress != "" || config.PSKFile != ""
+	configured := config.ListenAddress != "" || config.PSKFile != "" || config.RelayTarget != ""
 	if !configured {
 		return nil, nil
 	}
@@ -134,12 +170,27 @@ func newDirectoryReceiver(config directoryReceiverConfig) (*directoryReceiver, e
 	if err != nil {
 		return nil, fmt.Errorf("listen for directory UDP: %w", err)
 	}
+	var relayTarget *net.UDPAddr
+	if config.RelayTarget != "" {
+		relayTarget, err = net.ResolveUDPAddr("udp", config.RelayTarget)
+		if err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("resolve relay directory UDP target: %w", err)
+		}
+	}
+	requestEpoch := make([]byte, directoryEpochBytes)
+	if _, err := rand.Read(requestEpoch); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("generate directory request epoch: %w", err)
+	}
 	return &directoryReceiver{
-		conn:    conn,
-		psk:     psk,
-		keyID:   config.KeyID,
-		allowed: allowed,
-		replay:  make(map[string]directoryReplayState),
+		conn:         conn,
+		psk:          psk,
+		keyID:        config.KeyID,
+		allowed:      allowed,
+		relayTarget:  relayTarget,
+		requestEpoch: requestEpoch,
+		replay:       make(map[string]directoryReplayState),
 	}, nil
 }
 
@@ -150,7 +201,7 @@ func (r *directoryReceiver) Close() error {
 	return r.conn.Close()
 }
 
-func (r *directoryReceiver) Run(onDocument func(*directoryDocument)) {
+func (r *directoryReceiver) Run(onDocument func(*directoryDocument), onParticipants func(*directoryParticipantsDocument)) {
 	if r == nil || r.conn == nil {
 		return
 	}
@@ -172,53 +223,43 @@ func (r *directoryReceiver) Run(onDocument func(*directoryDocument)) {
 			log.Printf("directory UDP packet rejected from %s: source not allowed", source)
 			continue
 		}
-		document, err := r.openDocument(buffer[:n])
+		envelopeType, err := r.envelopeType(buffer[:n])
 		if err != nil {
 			log.Printf("directory UDP packet rejected from %s: %v", source, err)
 			continue
 		}
-		if onDocument != nil {
-			onDocument(document)
+		switch envelopeType {
+		case directoryEnvelopeSnapshot:
+			document, err := r.openDocument(buffer[:n])
+			if err != nil {
+				log.Printf("directory UDP packet rejected from %s: %v", source, err)
+				continue
+			}
+			if onDocument != nil {
+				onDocument(document)
+			}
+			log.Printf("directory snapshot accepted: revision=%s channels=%d speakers=%d", document.Revision[:12], len(document.Channels), len(document.Speakers))
+		case directoryEnvelopeParticipants:
+			document, err := r.openParticipantsDocument(buffer[:n])
+			if err != nil {
+				log.Printf("directory UDP packet rejected from %s: %v", source, err)
+				continue
+			}
+			if onParticipants != nil {
+				onParticipants(document)
+			}
+			log.Printf("directory participants accepted: revision=%s participants=%d", document.Revision[:12], len(document.Participants))
+		default:
+			log.Printf("directory UDP packet rejected from %s: unsupported envelope", source)
 		}
-		log.Printf("directory snapshot accepted: revision=%s channels=%d speakers=%d", document.Revision[:12], len(document.Channels), len(document.Speakers))
 	}
 }
 
 func (r *directoryReceiver) openDocument(packet []byte) (*directoryDocument, error) {
-	var envelope directoryEnvelope
-	if err := decodeDirectoryJSON(packet, &envelope); err != nil {
-		return nil, fmt.Errorf("invalid envelope: %w", err)
-	}
-	if envelope.Version != directoryProtocolVersion || envelope.Type != directoryEnvelopeSnapshot || envelope.KeyID != r.keyID || envelope.Sequence == 0 {
-		return nil, fmt.Errorf("unsupported envelope")
-	}
 	now := time.Now()
-	if envelope.ExpiresAt <= now.Unix() || envelope.ExpiresAt > now.Add(directoryMaxValidity).Unix() {
-		return nil, fmt.Errorf("expired or excessive envelope validity")
-	}
-	epoch, err := base64.RawURLEncoding.DecodeString(envelope.Epoch)
-	if err != nil || len(epoch) != directoryEpochBytes {
-		return nil, fmt.Errorf("invalid envelope epoch")
-	}
-	ciphertext, err := base64.RawURLEncoding.DecodeString(envelope.Ciphertext)
-	if err != nil || len(ciphertext) < aes.BlockSize+16 {
-		return nil, fmt.Errorf("invalid envelope ciphertext")
-	}
-	block, err := aes.NewCipher(deriveDirectoryKey(r.psk, epoch))
+	envelope, plaintext, err := r.openPayload(packet, directoryEnvelopeSnapshot, now)
 	if err != nil {
 		return nil, err
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	aad, err := directoryEnvelopeAAD(envelope, epoch)
-	if err != nil {
-		return nil, err
-	}
-	plaintext, err := aead.Open(nil, directoryNonce(envelope.Sequence), ciphertext, aad)
-	if err != nil {
-		return nil, fmt.Errorf("authentication failed")
 	}
 	var document directoryDocument
 	if err := decodeDirectoryJSON(plaintext, &document); err != nil {
@@ -233,8 +274,118 @@ func (r *directoryReceiver) openDocument(packet []byte) (*directoryDocument, err
 	return cloneDirectoryDocument(&document), nil
 }
 
+func (r *directoryReceiver) openParticipantsDocument(packet []byte) (*directoryParticipantsDocument, error) {
+	now := time.Now()
+	envelope, plaintext, err := r.openPayload(packet, directoryEnvelopeParticipants, now)
+	if err != nil {
+		return nil, err
+	}
+	var document directoryParticipantsDocument
+	if err := decodeDirectoryJSON(plaintext, &document); err != nil {
+		return nil, fmt.Errorf("invalid participants document: %w", err)
+	}
+	if err := validateDirectoryParticipantsDocument(document, envelope.ExpiresAt, now); err != nil {
+		return nil, err
+	}
+	if !r.acceptSequence(envelope, now.Unix()) {
+		return nil, fmt.Errorf("replayed participants snapshot")
+	}
+	return cloneDirectoryParticipantsDocument(&document), nil
+}
+
+func (r *directoryReceiver) envelopeType(packet []byte) (string, error) {
+	var envelope directoryEnvelope
+	if err := decodeDirectoryJSON(packet, &envelope); err != nil {
+		return "", fmt.Errorf("invalid envelope: %w", err)
+	}
+	if envelope.Version != directoryProtocolVersion || envelope.KeyID != r.keyID || !isDirectoryEnvelopeType(envelope.Type) {
+		return "", fmt.Errorf("unsupported envelope")
+	}
+	return envelope.Type, nil
+}
+
+func (r *directoryReceiver) openPayload(packet []byte, expectedType string, now time.Time) (directoryEnvelope, []byte, error) {
+	var envelope directoryEnvelope
+	if err := decodeDirectoryJSON(packet, &envelope); err != nil {
+		return directoryEnvelope{}, nil, fmt.Errorf("invalid envelope: %w", err)
+	}
+	if envelope.Version != directoryProtocolVersion || envelope.Type != expectedType || envelope.KeyID != r.keyID || envelope.Sequence == 0 {
+		return directoryEnvelope{}, nil, fmt.Errorf("unsupported envelope")
+	}
+	if envelope.ExpiresAt <= now.Unix() || envelope.ExpiresAt > now.Add(directoryMaxValidity).Unix() {
+		return directoryEnvelope{}, nil, fmt.Errorf("expired or excessive envelope validity")
+	}
+	epoch, err := base64.RawURLEncoding.DecodeString(envelope.Epoch)
+	if err != nil || len(epoch) != directoryEpochBytes {
+		return directoryEnvelope{}, nil, fmt.Errorf("invalid envelope epoch")
+	}
+	ciphertext, err := base64.RawURLEncoding.DecodeString(envelope.Ciphertext)
+	if err != nil || len(ciphertext) < aes.BlockSize+16 {
+		return directoryEnvelope{}, nil, fmt.Errorf("invalid envelope ciphertext")
+	}
+	block, err := aes.NewCipher(deriveDirectoryKey(r.psk, epoch))
+	if err != nil {
+		return directoryEnvelope{}, nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return directoryEnvelope{}, nil, err
+	}
+	aad, err := directoryEnvelopeAAD(envelope, epoch)
+	if err != nil {
+		return directoryEnvelope{}, nil, err
+	}
+	plaintext, err := aead.Open(nil, directoryNonce(envelope.Sequence), ciphertext, aad)
+	if err != nil {
+		return directoryEnvelope{}, nil, fmt.Errorf("authentication failed")
+	}
+	return envelope, plaintext, nil
+}
+
+// RequestParticipants asks the relay directory port for fresh static and
+// participant snapshots. It only sends an authenticated, short-lived request;
+// the response is still validated by Run before being published to browsers.
+func (r *directoryReceiver) RequestParticipants() error {
+	if r == nil || r.conn == nil || r.relayTarget == nil {
+		return fmt.Errorf("relay directory pull is not configured")
+	}
+	now := time.Now()
+	request := directoryRequest{
+		Version:   directoryProtocolVersion,
+		IssuedAt:  now.Unix(),
+		ExpiresAt: now.Add(directoryRequestTTL).Unix(),
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	r.requestMu.Lock()
+	r.requestSequence++
+	sequence := r.requestSequence
+	envelope, err := sealDirectoryEnvelope(r.psk, r.keyID, r.requestEpoch, sequence, request.ExpiresAt, payload, directoryEnvelopeRequest)
+	r.requestMu.Unlock()
+	if err != nil {
+		return err
+	}
+	packet, err := json.Marshal(envelope)
+	if err != nil {
+		return err
+	}
+	if len(packet) > directoryMaxDatagramBytes {
+		return fmt.Errorf("directory pull request exceeds maximum datagram size")
+	}
+	if _, err := r.conn.WriteToUDP(packet, r.relayTarget); err != nil {
+		return fmt.Errorf("send directory pull request: %w", err)
+	}
+	return nil
+}
+
 func (r *directoryReceiver) acceptSequence(envelope directoryEnvelope, now int64) bool {
-	key := envelope.KeyID + ":" + envelope.Epoch
+	// Snapshot and participant documents share a publisher epoch but travel as
+	// independent UDP datagrams. Track replay state per document type so normal
+	// UDP reordering cannot discard a valid static snapshot behind a newer
+	// participant snapshot.
+	key := envelope.Type + ":" + envelope.KeyID + ":" + envelope.Epoch
 	r.replayMu.Lock()
 	defer r.replayMu.Unlock()
 	for replayKey, state := range r.replay {
@@ -353,6 +504,45 @@ func validateDirectoryDocument(document directoryDocument, envelopeExpiresAt int
 	return nil
 }
 
+func validateDirectoryParticipantsDocument(document directoryParticipantsDocument, envelopeExpiresAt int64, now time.Time) error {
+	if document.Version != directoryProtocolVersion || document.Revision == "" || len(document.Revision) != 64 || document.ExpiresAt != envelopeExpiresAt {
+		return fmt.Errorf("invalid directory participants metadata")
+	}
+	if document.Revision != directoryParticipantsDocumentRevision(document) {
+		return fmt.Errorf("directory participants revision mismatch")
+	}
+	if document.IssuedAt > now.Add(30*time.Second).Unix() || document.IssuedAt < now.Add(-directoryMaxValidity).Unix() {
+		return fmt.Errorf("invalid directory participants issue time")
+	}
+	if document.ExpiresAt <= now.Unix() || document.ExpiresAt <= document.IssuedAt || document.ExpiresAt-document.IssuedAt > int64(directoryMaxValidity/time.Second) {
+		return fmt.Errorf("invalid directory participants expiry")
+	}
+	if len(document.Participants) > directoryMaxParticipants {
+		return fmt.Errorf("directory participants exceed entry limit")
+	}
+	seen := make(map[[2]uint32]struct{}, len(document.Participants))
+	for index, participant := range document.Participants {
+		if participant.ChannelID == 0 || participant.SenderID == 0 || participant.LastSeenAt <= 0 || participant.LastSeenAt > now.Add(30*time.Second).Unix() {
+			return fmt.Errorf("invalid participant entry")
+		}
+		if participant.LastSeenAt < now.Add(-directoryMaxValidity).Unix() {
+			return fmt.Errorf("stale participant entry")
+		}
+		key := [2]uint32{participant.ChannelID, participant.SenderID}
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("duplicate participant entry")
+		}
+		if index > 0 {
+			previous := document.Participants[index-1]
+			if previous.ChannelID > participant.ChannelID || (previous.ChannelID == participant.ChannelID && previous.SenderID >= participant.SenderID) {
+				return fmt.Errorf("participants are not sorted")
+			}
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
 func isDirectoryNameValid(value string) bool {
 	name := strings.TrimSpace(value)
 	return name != "" && utf8.ValidString(name) && !strings.ContainsAny(name, "\r\n\x00") && utf8.RuneCountInString(name) <= directoryMaxNameRunes
@@ -408,7 +598,7 @@ func directoryEnvelopeAAD(envelope directoryEnvelope, epoch []byte) ([]byte, err
 	if err := validateDirectoryKeyID(envelope.KeyID); err != nil {
 		return nil, err
 	}
-	if len(envelope.Type) > 32 {
+	if !isDirectoryEnvelopeType(envelope.Type) {
 		return nil, fmt.Errorf("invalid directory envelope type")
 	}
 	buffer := make([]byte, 0, 64+len(envelope.KeyID)+len(envelope.Type))
@@ -428,6 +618,43 @@ func directoryEnvelopeAAD(envelope directoryEnvelope, epoch []byte) ([]byte, err
 	return buffer, nil
 }
 
+func isDirectoryEnvelopeType(value string) bool {
+	switch value {
+	case directoryEnvelopeSnapshot, directoryEnvelopeParticipants, directoryEnvelopeRequest:
+		return true
+	default:
+		return false
+	}
+}
+
+func sealDirectoryEnvelope(psk []byte, keyID string, epoch []byte, sequence uint64, expiresAt int64, payload []byte, envelopeType string) (directoryEnvelope, error) {
+	if len(epoch) != directoryEpochBytes || sequence == 0 || !isDirectoryEnvelopeType(envelopeType) {
+		return directoryEnvelope{}, fmt.Errorf("invalid directory envelope")
+	}
+	envelope := directoryEnvelope{
+		Version:   directoryProtocolVersion,
+		Type:      envelopeType,
+		KeyID:     keyID,
+		Epoch:     base64.RawURLEncoding.EncodeToString(epoch),
+		Sequence:  sequence,
+		ExpiresAt: expiresAt,
+	}
+	block, err := aes.NewCipher(deriveDirectoryKey(psk, epoch))
+	if err != nil {
+		return directoryEnvelope{}, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return directoryEnvelope{}, err
+	}
+	aad, err := directoryEnvelopeAAD(envelope, epoch)
+	if err != nil {
+		return directoryEnvelope{}, err
+	}
+	envelope.Ciphertext = base64.RawURLEncoding.EncodeToString(aead.Seal(nil, directoryNonce(sequence), payload, aad))
+	return envelope, nil
+}
+
 func cloneDirectoryDocument(document *directoryDocument) *directoryDocument {
 	if document == nil {
 		return nil
@@ -435,6 +662,15 @@ func cloneDirectoryDocument(document *directoryDocument) *directoryDocument {
 	clone := *document
 	clone.Channels = append([]directoryChannel(nil), document.Channels...)
 	clone.Speakers = append([]directorySpeaker(nil), document.Speakers...)
+	return &clone
+}
+
+func cloneDirectoryParticipantsDocument(document *directoryParticipantsDocument) *directoryParticipantsDocument {
+	if document == nil {
+		return nil
+	}
+	clone := *document
+	clone.Participants = append([]directoryParticipant(nil), document.Participants...)
 	return &clone
 }
 
@@ -453,6 +689,28 @@ func (s *directoryStore) Current() *directoryDocument {
 	}
 	s.mu.RLock()
 	document := cloneDirectoryDocument(s.document)
+	s.mu.RUnlock()
+	if document != nil && document.ExpiresAt <= time.Now().Unix() {
+		return nil
+	}
+	return document
+}
+
+func (s *directoryStore) SetParticipants(document *directoryParticipantsDocument) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.participants = cloneDirectoryParticipantsDocument(document)
+	s.mu.Unlock()
+}
+
+func (s *directoryStore) CurrentParticipants() *directoryParticipantsDocument {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	document := cloneDirectoryParticipantsDocument(s.participants)
 	s.mu.RUnlock()
 	if document != nil && document.ExpiresAt <= time.Now().Unix() {
 		return nil
@@ -497,6 +755,25 @@ func (h *directoryHub) Publish(document *directoryDocument) {
 	}
 }
 
+func (h *directoryHub) PublishParticipants(document *directoryParticipantsDocument) {
+	if h == nil || document == nil {
+		return
+	}
+	payload, err := json.Marshal(serverEvent{Type: "directory_participants", DirectoryParticipants: cloneDirectoryParticipantsDocument(document)})
+	if err != nil {
+		return
+	}
+	message := wsMessage{msgType: websocket.TextMessage, payload: payload}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for subscriber := range h.subscribers {
+		select {
+		case subscriber <- message:
+		default:
+		}
+	}
+}
+
 func directoryDocumentRevision(document directoryDocument) string {
 	channels := append([]directoryChannel(nil), document.Channels...)
 	speakers := append([]directorySpeaker(nil), document.Speakers...)
@@ -511,6 +788,21 @@ func directoryDocumentRevision(document directoryDocument) string {
 		Channels []directoryChannel `json:"channels"`
 		Speakers []directorySpeaker `json:"speakers"`
 	}{channels, speakers})
+	sum := sha256.Sum256(payload)
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func directoryParticipantsDocumentRevision(document directoryParticipantsDocument) string {
+	participants := append([]directoryParticipant(nil), document.Participants...)
+	sort.Slice(participants, func(i, j int) bool {
+		if participants[i].ChannelID != participants[j].ChannelID {
+			return participants[i].ChannelID < participants[j].ChannelID
+		}
+		return participants[i].SenderID < participants[j].SenderID
+	})
+	payload, _ := json.Marshal(struct {
+		Participants []directoryParticipant `json:"participants"`
+	}{participants})
 	sum := sha256.Sum256(payload)
 	return fmt.Sprintf("%x", sum[:])
 }

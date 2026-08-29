@@ -56,6 +56,8 @@ This project supports optional `libopus.so` bundling.
 - `-directory-key-id pwa-1` / `INCOMUDON_DIRECTORY_KEY_ID=pwa-1`
 - `-directory-udp-allow-cidrs 203.0.113.10/32`
 - `INCOMUDON_DIRECTORY_UDP_ALLOW_CIDRS=203.0.113.10/32`
+- `-directory-relay-udp-target relay.example.com:51001`
+- `INCOMUDON_DIRECTORY_RELAY_UDP_TARGET=relay.example.com:51001`
 - `-codec2-lib /path/to/libcodec2.so`
 - `INCOMUDON_CODEC2_LIB=/path/to/libcodec2.so`
 - Web UI field: `Codec2 Library Path (server)`
@@ -126,9 +128,9 @@ Browser Opus requires `WebCodecs AudioEncoder` (uplink) and `WebCodecs AudioDeco
 ## PSK Directory Provisioning
 
 The PWA server can receive the Relay Server's PSK-protected UDP directory and
-provision its verified channel/speaker display names to authenticated browser
-WebSocket connections. Browsers never receive the PSK and never directly accept
-UDP packets.
+provision its verified channel/speaker display names plus current participant
+snapshots to authenticated browser WebSocket connections. Browsers never
+receive the PSK and never directly accept UDP packets.
 
 Enable the receiver by configuring both `-directory-udp-listen` and
 `-directory-psk-file`. `-directory-key-id` must match the relay's key ID and
@@ -142,6 +144,14 @@ rejects replays within an epoch, and keeps only a valid unexpired snapshot.
 PWA screens show a provisioned name as `Name (ID)` in active talker state and
 in talk start/end logs; forms still retain their numeric IDs and remain locally
 configured.
+
+Set `-directory-relay-udp-target` (or
+`INCOMUDON_DIRECTORY_RELAY_UDP_TARGET`) to the Relay's directory pull listener
+to enable on-demand refreshes. An authenticated browser WebSocket client can
+send `{ "type": "request_directory_participants" }`; the PWA server signs a
+short-lived UDP request, then forwards the Relay's refreshed `directory` and
+`directory_participants` events to its WebSocket clients. The protocol carries
+only `channelId`, `senderId`, `lastSeenAt`, and `talking` for each participant.
 
 Set the PWA and relay to the same key file through a secure out-of-band channel.
 Do not use a raw PSK in an environment variable, query string, browser storage,
@@ -271,6 +281,15 @@ frames, and playback underruns. It reports `visibilityState`, focus state,
 WebSocket state/buffered amount, AudioContext state/current time, and stream
 buffer data.
 
+For a per-session packet monitor, append `?packet_debug=1` to either the
+single-channel page or the multi-channel page URL. The multi-channel console
+shows one monitor per slot. It updates once per second and reports browser
+TX/RX frame timing, browser and server WebSocket backpressure, relay UDP
+packet counters, decode/mix queues, active sender counters, and playback
+jitter-buffer underruns. The monitor contains aggregate counters only: it
+does not expose packet payloads, keys, passwords, or relay credentials. Its
+`Reset counters` control starts a fresh measurement without disconnecting.
+
 Browser and OS scheduling is not fully under application control. Desktop
 Chrome/Edge normally keep an active AudioContext and WebSocket functioning when
 focus moves to another window. A hidden/minimized page or OS power management
@@ -379,7 +398,8 @@ The browser UI supports startup-time query overrides for controlled launch links
 - Applied behavior:
   - Query values are copied into the UI on startup.
   - After startup reflection completes, the page URL is rewritten.
-  - Only `ws_token` is kept in the rewritten URL.
+  - `ws_token` and the safe diagnostic flag `packet_debug=1` are kept in the
+    rewritten URL.
   - `channel_id`, `password`, and `tx_codec` are removed from the address bar after startup.
 - Notes:
   - `password` from query is still visible to the browser/history/proxy while the initial request is processed. Use it only for trusted/internal launch flows.
@@ -594,5 +614,7 @@ When directory provisioning is enabled, Compose mounts `./directory` read-only a
 `/run/incomudon-directory` and publishes `PWA_DIRECTORY_UDP_HOST_PORT` (default
 `51000`) as UDP. Set `INCOMUDON_DIRECTORY_UDP_LISTEN=:51000`,
 `INCOMUDON_DIRECTORY_PSK_FILE=/run/incomudon-directory/directory.psk`, and a
-narrow `INCOMUDON_DIRECTORY_UDP_ALLOW_CIDRS`. Keep `directory/` private; it is
-ignored by Git.
+narrow `INCOMUDON_DIRECTORY_UDP_ALLOW_CIDRS`. To allow authenticated immediate
+participant refreshes, also set `INCOMUDON_DIRECTORY_RELAY_UDP_TARGET` to the
+Relay's separate directory listener, for example `192.168.1.10:51001`. Keep
+`directory/` private; it is ignored by Git.
