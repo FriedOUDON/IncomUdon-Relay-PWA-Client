@@ -264,6 +264,7 @@ type appServer struct {
 	fixedRelayEnabled bool
 	fixedRelayHost    string
 	fixedRelayPort    int
+	forceRelayIPv4    bool
 	wsToken           string
 	authMode          authMode
 	basicUser         string
@@ -303,6 +304,15 @@ func main() {
 	codec2LibFlag := flag.String("codec2-lib", os.Getenv("INCOMUDON_CODEC2_LIB"), "optional path to user-provided libcodec2.so")
 	opusLibFlag := flag.String("opus-lib", os.Getenv("INCOMUDON_OPUS_LIB"), "optional path to user-provided libopus.so")
 	fixedRelayFlag := flag.String("fixed-relay", os.Getenv("INCOMUDON_FIXED_RELAY"), "optional fixed relay host[:port]; when set, browser relay host/port is ignored")
+	forceRelayIPv4Default := false
+	if raw, configured := os.LookupEnv("INCOMUDON_RELAY_FORCE_IPV4"); configured {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			log.Fatalf("invalid INCOMUDON_RELAY_FORCE_IPV4=%q", raw)
+		}
+		forceRelayIPv4Default = parsed
+	}
+	forceRelayIPv4Flag := flag.Bool("relay-force-ipv4", forceRelayIPv4Default, "force Relay UDP connections to IPv4 and ignore AAAA records")
 	wsTokenFlag := flag.String("ws-token", os.Getenv("INCOMUDON_WS_TOKEN"), "optional shared token required for websocket connections")
 	authModeFlag := flag.String("auth-mode", getenvOrDefault("INCOMUDON_AUTH_MODE", string(authModeNone)), "auth mode: none|basic|oidc")
 	basicUserFlag := flag.String("basic-user", os.Getenv("INCOMUDON_BASIC_USER"), "basic auth username (auth-mode=basic)")
@@ -409,6 +419,7 @@ func main() {
 		fixedRelayEnabled: fixedRelayEnabled,
 		fixedRelayHost:    fixedRelayHost,
 		fixedRelayPort:    fixedRelayPort,
+		forceRelayIPv4:    *forceRelayIPv4Flag,
 		wsToken:           strings.TrimSpace(*wsTokenFlag),
 		authMode:          mode,
 		basicUser:         basicUser,
@@ -813,6 +824,7 @@ func (a *appServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				a.fixedRelayEnabled,
 				a.fixedRelayHost,
 				a.fixedRelayPort,
+				a.forceRelayIPv4,
 			)
 			if closeCurrent && session != nil {
 				session.Close()
@@ -884,6 +896,7 @@ func handleClientCommand(
 	fixedRelayEnabled bool,
 	fixedRelayHost string,
 	fixedRelayPort int,
+	forceRelayIPv4 bool,
 ) (*relaySession, bool) {
 	switch cmd.Type {
 	case "connect":
@@ -892,6 +905,7 @@ func handleClientCommand(
 			enqueueJSON(serverEvent{Type: "status", Level: "error", Message: err.Error()})
 			return current, false
 		}
+		cfg.ForceRelayIPv4 = forceRelayIPv4
 		if setPacketDebugEnabled != nil {
 			setPacketDebugEnabled(cfg.PacketDebug)
 		}

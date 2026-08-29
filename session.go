@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -14,23 +15,24 @@ import (
 )
 
 type sessionConfig struct {
-	RelayHost     string
-	RelayPort     int
-	ChannelID     uint32
-	SenderID      uint32
-	Password      string
-	CryptoMode    cryptoMode
-	CodecMode     int
-	TxCodec       string
-	PCMOnly       bool
-	SelfMute      bool
-	PacketDebug   bool
-	QosEnabled    bool
-	FecEnabled    bool
-	Codec2LibPath string
-	OpusLibPath   string
-	UplinkCodec   string
-	DownlinkCodec string
+	RelayHost      string
+	RelayPort      int
+	ForceRelayIPv4 bool
+	ChannelID      uint32
+	SenderID       uint32
+	Password       string
+	CryptoMode     cryptoMode
+	CodecMode      int
+	TxCodec        string
+	PCMOnly        bool
+	SelfMute       bool
+	PacketDebug    bool
+	QosEnabled     bool
+	FecEnabled     bool
+	Codec2LibPath  string
+	OpusLibPath    string
+	UplinkCodec    string
+	DownlinkCodec  string
 }
 
 const (
@@ -117,15 +119,17 @@ type peerCodecConfig struct {
 }
 
 type relaySession struct {
-	cfg         sessionConfig
-	conn        *net.UDPConn
-	relayAddr   *net.UDPAddr
-	crypto      *cryptoContext
-	codec2      *codec2Engine
-	opusDecoder *opusDecoderEngine
-	opusEncoder *opusEncoderEngine
-	fec         *fecEncoder
-	fecDecoders map[uint32]*fecDecoder
+	cfg            sessionConfig
+	conn           *net.UDPConn
+	relayAddr      *net.UDPAddr
+	relayAddrs     []*net.UDPAddr
+	relayAddrIndex int
+	crypto         *cryptoContext
+	codec2         *codec2Engine
+	opusDecoder    *opusDecoderEngine
+	opusEncoder    *opusEncoderEngine
+	fec            *fecEncoder
+	fecDecoders    map[uint32]*fecDecoder
 
 	cb sessionCallbacks
 
@@ -166,10 +170,11 @@ type relaySession struct {
 }
 
 func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, error) {
-	relayAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", cfg.RelayHost, cfg.RelayPort))
+	relayAddrs, err := resolveRelayUDPAddrs(context.Background(), cfg.RelayHost, cfg.RelayPort, cfg.ForceRelayIPv4)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve relay address: %w", err)
 	}
+	relayAddr := relayAddrs[0]
 
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
 	if err != nil {
@@ -186,6 +191,7 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		cfg:               cfg,
 		conn:              conn,
 		relayAddr:         relayAddr,
+		relayAddrs:        relayAddrs,
 		crypto:            cryptoCtx,
 		fec:               newFECEncoder(cfg.FecEnabled),
 		cb:                cb,
@@ -334,6 +340,116 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 	}
 
 	return s, nil
+}
+
+func resolveRelayUDPAddrs(ctx context.Context, host string, port int, forceIPv4 bool) ([]*net.UDPAddr, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return nil, fmt.Errorf("relay host is required")
+	}
+	if port <= 0 || port > 65535 {
+		return nil, fmt.Errorf("relay port is out of range")
+	}
+
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	}
+	if ip, zone := parseRelayLiteralIP(host); ip != nil {
+		return buildRelayUDPAddrCandidates([]net.IPAddr{{IP: ip, Zone: zone}}, port, forceIPv4)
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ipAddrs, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
+	if err != nil {
+		return nil, err
+	}
+	return buildRelayUDPAddrCandidates(ipAddrs, port, forceIPv4)
+}
+
+func parseRelayLiteralIP(host string) (net.IP, string) {
+	zone := ""
+	if percent := strings.LastIndex(host, "%"); percent > 0 {
+		zone = host[percent+1:]
+		host = host[:percent]
+	}
+	return net.ParseIP(host), zone
+}
+
+func buildRelayUDPAddrCandidates(ipAddrs []net.IPAddr, port int, forceIPv4 bool) ([]*net.UDPAddr, error) {
+	ipv6 := make([]*net.UDPAddr, 0, len(ipAddrs))
+	ipv4 := make([]*net.UDPAddr, 0, len(ipAddrs))
+	seen := make(map[string]struct{}, len(ipAddrs))
+
+	for _, ipAddr := range ipAddrs {
+		if ipAddr.IP == nil {
+			continue
+		}
+
+		var normalized net.IP
+		if ipv4Addr := ipAddr.IP.To4(); ipv4Addr != nil {
+			normalized = append(net.IP(nil), ipv4Addr...)
+		} else if ipv6Addr := ipAddr.IP.To16(); ipv6Addr != nil {
+			normalized = append(net.IP(nil), ipv6Addr...)
+		} else {
+			continue
+		}
+
+		key := normalized.String() + "%" + ipAddr.Zone
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		addr := &net.UDPAddr{IP: normalized, Port: port, Zone: ipAddr.Zone}
+		if normalized.To4() != nil {
+			ipv4 = append(ipv4, addr)
+		} else {
+			ipv6 = append(ipv6, addr)
+		}
+	}
+
+	if forceIPv4 {
+		if len(ipv4) == 0 {
+			return nil, fmt.Errorf("relay host has no IPv4 address while IPv4 is forced")
+		}
+		return ipv4, nil
+	}
+
+	candidates := append(ipv6, ipv4...)
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("relay host resolved to no usable IP addresses")
+	}
+	return candidates, nil
+}
+
+func (s *relaySession) advanceRelayAddress() (from *net.UDPAddr, to *net.UDPAddr, changed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.serverLocked || len(s.relayAddrs) < 2 {
+		return nil, nil, false
+	}
+
+	from = s.relayAddr
+	nextIndex := (s.relayAddrIndex + 1) % len(s.relayAddrs)
+	to = s.relayAddrs[nextIndex]
+	if udpAddrEqual(from, to) {
+		return nil, nil, false
+	}
+	s.relayAddrIndex = nextIndex
+	s.relayAddr = to
+	return from, to, true
+}
+
+func (s *relaySession) emitRelayAddressFallback(from *net.UDPAddr, to *net.UDPAddr, reason string) {
+	if from == nil || to == nil {
+		return
+	}
+	message := fmt.Sprintf("Relay address fallback: %s -> %s", from, to)
+	if strings.TrimSpace(reason) != "" {
+		message += fmt.Sprintf(" (%s)", reason)
+	}
+	s.emitEvent(serverEvent{Type: "status", Level: "debug", Message: message})
 }
 
 func (s *relaySession) Start() {
@@ -903,6 +1019,10 @@ func (s *relaySession) joinRetryLoop() {
 			}
 			s.joinRetriesLeft--
 			s.mu.Unlock()
+			from, to, changed := s.advanceRelayAddress()
+			if changed {
+				s.emitRelayAddressFallback(from, to, "no response to join")
+			}
 
 			if err := s.sendJoin(); err != nil {
 				s.emitError("failed to retry join: %v", err)
@@ -1652,7 +1772,20 @@ func mixPCMFrames(frames [][]byte) []byte {
 }
 
 func (s *relaySession) sendJoin() error {
-	return s.sendControlPacket(pktJoin, nil)
+	err := s.sendControlPacket(pktJoin, nil)
+	if err == nil {
+		return nil
+	}
+
+	from, to, changed := s.advanceRelayAddress()
+	if !changed {
+		return err
+	}
+	s.emitRelayAddressFallback(from, to, fmt.Sprintf("join send failed: %v", err))
+	if fallbackErr := s.sendControlPacket(pktJoin, nil); fallbackErr != nil {
+		return fmt.Errorf("%w; fallback join failed: %v", err, fallbackErr)
+	}
+	return nil
 }
 
 func (s *relaySession) sendLeave() error {
