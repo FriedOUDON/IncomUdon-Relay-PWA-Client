@@ -5,6 +5,9 @@ import (
 	"crypto/cipher"
 	"encoding/base64"
 	"encoding/json"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +107,71 @@ func TestDirectoryReceiverAcceptsParticipantsDocument(t *testing.T) {
 	}
 	if len(got.Participants) != 2 || !got.Participants[0].Talking {
 		t.Fatalf("openParticipantsDocument() = %#v", got)
+	}
+}
+
+func TestDirectoryReceiverUsesEphemeralPortForDirectStartup(t *testing.T) {
+	psk := []byte(strings.Repeat("r", directoryPSKBytes))
+	pskPath := filepath.Join(t.TempDir(), "directory.psk")
+	if err := os.WriteFile(pskPath, []byte(base64.RawURLEncoding.EncodeToString(psk)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receiver, err := newDirectoryReceiver(directoryReceiverConfig{
+		Enabled: true,
+		PSKFile: pskPath,
+	})
+	if err != nil {
+		t.Fatalf("newDirectoryReceiver() error = %v", err)
+	}
+	defer receiver.Close()
+	local, ok := receiver.conn.LocalAddr().(*net.UDPAddr)
+	if !ok || local.Port == 0 {
+		t.Fatalf("direct directory listener = %#v, want allocated UDP port", receiver.conn.LocalAddr())
+	}
+}
+
+func TestDirectoryReceiverSendsAuthenticatedRegistration(t *testing.T) {
+	psk := []byte(strings.Repeat("s", directoryPSKBytes))
+	pskPath := filepath.Join(t.TempDir(), "directory.psk")
+	if err := os.WriteFile(pskPath, []byte(base64.RawURLEncoding.EncodeToString(psk)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	relay, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	receiver, err := newDirectoryReceiver(directoryReceiverConfig{
+		Enabled:       true,
+		ListenAddress: ":0",
+		PSKFile:       pskPath,
+		RelayTarget:   relay.LocalAddr().String(),
+	})
+	if err != nil {
+		t.Fatalf("newDirectoryReceiver() error = %v", err)
+	}
+	defer receiver.Close()
+	if err := receiver.sendRegistration(directoryEnvelopeRegister); err != nil {
+		t.Fatalf("sendRegistration() error = %v", err)
+	}
+	if err := relay.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, directoryMaxDatagramBytes)
+	n, _, err := relay.ReadFromUDP(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, payload, err := receiver.openPayload(buffer[:n], directoryEnvelopeRegister, time.Now())
+	if err != nil {
+		t.Fatalf("openPayload() error = %v", err)
+	}
+	var registration directoryRegistration
+	if err := decodeDirectoryJSON(payload, &registration); err != nil {
+		t.Fatal(err)
+	}
+	if registration.InstanceID != receiver.instanceID || registration.Version != directoryProtocolVersion {
+		t.Fatalf("registration = %#v, want instance %q", registration, receiver.instanceID)
 	}
 }
 

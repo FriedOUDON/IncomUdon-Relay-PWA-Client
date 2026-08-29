@@ -282,11 +282,21 @@ func main() {
 	multiPathFlag := flag.String("multi-path", os.Getenv("INCOMUDON_MULTI_PATH"), "multi-channel page URL (default: <base-path>/multi)")
 	multiMaxSlotsFlag := flag.String("multi-max-slots", os.Getenv("INCOMUDON_MULTI_MAX_SLOTS"), "maximum browser-addable multi-channel slots (1-10, default: 10)")
 	multiDefaultSlotsFlag := flag.String("multi-default-slots", os.Getenv("INCOMUDON_MULTI_DEFAULT_SLOTS"), "initial multi-channel slots for a new browser (1-10, default: 4; capped by max slots)")
-	directoryUDPListenFlag := flag.String("directory-udp-listen", os.Getenv("INCOMUDON_DIRECTORY_UDP_LISTEN"), "UDP listen address for PSK-protected relay directory snapshots (disabled when empty)")
+	directoryEnabledDefault := os.Getenv("INCOMUDON_DIRECTORY_UDP_LISTEN") != "" || os.Getenv("INCOMUDON_DIRECTORY_PSK_FILE") != "" || os.Getenv("INCOMUDON_DIRECTORY_RELAY_UDP_TARGET") != ""
+	if raw, configured := os.LookupEnv("INCOMUDON_DIRECTORY_ENABLED"); configured {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			log.Fatalf("invalid INCOMUDON_DIRECTORY_ENABLED=%q", raw)
+		}
+		directoryEnabledDefault = parsed
+	}
+	directoryEnabledFlag := flag.Bool("directory-enabled", directoryEnabledDefault, "enable PSK-protected Relay directory receiving and dynamic registration")
+	directoryUDPListenFlag := flag.String("directory-udp-listen", os.Getenv("INCOMUDON_DIRECTORY_UDP_LISTEN"), "UDP listen address for PSK directory traffic (default :0 outside Docker when enabled)")
 	directoryPSKFileFlag := flag.String("directory-psk-file", os.Getenv("INCOMUDON_DIRECTORY_PSK_FILE"), "path to base64url directory PSK file")
 	directoryKeyIDFlag := flag.String("directory-key-id", os.Getenv("INCOMUDON_DIRECTORY_KEY_ID"), "expected directory PSK key ID (default pwa-1)")
 	directoryAllowCIDRsFlag := flag.String("directory-udp-allow-cidrs", os.Getenv("INCOMUDON_DIRECTORY_UDP_ALLOW_CIDRS"), "optional comma-separated source CIDRs allowed to send directory snapshots")
-	directoryRelayTargetFlag := flag.String("directory-relay-udp-target", os.Getenv("INCOMUDON_DIRECTORY_RELAY_UDP_TARGET"), "optional relay directory UDP address for authenticated participant pull requests")
+	directoryRelayTargetFlag := flag.String("directory-relay-udp-target", os.Getenv("INCOMUDON_DIRECTORY_RELAY_UDP_TARGET"), "optional Relay directory UDP address for registration, heartbeat, and participant pulls")
+	directoryRegisterIntervalFlag := flag.String("directory-register-interval", getenvOrDefault("INCOMUDON_DIRECTORY_REGISTER_INTERVAL", directoryDefaultRegisterInterval.String()), "dynamic directory registration heartbeat interval")
 	codec2LibFlag := flag.String("codec2-lib", os.Getenv("INCOMUDON_CODEC2_LIB"), "optional path to user-provided libcodec2.so")
 	opusLibFlag := flag.String("opus-lib", os.Getenv("INCOMUDON_OPUS_LIB"), "optional path to user-provided libopus.so")
 	fixedRelayFlag := flag.String("fixed-relay", os.Getenv("INCOMUDON_FIXED_RELAY"), "optional fixed relay host[:port]; when set, browser relay host/port is ignored")
@@ -315,6 +325,10 @@ func main() {
 	multiDefaultSlots, err := parseMultiDefaultSlots(*multiDefaultSlotsFlag, multiMaxSlots)
 	if err != nil {
 		log.Fatalf("invalid initial multi-channel slot count: %v", err)
+	}
+	directoryRegisterInterval, err := time.ParseDuration(strings.TrimSpace(*directoryRegisterIntervalFlag))
+	if err != nil {
+		log.Fatalf("invalid directory-register-interval: %v", err)
 	}
 	fixedRelayHost, fixedRelayPort, fixedRelayEnabled, err := parseFixedRelayConfig(*fixedRelayFlag)
 	if err != nil {
@@ -412,11 +426,13 @@ func main() {
 	}
 
 	directoryReceiver, err := newDirectoryReceiver(directoryReceiverConfig{
-		ListenAddress: *directoryUDPListenFlag,
-		PSKFile:       *directoryPSKFileFlag,
-		KeyID:         *directoryKeyIDFlag,
-		AllowCIDRs:    *directoryAllowCIDRsFlag,
-		RelayTarget:   *directoryRelayTargetFlag,
+		Enabled:          *directoryEnabledFlag,
+		ListenAddress:    *directoryUDPListenFlag,
+		PSKFile:          *directoryPSKFileFlag,
+		KeyID:            *directoryKeyIDFlag,
+		AllowCIDRs:       *directoryAllowCIDRsFlag,
+		RelayTarget:      *directoryRelayTargetFlag,
+		RegisterInterval: directoryRegisterInterval,
 	})
 	if err != nil {
 		log.Fatalf("invalid directory receiving configuration: %v", err)
@@ -424,7 +440,7 @@ func main() {
 	if directoryReceiver != nil {
 		defer directoryReceiver.Close()
 		app.directoryReceiver = directoryReceiver
-		log.Printf("PSK directory receiving enabled: listen=%s key_id=%s pull_target=%s", *directoryUDPListenFlag, directoryReceiver.keyID, *directoryRelayTargetFlag)
+		log.Printf("PSK directory receiving enabled: listen=%s key_id=%s relay_target=%s register_interval=%s", directoryReceiver.conn.LocalAddr(), directoryReceiver.keyID, *directoryRelayTargetFlag, directoryReceiver.registerInterval)
 		if len(directoryReceiver.allowed) == 0 {
 			log.Printf("PSK directory source CIDR filtering is disabled; configure -directory-udp-allow-cidrs to reduce unauthenticated UDP load")
 		}

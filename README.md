@@ -49,15 +49,18 @@ This project supports optional `libopus.so` bundling.
 
 ## Runtime Options
 
-- `-directory-udp-listen :51000`
-- `INCOMUDON_DIRECTORY_UDP_LISTEN=:51000`
+- `-directory-enabled` / `INCOMUDON_DIRECTORY_ENABLED=true`
+- `-directory-udp-listen :0` (default when directory mode is enabled outside Docker)
+- `INCOMUDON_DIRECTORY_UDP_LISTEN=:0`
 - `-directory-psk-file /run/incomudon-directory/directory.psk`
 - `INCOMUDON_DIRECTORY_PSK_FILE=/run/incomudon-directory/directory.psk`
 - `-directory-key-id pwa-1` / `INCOMUDON_DIRECTORY_KEY_ID=pwa-1`
 - `-directory-udp-allow-cidrs 203.0.113.10/32`
 - `INCOMUDON_DIRECTORY_UDP_ALLOW_CIDRS=203.0.113.10/32`
-- `-directory-relay-udp-target relay.example.com:51001`
-- `INCOMUDON_DIRECTORY_RELAY_UDP_TARGET=relay.example.com:51001`
+- `-directory-relay-udp-target relay.example.com:51000`
+- `INCOMUDON_DIRECTORY_RELAY_UDP_TARGET=relay.example.com:51000`
+- `-directory-register-interval 15s`
+- `INCOMUDON_DIRECTORY_REGISTER_INTERVAL=15s`
 - `-codec2-lib /path/to/libcodec2.so`
 - `INCOMUDON_CODEC2_LIB=/path/to/libcodec2.so`
 - Web UI field: `Codec2 Library Path (server)`
@@ -610,11 +613,19 @@ Place optional dynamic libraries before starting Compose:
 
 Keep .env private because it can contain authentication secrets and shared tokens.
 
-When directory provisioning is enabled, Compose mounts `./directory` read-only at
-`/run/incomudon-directory` and publishes `PWA_DIRECTORY_UDP_HOST_PORT` (default
-`51000`) as UDP. Set `INCOMUDON_DIRECTORY_UDP_LISTEN=:51000`,
-`INCOMUDON_DIRECTORY_PSK_FILE=/run/incomudon-directory/directory.psk`, and a
-narrow `INCOMUDON_DIRECTORY_UDP_ALLOW_CIDRS`. To allow authenticated immediate
-participant refreshes, also set `INCOMUDON_DIRECTORY_RELAY_UDP_TARGET` to the
-Relay's separate directory listener, for example `192.168.1.10:51001`. Keep
-`directory/` private; it is ignored by Git.
+When directory provisioning is enabled, Compose mounts `./directory` read-only
+at `/run/incomudon-directory` and binds the PWA server to UDP `:51000` inside
+the container. `INCOMUDON_DIRECTORY_COMPOSE_UDP_HOST_PORT` defaults to the
+range `51001-51100`, allowing Docker to select an available host port. Set it
+to one port number to use a fixed public mapping. The Relay learns the actual
+PWA endpoint through encrypted `register` and `heartbeat` datagrams, so no
+Relay-side static PWA port needs to be configured.
+
+Set `INCOMUDON_DIRECTORY_ENABLED=true`,
+`INCOMUDON_DIRECTORY_PSK_FILE=/run/incomudon-directory/directory.psk`,
+`INCOMUDON_DIRECTORY_RELAY_UDP_TARGET=192.168.1.10:51000`, and a narrow
+`INCOMUDON_DIRECTORY_UDP_ALLOW_CIDRS`. The PWA registers at startup and sends
+a heartbeat every `INCOMUDON_DIRECTORY_REGISTER_INTERVAL` (default `15s`).
+For direct binary startup, omit `INCOMUDON_DIRECTORY_UDP_LISTEN` to use an
+ephemeral `:0` port, or set it explicitly to pin a port. Keep `directory/`
+private; it is ignored by Git.

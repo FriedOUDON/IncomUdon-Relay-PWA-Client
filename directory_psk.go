@@ -27,22 +27,25 @@ import (
 )
 
 const (
-	directoryProtocolVersion      = 1
-	directoryEnvelopeSnapshot     = "snapshot"
-	directoryEnvelopeParticipants = "participants"
-	directoryEnvelopeRequest      = "request"
-	directoryPSKBytes             = 32
-	directoryEpochBytes           = 16
-	directoryMaxDatagramBytes     = 2048
-	directoryMaxChannels          = 256
-	directoryMaxSpeakers          = 4096
-	directoryMaxParticipants      = 128
-	directoryMaxNameRunes         = 128
-	directoryMaxKeyIDBytes        = 64
-	directoryMaxValidity          = 5 * time.Minute
-	directoryDefaultKeyID         = "pwa-1"
-	directoryRequestTTL           = 30 * time.Second
-	directoryKeyDerivationLabel   = "IncomUdon directory PSK v1 relay-to-pwa"
+	directoryProtocolVersion         = 1
+	directoryEnvelopeSnapshot        = "snapshot"
+	directoryEnvelopeParticipants    = "participants"
+	directoryEnvelopeRequest         = "request"
+	directoryEnvelopeRegister        = "register"
+	directoryEnvelopeHeartbeat       = "heartbeat"
+	directoryPSKBytes                = 32
+	directoryEpochBytes              = 16
+	directoryMaxDatagramBytes        = 2048
+	directoryMaxChannels             = 256
+	directoryMaxSpeakers             = 4096
+	directoryMaxParticipants         = 128
+	directoryMaxNameRunes            = 128
+	directoryMaxKeyIDBytes           = 64
+	directoryMaxValidity             = 5 * time.Minute
+	directoryDefaultKeyID            = "pwa-1"
+	directoryRequestTTL              = 30 * time.Second
+	directoryDefaultRegisterInterval = 15 * time.Second
+	directoryKeyDerivationLabel      = "IncomUdon directory PSK v1 relay-to-pwa"
 )
 
 type directoryChannel struct {
@@ -89,6 +92,15 @@ type directoryRequest struct {
 	ExpiresAt int64 `json:"expiresAt"`
 }
 
+// directoryRegistration is address-free so the Relay can use the observed UDP
+// source endpoint. Native clients can use this same versioned payload.
+type directoryRegistration struct {
+	Version    int    `json:"version"`
+	InstanceID string `json:"instanceId"`
+	IssuedAt   int64  `json:"issuedAt"`
+	ExpiresAt  int64  `json:"expiresAt"`
+}
+
 type directoryEnvelope struct {
 	Version    int    `json:"v"`
 	Type       string `json:"type"`
@@ -100,11 +112,13 @@ type directoryEnvelope struct {
 }
 
 type directoryReceiverConfig struct {
-	ListenAddress string
-	PSKFile       string
-	KeyID         string
-	AllowCIDRs    string
-	RelayTarget   string
+	Enabled          bool
+	ListenAddress    string
+	PSKFile          string
+	KeyID            string
+	AllowCIDRs       string
+	RelayTarget      string
+	RegisterInterval time.Duration
 }
 
 type directoryReplayState struct {
@@ -113,16 +127,20 @@ type directoryReplayState struct {
 }
 
 type directoryReceiver struct {
-	conn            *net.UDPConn
-	psk             []byte
-	keyID           string
-	allowed         []*net.IPNet
-	relayTarget     *net.UDPAddr
-	requestEpoch    []byte
-	requestMu       sync.Mutex
-	requestSequence uint64
-	replayMu        sync.Mutex
-	replay          map[string]directoryReplayState
+	conn             *net.UDPConn
+	psk              []byte
+	keyID            string
+	allowed          []*net.IPNet
+	relayTarget      *net.UDPAddr
+	controlEpoch     []byte
+	instanceID       string
+	registerInterval time.Duration
+	controlMu        sync.Mutex
+	controlSequence  uint64
+	replayMu         sync.Mutex
+	replay           map[string]directoryReplayState
+	done             chan struct{}
+	closeOnce        sync.Once
 }
 
 type directoryStore struct {
@@ -144,12 +162,14 @@ func newDirectoryReceiver(config directoryReceiverConfig) (*directoryReceiver, e
 	if config.KeyID == "" {
 		config.KeyID = directoryDefaultKeyID
 	}
-	configured := config.ListenAddress != "" || config.PSKFile != "" || config.RelayTarget != ""
-	if !configured {
+	if !config.Enabled {
 		return nil, nil
 	}
-	if config.ListenAddress == "" || config.PSKFile == "" {
-		return nil, fmt.Errorf("directory receiving requires UDP listen address and PSK file")
+	if config.PSKFile == "" {
+		return nil, fmt.Errorf("directory receiving requires a PSK file")
+	}
+	if config.ListenAddress == "" {
+		config.ListenAddress = ":0"
 	}
 	if err := validateDirectoryKeyID(config.KeyID); err != nil {
 		return nil, err
@@ -178,24 +198,47 @@ func newDirectoryReceiver(config directoryReceiverConfig) (*directoryReceiver, e
 			return nil, fmt.Errorf("resolve relay directory UDP target: %w", err)
 		}
 	}
-	requestEpoch := make([]byte, directoryEpochBytes)
-	if _, err := rand.Read(requestEpoch); err != nil {
+	controlEpoch := make([]byte, directoryEpochBytes)
+	if _, err := rand.Read(controlEpoch); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("generate directory request epoch: %w", err)
+		return nil, fmt.Errorf("generate directory control epoch: %w", err)
+	}
+	instanceBytes := make([]byte, directoryEpochBytes)
+	if _, err := rand.Read(instanceBytes); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("generate directory client instance ID: %w", err)
+	}
+	if config.RegisterInterval <= 0 {
+		config.RegisterInterval = directoryDefaultRegisterInterval
+	}
+	if config.RegisterInterval < time.Second || config.RegisterInterval >= directoryMaxValidity {
+		_ = conn.Close()
+		return nil, fmt.Errorf("directory registration interval must be between 1s and %s", directoryMaxValidity)
 	}
 	return &directoryReceiver{
-		conn:         conn,
-		psk:          psk,
-		keyID:        config.KeyID,
-		allowed:      allowed,
-		relayTarget:  relayTarget,
-		requestEpoch: requestEpoch,
-		replay:       make(map[string]directoryReplayState),
+		conn:             conn,
+		psk:              psk,
+		keyID:            config.KeyID,
+		allowed:          allowed,
+		relayTarget:      relayTarget,
+		controlEpoch:     controlEpoch,
+		instanceID:       base64.RawURLEncoding.EncodeToString(instanceBytes),
+		registerInterval: config.RegisterInterval,
+		replay:           make(map[string]directoryReplayState),
+		done:             make(chan struct{}),
 	}, nil
 }
 
 func (r *directoryReceiver) Close() error {
-	if r == nil || r.conn == nil {
+	if r == nil {
+		return nil
+	}
+	r.closeOnce.Do(func() {
+		if r.done != nil {
+			close(r.done)
+		}
+	})
+	if r.conn == nil {
 		return nil
 	}
 	return r.conn.Close()
@@ -204,6 +247,14 @@ func (r *directoryReceiver) Close() error {
 func (r *directoryReceiver) Run(onDocument func(*directoryDocument), onParticipants func(*directoryParticipantsDocument)) {
 	if r == nil || r.conn == nil {
 		return
+	}
+	defer r.closeOnce.Do(func() {
+		if r.done != nil {
+			close(r.done)
+		}
+	})
+	if r.relayTarget != nil {
+		go r.registrationLoop()
 	}
 	buffer := make([]byte, directoryMaxDatagramBytes+1)
 	for {
@@ -355,15 +406,57 @@ func (r *directoryReceiver) RequestParticipants() error {
 		IssuedAt:  now.Unix(),
 		ExpiresAt: now.Add(directoryRequestTTL).Unix(),
 	}
-	payload, err := json.Marshal(request)
+	return r.sendControl(directoryEnvelopeRequest, request, request.ExpiresAt)
+}
+
+func (r *directoryReceiver) registrationLoop() {
+	if err := r.sendRegistration(directoryEnvelopeRegister); err != nil {
+		log.Printf("directory client registration failed: %v", err)
+	}
+	ticker := time.NewTicker(r.registerInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.done:
+			return
+		case <-ticker.C:
+			if err := r.sendRegistration(directoryEnvelopeHeartbeat); err != nil {
+				log.Printf("directory client heartbeat failed: %v", err)
+			}
+		}
+	}
+}
+
+func (r *directoryReceiver) sendRegistration(envelopeType string) error {
+	if r == nil || r.conn == nil || r.relayTarget == nil {
+		return fmt.Errorf("relay directory registration is not configured")
+	}
+	if envelopeType != directoryEnvelopeRegister && envelopeType != directoryEnvelopeHeartbeat {
+		return fmt.Errorf("invalid directory registration type")
+	}
+	now := time.Now()
+	registration := directoryRegistration{
+		Version:    directoryProtocolVersion,
+		InstanceID: r.instanceID,
+		IssuedAt:   now.Unix(),
+		ExpiresAt:  now.Add(directoryRequestTTL).Unix(),
+	}
+	return r.sendControl(envelopeType, registration, registration.ExpiresAt)
+}
+
+func (r *directoryReceiver) sendControl(envelopeType string, payloadValue any, expiresAt int64) error {
+	if r == nil || r.conn == nil || r.relayTarget == nil {
+		return fmt.Errorf("relay directory control target is not configured")
+	}
+	payload, err := json.Marshal(payloadValue)
 	if err != nil {
 		return err
 	}
-	r.requestMu.Lock()
-	r.requestSequence++
-	sequence := r.requestSequence
-	envelope, err := sealDirectoryEnvelope(r.psk, r.keyID, r.requestEpoch, sequence, request.ExpiresAt, payload, directoryEnvelopeRequest)
-	r.requestMu.Unlock()
+	r.controlMu.Lock()
+	r.controlSequence++
+	sequence := r.controlSequence
+	envelope, err := sealDirectoryEnvelope(r.psk, r.keyID, r.controlEpoch, sequence, expiresAt, payload, envelopeType)
+	r.controlMu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -372,10 +465,10 @@ func (r *directoryReceiver) RequestParticipants() error {
 		return err
 	}
 	if len(packet) > directoryMaxDatagramBytes {
-		return fmt.Errorf("directory pull request exceeds maximum datagram size")
+		return fmt.Errorf("directory %s exceeds maximum datagram size", envelopeType)
 	}
 	if _, err := r.conn.WriteToUDP(packet, r.relayTarget); err != nil {
-		return fmt.Errorf("send directory pull request: %w", err)
+		return fmt.Errorf("send directory %s: %w", envelopeType, err)
 	}
 	return nil
 }
@@ -577,6 +670,14 @@ func validateDirectoryKeyID(keyID string) error {
 	return nil
 }
 
+func validateDirectoryInstanceID(instanceID string) error {
+	decoded, err := base64.RawURLEncoding.DecodeString(instanceID)
+	if err != nil || len(decoded) != directoryEpochBytes {
+		return fmt.Errorf("invalid directory client instance ID")
+	}
+	return nil
+}
+
 func deriveDirectoryKey(psk, epoch []byte) []byte {
 	mac := hmac.New(sha256.New, psk)
 	_, _ = mac.Write([]byte(directoryKeyDerivationLabel))
@@ -620,7 +721,7 @@ func directoryEnvelopeAAD(envelope directoryEnvelope, epoch []byte) ([]byte, err
 
 func isDirectoryEnvelopeType(value string) bool {
 	switch value {
-	case directoryEnvelopeSnapshot, directoryEnvelopeParticipants, directoryEnvelopeRequest:
+	case directoryEnvelopeSnapshot, directoryEnvelopeParticipants, directoryEnvelopeRequest, directoryEnvelopeRegister, directoryEnvelopeHeartbeat:
 		return true
 	default:
 		return false
