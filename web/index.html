@@ -108,11 +108,11 @@
                 <h2 id="headingAdvancedSettings" class="settings-group-title">Advanced Settings</h2>
               </summary>
               <div class="connect-grid connect-grid-advanced">
-                <label>
+                <label{{if .FixedRelayEnabled}} hidden{{end}}>
                   <span id="labelRelayHost">Relay Host</span>
                   <input id="relayHost" type="text" value="" autocomplete="off" spellcheck="false">
                 </label>
-                <label>
+                <label{{if .FixedRelayEnabled}} hidden{{end}}>
                   <span id="labelRelayPort">Relay Port</span>
                   <input id="relayPort" type="number" value="50000" min="1" max="65535">
                 </label>

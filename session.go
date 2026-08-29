@@ -1193,15 +1193,10 @@ func (s *relaySession) acceptServerAddress(from *net.UDPAddr) bool {
 	s.relayAddr = from
 	s.joinRetriesLeft = 0
 	channelID := s.cfg.ChannelID
-	message := fmt.Sprintf("Relay endpoint locked to %s", from.String())
+	senderID := s.cfg.SenderID
 	s.mu.Unlock()
 
-	s.emitEvent(serverEvent{
-		Type:      "status",
-		Level:     "debug",
-		Message:   message,
-		ChannelID: channelID,
-	})
+	log.Printf("Relay endpoint locked to %s (channel=%d sender=%d)", from, channelID, senderID)
 	s.emitConnected()
 	return true
 }
