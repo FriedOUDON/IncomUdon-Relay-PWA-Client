@@ -52,6 +52,7 @@
   "status_offline": "オフライン",
   "status_error": "エラー",
   "status_connected": "接続中 ({host}:{port})",
+  "status_connected_generic": "接続中",
   "talker_none": "なし",
   "talker_you": "自分",
   "log_connect_failed": "接続失敗: {error}",

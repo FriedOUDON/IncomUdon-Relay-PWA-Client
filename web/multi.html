@@ -14,6 +14,8 @@
   data-multi-path="{{.MultiPath}}"
   data-multi-max-slots="{{.MultiMaxSlots}}"
   data-multi-default-slots="{{.MultiDefaultSlots}}"
+  data-fixed-relay-enabled="{{if .FixedRelayEnabled}}1{{else}}0{{end}}"
+  data-directory-dynamic-target-configurable="{{if .DirectoryDynamicTargetConfigurable}}1{{else}}0{{end}}"
   data-auth-mode="{{.AuthMode}}">
   <div class="backdrop" aria-hidden="true"></div>
   <main id="multiMain" class="layout multi-layout" tabindex="-1">

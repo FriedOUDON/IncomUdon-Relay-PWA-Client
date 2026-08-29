@@ -647,8 +647,6 @@ type pageTemplateData struct {
 	MultiMaxSlots                      int
 	MultiDefaultSlots                  int
 	FixedRelayEnabled                  bool
-	FixedRelayHost                     string
-	FixedRelayPort                     int
 	DirectoryDynamicTargetConfigurable bool
 	WSTokenRequired                    bool
 	AuthMode                           string
@@ -664,8 +662,6 @@ func (a *appServer) pageData() pageTemplateData {
 		MultiMaxSlots:                      a.multiMaxSlots,
 		MultiDefaultSlots:                  a.multiDefaultSlots,
 		FixedRelayEnabled:                  a.fixedRelayEnabled,
-		FixedRelayHost:                     a.fixedRelayHost,
-		FixedRelayPort:                     a.fixedRelayPort,
 		DirectoryDynamicTargetConfigurable: a.directoryReceiver != nil && a.directoryReceiver.relayTarget == nil,
 		WSTokenRequired:                    strings.TrimSpace(a.wsToken) != "",
 		AuthMode:                           string(a.authMode),
@@ -906,6 +902,7 @@ func handleClientCommand(
 			return current, false
 		}
 		cfg.ForceRelayIPv4 = forceRelayIPv4
+		cfg.HideRelayEndpoint = fixedRelayEnabled
 		if setPacketDebugEnabled != nil {
 			setPacketDebugEnabled(cfg.PacketDebug)
 		}

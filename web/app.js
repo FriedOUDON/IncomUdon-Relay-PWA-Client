@@ -1,9 +1,6 @@
 (() => {
   const basePath = document.body.dataset.basePath || "";
   const fixedRelayEnabled = document.body.dataset.fixedRelayEnabled === "1";
-  const fixedRelayHost = String(document.body.dataset.fixedRelayHost || "").trim();
-  const fixedRelayPortRaw = Number.parseInt(document.body.dataset.fixedRelayPort || "", 10);
-  const fixedRelayPort = Number.isFinite(fixedRelayPortRaw) && fixedRelayPortRaw > 0 ? fixedRelayPortRaw : 50000;
   const directoryDynamicTargetConfigurable = document.body.dataset.directoryDynamicTargetConfigurable === "1";
   const wsTokenRequired = document.body.dataset.wsTokenRequired === "1";
   const authMode = String(document.body.dataset.authMode || "none").trim().toLowerCase();
@@ -262,6 +259,7 @@
     status_error: "Error",
     status_reconnecting: "Disconnected (reconnecting...)",
     status_connected: "Connected ({host}:{port})",
+    status_connected_generic: "Connected",
     talker_none: "None",
     talker_you: "You",
     log_connect_failed: "connect failed: {error}",
@@ -1758,8 +1756,8 @@
 
       sendCommand({
         type: "connect",
-        relayHost: fixedRelayEnabled ? effectiveFixedRelayHost() : currentRelayHost(),
-        relayPort: fixedRelayEnabled ? effectiveFixedRelayPort() : currentRelayPort(),
+        relayHost: fixedRelayEnabled ? "" : currentRelayHost(),
+        relayPort: fixedRelayEnabled ? 0 : currentRelayPort(),
         channelId: Number(ui.channelId.value),
         senderId: safeSenderID,
         password: passwordToken,
@@ -1991,7 +1989,13 @@
       persistFormSettings();
       refreshPTTAvailability();
       refreshAudioTxSlotsUI();
-      setConnectionView({ kind: "connected", level: "ok", host: event.relayHost, port: event.relayPort });
+      setConnectionView({
+        kind: "connected",
+        level: "ok",
+        host: event.relayHost,
+        port: event.relayPort,
+        hideEndpoint: fixedRelayEnabled,
+      });
       notifyEmbeddedSlotState();
       appendLog(t("log_connected_summary", {
         channel: formatDirectoryChannelLabel(Number(event.channelId || ui.channelId.value) || 0),
@@ -2218,10 +2222,10 @@
 
   function applyInitialFormSettings() {
     const defaults = {
-      relayHost: defaultRelayHost(),
-      relayPort: "50000",
-      directoryHost: defaultRelayHost(),
-      directoryPort: "51000",
+      relayHost: fixedRelayEnabled ? "" : defaultRelayHost(),
+      relayPort: fixedRelayEnabled ? "" : "50000",
+      directoryHost: directoryDynamicTargetConfigurable ? defaultRelayHost() : "",
+      directoryPort: directoryDynamicTargetConfigurable ? "51000" : "",
       channelId: "1",
       senderId: String(randomSenderID()),
       passwordHash: "",
@@ -2247,12 +2251,6 @@
       audioTxSlotCount: "3",
       audioTxLoopEnabled: false,
     };
-    if (fixedRelayEnabled) {
-      defaults.relayHost = effectiveFixedRelayHost();
-      defaults.relayPort = String(effectiveFixedRelayPort());
-      defaults.directoryHost = defaults.relayHost;
-    }
-
     const stored = readStoredSettings();
     const merged = {
       ...defaults,
@@ -2297,8 +2295,8 @@
       merged.micVolumePercent = defaults.micVolumePercent;
     }
     if (fixedRelayEnabled) {
-      merged.relayHost = defaults.relayHost;
-      merged.relayPort = defaults.relayPort;
+      merged.relayHost = "";
+      merged.relayPort = "";
     }
 
     ui.relayHost.value = String(merged.relayHost);
@@ -2465,18 +2463,12 @@
   }
 
   function hasAutoConnectConfig() {
-    const relayHost = fixedRelayEnabled
-      ? effectiveFixedRelayHost()
-      : currentRelayHost();
-    const relayPort = fixedRelayEnabled
-      ? Number(effectiveFixedRelayPort())
-      : currentRelayPort();
+    const relayHost = currentRelayHost();
+    const relayPort = currentRelayPort();
     const channelID = Number.parseInt(String(ui.channelId ? ui.channelId.value : "").trim(), 10);
     const passwordHash = normalizePasswordHashToken(state.passwordHash);
     return (
-      relayHost !== "" &&
-      Number.isFinite(relayPort) &&
-      relayPort > 0 &&
+      (fixedRelayEnabled || (relayHost !== "" && Number.isFinite(relayPort) && relayPort > 0)) &&
       Number.isInteger(channelID) &&
       channelID > 0 &&
       passwordHash !== ""
@@ -2564,20 +2556,41 @@
       if (!parsed || typeof parsed !== "object") {
         return {};
       }
-      return parsed;
+      return stripServerManagedEndpointSettings(parsed);
     } catch (_) {
       return {};
     }
+  }
+
+  function isServerManagedEndpointSetting(key) {
+    return (fixedRelayEnabled && (key === "relayHost" || key === "relayPort")) ||
+      (!directoryDynamicTargetConfigurable && (key === "directoryHost" || key === "directoryPort"));
+  }
+
+  function stripServerManagedEndpointSettings(settings) {
+    if (!settings || typeof settings !== "object") {
+      return settings;
+    }
+    ["relayHost", "relayPort", "directoryHost", "directoryPort"].forEach((key) => {
+      if (isServerManagedEndpointSetting(key)) {
+        delete settings[key];
+      }
+    });
+    return settings;
   }
 
   function persistFormSettings() {
     const selectedTxCodec = sanitizeSelectedTxCodec();
     const passwordHash = normalizePasswordHashToken(state.passwordHash);
     const settings = {
-      relayHost: fixedRelayEnabled ? effectiveFixedRelayHost() : currentRelayHost(),
-      relayPort: fixedRelayEnabled ? String(effectiveFixedRelayPort()) : String(currentRelayPort() || ""),
-      directoryHost: currentDirectoryHost(),
-      directoryPort: String(currentDirectoryPort() || ""),
+      ...(fixedRelayEnabled ? {} : {
+        relayHost: currentRelayHost(),
+        relayPort: String(currentRelayPort() || ""),
+      }),
+      ...(directoryDynamicTargetConfigurable ? {
+        directoryHost: currentDirectoryHost(),
+        directoryPort: String(currentDirectoryPort() || ""),
+      } : {}),
       channelId: ui.channelId.value,
       senderId: ui.senderId.value,
       passwordHash,
@@ -4195,7 +4208,12 @@
         setConnectionStatus(t("status_connecting"), view.level || "warn");
         return;
       case "connected":
-        setConnectionStatus(t("status_connected", { host: view.host, port: view.port }), view.level || "ok");
+        setConnectionStatus(
+          view.hideEndpoint
+            ? t("status_connected_generic")
+            : t("status_connected", { host: view.host, port: view.port }),
+          view.level || "ok",
+        );
         return;
       case "error":
         setConnectionStatus(t("status_error"), view.level || "error");
@@ -4476,6 +4494,7 @@
     const stored = readStoredSettings();
     const settings = {};
     portableSettingsKeys.forEach((key) => {
+      if (isServerManagedEndpointSetting(key)) return;
       const value = stored[key];
       if (["string", "number", "boolean"].includes(typeof value)) settings[key] = value;
     });
@@ -4509,11 +4528,12 @@
     }
     const next = { ...readStoredSettings() };
     portableSettingsKeys.forEach((key) => {
+      if (isServerManagedEndpointSetting(key)) return;
       const value = documentData.settings[key];
       if (["string", "number", "boolean"].includes(typeof value)) next[key] = value;
     });
     delete next.password;
-    localStorage.setItem(settingsStorageKey, JSON.stringify(next));
+    localStorage.setItem(settingsStorageKey, JSON.stringify(stripServerManagedEndpointSettings(next)));
   }
 
   async function importPortableSettingsFile(file) {
@@ -5141,24 +5161,16 @@
     return "127.0.0.1";
   }
 
-  function effectiveFixedRelayHost() {
-    return fixedRelayHost || defaultRelayHost();
-  }
-
-  function effectiveFixedRelayPort() {
-    return fixedRelayPort;
-  }
-
   function applyFixedRelayUIState() {
     if (!fixedRelayEnabled) {
       return;
     }
-    ui.relayHost.value = effectiveFixedRelayHost();
-    ui.relayPort.value = String(effectiveFixedRelayPort());
-    ui.relayHost.readOnly = true;
-    ui.relayPort.readOnly = true;
-    ui.relayHost.disabled = true;
-    ui.relayPort.disabled = true;
+    [ui.relayHost, ui.relayPort].forEach((input) => {
+      if (!input) return;
+      input.value = "";
+      input.defaultValue = "";
+      input.disabled = true;
+    });
   }
 
   function sensitiveRelayValue(key, input) {

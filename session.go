@@ -15,24 +15,25 @@ import (
 )
 
 type sessionConfig struct {
-	RelayHost      string
-	RelayPort      int
-	ForceRelayIPv4 bool
-	ChannelID      uint32
-	SenderID       uint32
-	Password       string
-	CryptoMode     cryptoMode
-	CodecMode      int
-	TxCodec        string
-	PCMOnly        bool
-	SelfMute       bool
-	PacketDebug    bool
-	QosEnabled     bool
-	FecEnabled     bool
-	Codec2LibPath  string
-	OpusLibPath    string
-	UplinkCodec    string
-	DownlinkCodec  string
+	RelayHost         string
+	RelayPort         int
+	ForceRelayIPv4    bool
+	HideRelayEndpoint bool
+	ChannelID         uint32
+	SenderID          uint32
+	Password          string
+	CryptoMode        cryptoMode
+	CodecMode         int
+	TxCodec           string
+	PCMOnly           bool
+	SelfMute          bool
+	PacketDebug       bool
+	QosEnabled        bool
+	FecEnabled        bool
+	Codec2LibPath     string
+	OpusLibPath       string
+	UplinkCodec       string
+	DownlinkCodec     string
 }
 
 const (
@@ -659,12 +660,18 @@ func (s *relaySession) emitConnected() {
 	codec2Ready, opusReady := detectRuntimeCodecAvailability(effective.Codec2LibPath, effective.OpusLibPath)
 	qosEnabled := effective.QosEnabled
 	fecEnabled := effective.FecEnabled
+	relayHost := effective.RelayHost
+	relayPort := effective.RelayPort
+	if effective.HideRelayEndpoint {
+		relayHost = ""
+		relayPort = 0
+	}
 
 	s.emitEvent(serverEvent{
 		Type:          "connected",
 		Message:       "relay server response received",
-		RelayHost:     effective.RelayHost,
-		RelayPort:     effective.RelayPort,
+		RelayHost:     relayHost,
+		RelayPort:     relayPort,
 		ChannelID:     effective.ChannelID,
 		SenderID:      effective.SenderID,
 		CryptoMode:    string(effective.CryptoMode),

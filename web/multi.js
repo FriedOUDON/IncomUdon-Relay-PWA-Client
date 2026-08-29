@@ -1,5 +1,7 @@
 (() => {
   const basePath = document.body.dataset.basePath || "";
+  const fixedRelayEnabled = document.body.dataset.fixedRelayEnabled === "1";
+  const directoryDynamicTargetConfigurable = document.body.dataset.directoryDynamicTargetConfigurable === "1";
   const settingsLockStorageKey = "incomudon.pwa.settings_lock.v1";
   const settingsUnlockSessionKey = "incomudon.pwa.settings_lock.unlocked.v1";
   const settingsLockPBKDF2Iterations = 310000;
@@ -188,6 +190,11 @@
     "cuePttOnUrl", "cuePttOffUrl", "cueCarrierUrl", "audioTxSlotCount",
     "receiveOnly", "selfSenderMute", "audioTxLoopEnabled",
   ];
+
+  function isServerManagedEndpointSetting(key) {
+    return (fixedRelayEnabled && (key === "relayHost" || key === "relayPort")) ||
+      (!directoryDynamicTargetConfigurable && (key === "directoryHost" || key === "directoryPort"));
+  }
 
   const state = {
     slots: [],
@@ -439,6 +446,7 @@
       const raw = JSON.parse(localStorage.getItem(multiSlotSettingsKey(index)) || "{}") || {};
       const settings = {};
       portableSlotSettingsKeys.forEach((key) => {
+        if (isServerManagedEndpointSetting(key)) return;
         const value = raw[key];
         if (["string", "number", "boolean"].includes(typeof value)) settings[key] = value;
       });
@@ -451,6 +459,7 @@
   function writeSlotPortableSettings(index, settings) {
     const next = {};
     portableSlotSettingsKeys.forEach((key) => {
+      if (isServerManagedEndpointSetting(key)) return;
       const value = settings && settings[key];
       if (["string", "number", "boolean"].includes(typeof value)) next[key] = value;
     });

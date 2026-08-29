@@ -53,6 +53,7 @@
   "status_offline": "Offline",
   "status_error": "Error",
   "status_connected": "Connected ({host}:{port})",
+  "status_connected_generic": "Connected",
   "talker_none": "None",
   "talker_you": "You",
   "log_connect_failed": "connect failed: {error}",
