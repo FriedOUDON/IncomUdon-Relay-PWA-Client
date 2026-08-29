@@ -6,6 +6,10 @@
   const audioDebugStorageKey = "incomudon.pwa.audio_debug.v1";
   const audioDebugQuery = new URLSearchParams(window.location.search || "").get("audio_debug") === "1";
   const packetDebugQuery = new URLSearchParams(window.location.search || "").get("packet_debug") === "1";
+  const logLevelQuery = new URLSearchParams(window.location.search || "").get("log_level");
+  const parsedLogLevel = Number.parseInt(logLevelQuery || "", 10);
+  const logLevelExplicit = /^[0-3]$/.test(String(logLevelQuery || ""));
+  const logLevelThreshold = logLevelExplicit && Number.isFinite(parsedLogLevel) ? parsedLogLevel : 1;
   const maxSlotsRaw = Number.parseInt(document.body.dataset.multiMaxSlots || "", 10);
   const defaultSlotsRaw = Number.parseInt(document.body.dataset.multiDefaultSlots || "", 10);
   const maxSlots = Math.min(10, Math.max(1, Number.isFinite(maxSlotsRaw) ? maxSlotsRaw : 10));
@@ -60,7 +64,7 @@
     clear: "Clear",
     multi_log_main: "Main",
     multi_log_slot: "Slot {slot}",
-    settings_lock: "Settings Lock",
+    settings_lock: "Administrative Settings",
     settings_master_password: "Master Password",
     settings_unlock: "Unlock Settings",
     settings_relock: "Lock Settings",
@@ -90,6 +94,17 @@
     settings_imported: "Settings imported. Reload the page to apply the updated settings.",
     settings_export_file: "incomudon-pwa-multi-settings.json",
     packet_debug_waiting: "Waiting for packet debug data...",
+    multi_participants: "Participant List",
+    multi_participants_loading: "Loading participant list...",
+    multi_participants_fetch_failed: "Failed to retrieve list",
+    multi_participants_cached_at: "(showing list from {time})",
+    multi_participant_talking: "Talking",
+    multi_participant_idle: "Idle",
+    log_level_trace: "trace",
+    log_level_debug: "debug",
+    log_level_info: "info",
+    log_level_warn: "warn",
+    log_level_error: "error",
   };
   let strings = { ...fallbackStrings };
 
@@ -166,7 +181,7 @@
   };
 
   const portableSlotSettingsKeys = [
-    "relayHost", "relayPort", "channelId", "senderId", "passwordHash",
+    "relayHost", "relayPort", "directoryHost", "directoryPort", "channelId", "senderId", "passwordHash",
     "cryptoMode", "codecMode", "browserCodec", "wsToken", "txCodec",
     "micVolumePercent", "qosEnabled", "fecEnabled", "codec2Lib", "opusLib",
     "pcmOnly", "cuePttOnEnabled", "cuePttOffEnabled", "cueCarrierEnabled",
@@ -652,17 +667,41 @@
   }
 
   function normalizeLogLevel(level) {
-    return level === "warn" || level === "error" ? level : "info";
+    return level === "trace" || level === "debug" || level === "warn" || level === "error" || level === "info"
+      ? level
+      : "info";
+  }
+
+  function logLevelRank(level) {
+    switch (normalizeLogLevel(level)) {
+      case "trace": return 3;
+      case "debug": return 2;
+      case "info": return 1;
+      default: return 0;
+    }
+  }
+
+  function shouldAppendMultiLog(level) {
+    return logLevelRank(level) <= logLevelThreshold;
+  }
+
+  function logLevelLabel(level) {
+    return t(`log_level_${normalizeLogLevel(level)}`);
   }
 
   function appendMultiLog(source, text, level = "info") {
     if (!text || !ui.logBox) {
       return;
     }
+    const normalizedLevel = normalizeLogLevel(level);
+    if (!shouldAppendMultiLog(normalizedLevel)) {
+      return;
+    }
     const ts = new Date().toLocaleTimeString();
     const line = document.createElement("div");
-    line.className = normalizeLogLevel(level);
-    line.textContent = `[${ts}][${source || t("multi_log_main")}] ${text}`;
+    line.className = normalizedLevel;
+    const levelPrefix = logLevelExplicit ? `[${logLevelLabel(normalizedLevel)}]` : "";
+    line.textContent = `[${ts}]${levelPrefix}[${source || t("multi_log_main")}] ${text}`;
     ui.logBox.appendChild(line);
     ui.logBox.scrollTop = ui.logBox.scrollHeight;
   }
@@ -770,6 +809,10 @@
     });
     state.pressedSlots.delete(index);
     state.controls.muted[index] = false;
+    if (slot.participantRequestTimer) {
+      window.clearTimeout(slot.participantRequestTimer);
+      slot.participantRequestTimer = null;
+    }
     if (slot.frame) slot.frame.src = "about:blank";
     slot.card.remove();
     slot.settingsTab.remove();
@@ -795,6 +838,9 @@
     if (packetDebugQuery) {
       url.searchParams.set("packet_debug", "1");
     }
+    if (logLevelExplicit) {
+      url.searchParams.set("log_level", String(logLevelThreshold));
+    }
     return url.toString();
   }
 
@@ -812,6 +858,136 @@
     }
   }
 
+  function normalizeSlotParticipantsDocument(document) {
+    if (!document || typeof document !== "object" || !Array.isArray(document.participants)) {
+      return null;
+    }
+    const participants = document.participants
+      .map((entry) => {
+        const channelId = Number(entry && entry.channelId);
+        const senderId = Number(entry && entry.senderId);
+        const lastSeenAt = Number(entry && entry.lastSeenAt);
+        if (!Number.isInteger(channelId) || channelId <= 0 ||
+            !Number.isInteger(senderId) || senderId <= 0 ||
+            !Number.isFinite(lastSeenAt) || lastSeenAt <= 0) {
+          return null;
+        }
+        const label = String(entry && entry.label ? entry.label : senderId).trim();
+        return {
+          channelId,
+          senderId,
+          lastSeenAt,
+          talking: !!entry.talking,
+          label: label || String(senderId),
+        };
+      })
+      .filter(Boolean);
+    return {
+      issuedAt: Number(document.issuedAt || 0),
+      revision: typeof document.revision === "string" ? document.revision : "",
+      participants,
+      fetchedAt: Date.now(),
+    };
+  }
+
+  function participantCacheTime(cache) {
+    const timestamp = Number(cache && cache.fetchedAt) || 0;
+    if (timestamp <= 0) return "--:--";
+    return new Intl.DateTimeFormat(state.locale === "ja" ? "ja-JP" : "en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).format(new Date(timestamp));
+  }
+
+  function slotParticipants(slot) {
+    const cache = slot && slot.participantCache;
+    if (!cache || slot.channelId <= 0) return [];
+    return cache.participants
+      .filter((entry) => entry.channelId === slot.channelId)
+      .sort((left, right) => {
+        if (left.talking !== right.talking) return left.talking ? -1 : 1;
+        return left.senderId - right.senderId;
+      });
+  }
+
+  function renderSlotParticipants(slot) {
+    if (!slot || !slot.participantPopover || !slot.participantList) return;
+    slot.participantHeading.textContent = t("multi_participants");
+    slot.participantList.textContent = "";
+    slot.participantStatus.className = "multi-slot-participant-status";
+
+    if (slot.participantRequestPending) {
+      slot.participantStatus.textContent = t("multi_participants_loading");
+      slot.participantStatus.classList.add("loading");
+      return;
+    }
+
+    const cache = slot.participantCache;
+    if (slot.participantCacheFailure) {
+      const cachedAt = cache ? ` ${t("multi_participants_cached_at", { time: participantCacheTime(cache) })}` : "";
+      slot.participantStatus.textContent = `${t("multi_participants_fetch_failed")}${cachedAt}`;
+      slot.participantStatus.classList.add("failure");
+    } else {
+      slot.participantStatus.textContent = "";
+    }
+
+    const participants = slotParticipants(slot);
+    if (participants.length === 0) {
+      const row = document.createElement("div");
+      const key = document.createElement("dt");
+      const value = document.createElement("dd");
+      key.textContent = "-";
+      value.textContent = t("multi_none");
+      row.append(key, value);
+      slot.participantList.appendChild(row);
+      return;
+    }
+
+    participants.forEach((participant) => {
+      const row = document.createElement("div");
+      const key = document.createElement("dt");
+      const value = document.createElement("dd");
+      key.textContent = participant.talking ? t("multi_participant_talking") : t("multi_participant_idle");
+      key.className = participant.talking ? "talking" : "idle";
+      value.textContent = participant.label;
+      row.append(key, value);
+      slot.participantList.appendChild(row);
+    });
+  }
+
+  function requestSlotParticipants(slot) {
+    if (!slot) return;
+    const sequence = ++slot.participantRequestSequence;
+    slot.participantRequestPending = true;
+    slot.participantCacheFailure = false;
+    if (slot.participantRequestTimer) {
+      window.clearTimeout(slot.participantRequestTimer);
+    }
+    renderSlotParticipants(slot);
+    postSlotCommand(slot, { command: "request_directory_participants" });
+    slot.participantRequestTimer = window.setTimeout(() => {
+      if (slot.participantRequestSequence !== sequence || !slot.participantRequestPending) return;
+      slot.participantRequestTimer = null;
+      slot.participantRequestPending = false;
+      slot.participantCacheFailure = true;
+      renderSlotParticipants(slot);
+    }, 1000);
+  }
+
+  function openSlotParticipants(slot) {
+    if (!slot || !slot.participantPopover) return;
+    if (!slot.participantPopover.hidden) return;
+    slot.participantPopover.hidden = false;
+    requestSlotParticipants(slot);
+  }
+
+  function closeSlotParticipants(slot) {
+    if (slot && slot.participantPopover) {
+      slot.participantPopover.hidden = true;
+    }
+  }
+
   function createSlot(index) {
     const card = document.createElement("article");
     card.className = "multi-slot-card";
@@ -821,7 +997,22 @@
     head.className = "multi-slot-head";
     const title = document.createElement("h2");
     title.className = "multi-slot-title";
+    title.tabIndex = 0;
     title.textContent = t("multi_slot", { index: index + 1 });
+    const participantAnchor = document.createElement("div");
+    participantAnchor.className = "multi-slot-participant-anchor";
+    const participantPopover = document.createElement("section");
+    participantPopover.className = "multi-slot-participant-popover";
+    participantPopover.hidden = true;
+    const participantHeading = document.createElement("h3");
+    participantHeading.className = "multi-slot-participant-heading";
+    participantHeading.textContent = t("multi_participants");
+    const participantStatus = document.createElement("p");
+    participantStatus.className = "multi-slot-participant-status";
+    const participantList = document.createElement("dl");
+    participantList.className = "multi-slot-participant-list";
+    participantPopover.append(participantHeading, participantStatus, participantList);
+    participantAnchor.append(title, participantPopover);
     const headControls = document.createElement("div");
     headControls.className = "multi-slot-head-controls";
     const selectLabel = document.createElement("label");
@@ -841,7 +1032,7 @@
     muteText.textContent = t("multi_mute");
     muteLabel.append(mute, muteText);
     headControls.append(selectLabel, muteLabel);
-    head.append(title, headControls);
+    head.append(participantAnchor, headControls);
 
     const status = document.createElement("dl");
     status.className = "multi-slot-status";
@@ -917,6 +1108,11 @@
       index,
       card,
       title,
+      participantAnchor,
+      participantPopover,
+      participantHeading,
+      participantStatus,
+      participantList,
       selected,
       selectedText,
       mute,
@@ -949,7 +1145,21 @@
       ready: false,
       connectionKind: "offline",
       reconnectAttempt: 0,
+      participantCache: null,
+      participantRequestSequence: 0,
+      participantRequestTimer: null,
+      participantCacheFailure: false,
+      participantRequestPending: false,
     };
+
+    participantAnchor.addEventListener("mouseenter", () => openSlotParticipants(slot));
+    participantAnchor.addEventListener("mouseleave", () => closeSlotParticipants(slot));
+    participantAnchor.addEventListener("focusin", () => openSlotParticipants(slot));
+    participantAnchor.addEventListener("focusout", (event) => {
+      if (!participantAnchor.contains(event.relatedTarget)) {
+        closeSlotParticipants(slot);
+      }
+    });
 
     selected.addEventListener("change", () => {
       state.controls.selected[index] = selected.checked;
@@ -982,6 +1192,9 @@
       postSlotCommand(slot, { command: "set_receive_muted", muted: !!state.controls.muted[index] });
       postSlotCommand(slot, { command: "request-state" });
       requestSlotPacketDebug(slot);
+      if (!slot.participantPopover.hidden) {
+        requestSlotParticipants(slot);
+      }
     });
 
     updateSlotView(slot);
@@ -1086,7 +1299,7 @@
     slot.mute.title = t("multi_mute");
     if (slot.title) {
       slot.title.textContent = retainChannelName && channelName ? channel : t("multi_slot", { index: slot.index + 1 });
-      slot.title.title = slot.title.textContent;
+      slot.title.title = `${slot.title.textContent} - ${t("multi_participants")}`;
     }
     setStatusValue(slot.channelValue, channel);
     setStatusValue(slot.senderValue, sender);
@@ -1117,6 +1330,9 @@
     slot.shortcut.setAttribute("aria-label", `${t("multi_set_shortcut")}: ${formatShortcut(shortcut)}`);
     slot.shortcut.title = state.shortcutEditEnabled ? t("multi_set_shortcut") : t("multi_shortcuts_locked");
     slot.settingsButton.textContent = t("multi_open_settings");
+    if (!slot.participantPopover.hidden) {
+      renderSlotParticipants(slot);
+    }
   }
 
   function remoteTalkerText(slot) {
@@ -1509,6 +1725,23 @@
         slot.packetDebugOutput.textContent = typeof data.text === "string" && data.text.trim()
           ? data.text
           : t("packet_debug_waiting");
+      }
+      return;
+    }
+    if (data.type === `${messageNamespace}directory-participants`) {
+      const slot = state.slots.find((item) => item.frame && item.frame.contentWindow === event.source);
+      if (!slot || Number(data.slot) !== slot.index + 1) return;
+      const document = normalizeSlotParticipantsDocument(data.document);
+      if (!document) return;
+      slot.participantCache = document;
+      slot.participantCacheFailure = false;
+      slot.participantRequestPending = false;
+      if (slot.participantRequestTimer) {
+        window.clearTimeout(slot.participantRequestTimer);
+        slot.participantRequestTimer = null;
+      }
+      if (!slot.participantPopover.hidden) {
+        renderSlotParticipants(slot);
       }
       return;
     }

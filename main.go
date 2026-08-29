@@ -68,6 +68,8 @@ type clientCommand struct {
 	RelayHost     string `json:"relayHost,omitempty"`
 	RelayPort     int    `json:"relayPort,omitempty"`
 	RelayAddress  string `json:"relayAddress,omitempty"`
+	DirectoryHost string `json:"directoryHost,omitempty"`
+	DirectoryPort int    `json:"directoryPort,omitempty"`
 	ChannelID     uint32 `json:"channelId,omitempty"`
 	SenderID      uint32 `json:"senderId,omitempty"`
 	Password      string `json:"password,omitempty"`
@@ -83,6 +85,7 @@ type clientCommand struct {
 	PCMOnly       *bool  `json:"pcmOnly,omitempty"`
 	SelfMute      *bool  `json:"selfMute,omitempty"`
 	PacketDebug   *bool  `json:"packetDebug,omitempty"`
+	Silent        bool   `json:"silent,omitempty"`
 	Pressed       *bool  `json:"pressed,omitempty"`
 }
 
@@ -628,33 +631,35 @@ func (a *appServer) handleStatic(w http.ResponseWriter, r *http.Request) {
 }
 
 type pageTemplateData struct {
-	BasePath          string
-	MultiPath         string
-	MultiMaxSlots     int
-	MultiDefaultSlots int
-	FixedRelayEnabled bool
-	FixedRelayHost    string
-	FixedRelayPort    int
-	WSTokenRequired   bool
-	AuthMode          string
-	Codec2Ready       bool
-	OpusReady         bool
+	BasePath                           string
+	MultiPath                          string
+	MultiMaxSlots                      int
+	MultiDefaultSlots                  int
+	FixedRelayEnabled                  bool
+	FixedRelayHost                     string
+	FixedRelayPort                     int
+	DirectoryDynamicTargetConfigurable bool
+	WSTokenRequired                    bool
+	AuthMode                           string
+	Codec2Ready                        bool
+	OpusReady                          bool
 }
 
 func (a *appServer) pageData() pageTemplateData {
 	codec2Ready, opusReady := detectRuntimeCodecAvailability(a.codec2LibDefault, a.opusLibDefault)
 	return pageTemplateData{
-		BasePath:          a.basePath,
-		MultiPath:         a.multiPath,
-		MultiMaxSlots:     a.multiMaxSlots,
-		MultiDefaultSlots: a.multiDefaultSlots,
-		FixedRelayEnabled: a.fixedRelayEnabled,
-		FixedRelayHost:    a.fixedRelayHost,
-		FixedRelayPort:    a.fixedRelayPort,
-		WSTokenRequired:   strings.TrimSpace(a.wsToken) != "",
-		AuthMode:          string(a.authMode),
-		Codec2Ready:       codec2Ready,
-		OpusReady:         opusReady,
+		BasePath:                           a.basePath,
+		MultiPath:                          a.multiPath,
+		MultiMaxSlots:                      a.multiMaxSlots,
+		MultiDefaultSlots:                  a.multiDefaultSlots,
+		FixedRelayEnabled:                  a.fixedRelayEnabled,
+		FixedRelayHost:                     a.fixedRelayHost,
+		FixedRelayPort:                     a.fixedRelayPort,
+		DirectoryDynamicTargetConfigurable: a.directoryReceiver != nil && a.directoryReceiver.relayTarget == nil,
+		WSTokenRequired:                    strings.TrimSpace(a.wsToken) != "",
+		AuthMode:                           string(a.authMode),
+		Codec2Ready:                        codec2Ready,
+		OpusReady:                          opusReady,
 	}
 }
 
@@ -794,9 +799,12 @@ func (a *appServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				enqueuePacketStats,
 				resetPacketStats,
 				setPacketDebugEnabled,
-				func() error {
+				func(directoryHost string, directoryPort int) error {
 					if a.directoryReceiver == nil {
 						return fmt.Errorf("relay directory pull is not configured")
+					}
+					if a.directoryReceiver.relayTarget == nil {
+						return a.directoryReceiver.RequestParticipantsTo(directoryHost, directoryPort)
 					}
 					return a.directoryReceiver.RequestParticipants()
 				},
@@ -870,7 +878,7 @@ func handleClientCommand(
 	enqueuePacketStats func(packetDebugStats),
 	resetPacketStats func(),
 	setPacketDebugEnabled func(bool),
-	requestDirectoryParticipants func() error,
+	requestDirectoryParticipants func(host string, port int) error,
 	defaultCodec2Lib string,
 	defaultOpusLib string,
 	fixedRelayEnabled bool,
@@ -954,14 +962,20 @@ func handleClientCommand(
 
 	case "request_directory_participants":
 		if requestDirectoryParticipants == nil {
-			enqueueJSON(serverEvent{Type: "status", Level: "warn", Message: "relay directory pull is not configured"})
+			if !cmd.Silent {
+				enqueueJSON(serverEvent{Type: "status", Level: "warn", Message: "relay directory pull is not configured"})
+			}
 			return current, false
 		}
-		if err := requestDirectoryParticipants(); err != nil {
-			enqueueJSON(serverEvent{Type: "status", Level: "warn", Message: err.Error()})
+		if err := requestDirectoryParticipants(cmd.DirectoryHost, cmd.DirectoryPort); err != nil {
+			if !cmd.Silent {
+				enqueueJSON(serverEvent{Type: "status", Level: "warn", Message: err.Error()})
+			}
 			return current, false
 		}
-		enqueueJSON(serverEvent{Type: "status", Level: "info", Message: "directory participant pull requested"})
+		if !cmd.Silent {
+			enqueueJSON(serverEvent{Type: "status", Level: "info", Message: "directory participant pull requested"})
+		}
 		return current, false
 
 	default:

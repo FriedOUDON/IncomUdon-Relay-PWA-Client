@@ -4,6 +4,7 @@
   const fixedRelayHost = String(document.body.dataset.fixedRelayHost || "").trim();
   const fixedRelayPortRaw = Number.parseInt(document.body.dataset.fixedRelayPort || "", 10);
   const fixedRelayPort = Number.isFinite(fixedRelayPortRaw) && fixedRelayPortRaw > 0 ? fixedRelayPortRaw : 50000;
+  const directoryDynamicTargetConfigurable = document.body.dataset.directoryDynamicTargetConfigurable === "1";
   const wsTokenRequired = document.body.dataset.wsTokenRequired === "1";
   const authMode = String(document.body.dataset.authMode || "none").trim().toLowerCase();
   const initialCodec2Ready = document.body.dataset.codec2Ready === "1";
@@ -39,6 +40,10 @@
     Number.isInteger(embeddedSlotIndexRaw) && embeddedSlotIndexRaw > 0;
   const embeddedSlotIndex = isEmbeddedSlot ? embeddedSlotIndexRaw : 0;
   const embeddedStoragePrefix = isEmbeddedSlot ? `multi:${embeddedSlotIndex}:` : "";
+  const logLevelQuery = new URLSearchParams(window.location.search || "").get("log_level");
+  const parsedLogLevel = Number.parseInt(logLevelQuery || "", 10);
+  const logLevelExplicit = /^[0-3]$/.test(String(logLevelQuery || ""));
+  const logLevelThreshold = logLevelExplicit && Number.isFinite(parsedLogLevel) ? parsedLogLevel : 1;
   if (isEmbeddedSlot) {
     document.body.classList.add("embedded-slot");
   }
@@ -79,6 +84,8 @@
     audioTxSettingsCard: document.getElementById("audioTxSettingsCard"),
     relayHost: document.getElementById("relayHost"),
     relayPort: document.getElementById("relayPort"),
+    directoryHost: document.getElementById("directoryHost"),
+    directoryPort: document.getElementById("directoryPort"),
     channelId: document.getElementById("channelId"),
     senderId: document.getElementById("senderId"),
     password: document.getElementById("password"),
@@ -149,7 +156,7 @@
     header_title: "Relay PWA Client",
     language: "Language",
     advanced_settings: "Advanced Settings",
-    settings_lock: "Settings Lock",
+    settings_lock: "Administrative Settings",
     settings_master_password: "Master Password",
     settings_unlock: "Unlock Settings",
     settings_relock: "Lock Settings",
@@ -175,6 +182,8 @@
     settings_value_hidden: "Hidden while settings are locked",
     relay_host: "Relay Host",
     relay_port: "Relay Port",
+    directory_host: "Directory Host",
+    directory_port: "Directory Port",
     channel_id: "Channel ID",
     sender_id: "Sender ID (random if empty)",
     password: "Password",
@@ -229,6 +238,11 @@
     clear: "Clear",
     packet_debug: "Packet Debug",
     packet_debug_reset: "Reset counters",
+    log_level_trace: "trace",
+    log_level_debug: "debug",
+    log_level_info: "info",
+    log_level_warn: "warn",
+    log_level_error: "error",
     packet_debug_ws: "WebSocket",
     packet_debug_page: "Page",
     packet_debug_context: "Audio contexts",
@@ -380,6 +394,8 @@
     activeTalkers: [],
     directoryChannels: Object.create(null),
     directorySpeakers: Object.create(null),
+    directoryParticipants: null,
+    pendingDirectoryParticipantsRequest: null,
     directoryExpiryTimer: null,
     talkAllowed: false,
     serverTalkTimeoutSec: 0,
@@ -404,6 +420,8 @@
     hiddenRelaySettings: {
       relayHost: "",
       relayPort: "",
+      directoryHost: "",
+      directoryPort: "",
       wsToken: "",
     },
     settingsLockConfig: loadSettingsLockConfig(),
@@ -797,7 +815,7 @@
   const senderIDMin = 1;
   const senderIDMax = 0x7fffffff;
   const portableSettingsKeys = [
-    "relayHost", "relayPort", "channelId", "senderId", "passwordHash",
+    "relayHost", "relayPort", "directoryHost", "directoryPort", "channelId", "senderId", "passwordHash",
     "cryptoMode", "codecMode", "browserCodec", "wsToken", "txCodec",
     "micVolumePercent", "qosEnabled", "fecEnabled", "codec2Lib", "opusLib",
     "pcmOnly", "cuePttOnEnabled", "cuePttOffEnabled", "cueCarrierEnabled",
@@ -1383,6 +1401,9 @@
           }
           notifyEmbeddedSlotState();
           break;
+        case "request_directory_participants":
+          requestDirectoryParticipants(true);
+          break;
         case "connect":
           connectRelay().catch((err) => {
             appendLog(t("log_connect_failed", { error: err && err.message ? err.message : String(err) }), "error");
@@ -1755,6 +1776,11 @@
         downlinkCodec: state.browserCodec,
         pcmOnly: selectedTxCodec === txCodecPCM,
       });
+      if (state.pendingDirectoryParticipantsRequest) {
+        const pendingRequest = state.pendingDirectoryParticipantsRequest;
+        state.pendingDirectoryParticipantsRequest = null;
+        requestDirectoryParticipants(pendingRequest.silent);
+      }
 
       try {
         if (state.player) {
@@ -1888,6 +1914,11 @@
 
     if (event.type === "directory") {
       applyDirectoryProvisioning(event.directory);
+      return;
+    }
+
+    if (event.type === "directory_participants") {
+      applyDirectoryParticipants(event.directoryParticipants);
       return;
     }
 
@@ -2072,10 +2103,27 @@
   }
 
   function normalizeLevel(level) {
-    if (level === "warn" || level === "error" || level === "info") {
+    if (level === "trace" || level === "debug" || level === "warn" || level === "error" || level === "info") {
       return level;
     }
     return "info";
+  }
+
+  function logLevelRank(level) {
+    switch (normalizeLevel(level)) {
+      case "trace": return 3;
+      case "debug": return 2;
+      case "info": return 1;
+      default: return 0;
+    }
+  }
+
+  function shouldAppendLog(level) {
+    return logLevelRank(level) <= logLevelThreshold;
+  }
+
+  function logLevelLabel(level) {
+    return t(`log_level_${normalizeLevel(level)}`);
   }
 
   function clearReconnectTimer() {
@@ -2172,6 +2220,8 @@
     const defaults = {
       relayHost: defaultRelayHost(),
       relayPort: "50000",
+      directoryHost: defaultRelayHost(),
+      directoryPort: "51000",
       channelId: "1",
       senderId: String(randomSenderID()),
       passwordHash: "",
@@ -2200,6 +2250,7 @@
     if (fixedRelayEnabled) {
       defaults.relayHost = effectiveFixedRelayHost();
       defaults.relayPort = String(effectiveFixedRelayPort());
+      defaults.directoryHost = defaults.relayHost;
     }
 
     const stored = readStoredSettings();
@@ -2211,6 +2262,9 @@
 
     if (!merged.relayHost || !String(merged.relayHost).trim()) {
       merged.relayHost = defaults.relayHost;
+    }
+    if (!merged.directoryHost || !String(merged.directoryHost).trim()) {
+      merged.directoryHost = defaults.directoryHost;
     }
     state.startupLegacyPlainPassword = "";
     merged.passwordHash = normalizePasswordHashToken(merged.passwordHash || merged.password);
@@ -2249,6 +2303,12 @@
 
     ui.relayHost.value = String(merged.relayHost);
     ui.relayPort.value = String(merged.relayPort);
+    if (ui.directoryHost) {
+      ui.directoryHost.value = String(merged.directoryHost);
+    }
+    if (ui.directoryPort) {
+      ui.directoryPort.value = String(merged.directoryPort);
+    }
     ui.channelId.value = String(merged.channelId);
     ui.senderId.value = String(merged.senderId);
     state.passwordHash = merged.passwordHash;
@@ -2301,6 +2361,8 @@
     const persistTargets = [
       ui.relayHost,
       ui.relayPort,
+      ui.directoryHost,
+      ui.directoryPort,
       ui.channelId,
       ui.senderId,
       ui.password,
@@ -2514,6 +2576,8 @@
     const settings = {
       relayHost: fixedRelayEnabled ? effectiveFixedRelayHost() : currentRelayHost(),
       relayPort: fixedRelayEnabled ? String(effectiveFixedRelayPort()) : String(currentRelayPort() || ""),
+      directoryHost: currentDirectoryHost(),
+      directoryPort: String(currentDirectoryPort() || ""),
       channelId: ui.channelId.value,
       senderId: ui.senderId.value,
       passwordHash,
@@ -3871,7 +3935,62 @@
       Math.min(300000, Math.max(0, expiresAt * 1000 - now + 50)),
     );
     updateTalkerStatus(state.activeTalkers, state.talkAllowed);
+    notifyEmbeddedDirectoryParticipants();
     notifyEmbeddedSlotState();
+  }
+
+  function applyDirectoryParticipants(document) {
+    if (!document || typeof document !== "object" || !Array.isArray(document.participants)) {
+      return;
+    }
+    const participants = document.participants
+      .map((entry) => {
+        const channelId = Number(entry && entry.channelId);
+        const senderId = Number(entry && entry.senderId);
+        const lastSeenAt = Number(entry && entry.lastSeenAt);
+        if (!Number.isInteger(channelId) || channelId <= 0 ||
+            !Number.isInteger(senderId) || senderId <= 0 ||
+            !Number.isFinite(lastSeenAt) || lastSeenAt <= 0) {
+          return null;
+        }
+        return {
+          channelId,
+          senderId,
+          lastSeenAt,
+          talking: !!entry.talking,
+        };
+      })
+      .filter(Boolean);
+    state.directoryParticipants = {
+      issuedAt: Number(document.issuedAt || 0),
+      revision: typeof document.revision === "string" ? document.revision : "",
+      participants,
+    };
+    notifyEmbeddedDirectoryParticipants();
+  }
+
+  function notifyEmbeddedDirectoryParticipants() {
+    if (!isEmbeddedSlot || !window.parent || window.parent === window || !state.directoryParticipants) {
+      return;
+    }
+    const document = state.directoryParticipants;
+    const participants = document.participants.map((entry) => ({
+      ...entry,
+      label: formatDirectorySpeakerLabel(entry.channelId, entry.senderId),
+    }));
+    try {
+      window.parent.postMessage({
+        type: "incomudon-slot-directory-participants",
+        slot: embeddedSlotIndex,
+        document: {
+          issuedAt: document.issuedAt,
+          revision: document.revision,
+          participants,
+        },
+      }, window.location.origin);
+    } catch (_) {
+      // Directory monitoring is optional and must not interrupt audio handling.
+    }
   }
 
   function directoryChannelName(channelId) {
@@ -4571,6 +4690,8 @@
     setText("labelLanguage", t("language"));
     setText("labelRelayHost", t("relay_host"));
     setText("labelRelayPort", t("relay_port"));
+    setText("labelDirectoryHost", t("directory_host"));
+    setText("labelDirectoryPort", t("directory_port"));
     setText("labelChannelId", t("channel_id"));
     setText("labelSenderId", t("sender_id"));
     setText("labelPassword", t("password"));
@@ -5056,10 +5177,35 @@
     return Number.parseInt(value, 10);
   }
 
+  function currentDirectoryHost() {
+    return sensitiveRelayValue("directoryHost", ui.directoryHost);
+  }
+
+  function currentDirectoryPort() {
+    const value = sensitiveRelayValue("directoryPort", ui.directoryPort);
+    return Number.parseInt(value, 10);
+  }
+
+  function requestDirectoryParticipants(silent = false) {
+    const command = {
+      type: "request_directory_participants",
+      directoryHost: directoryDynamicTargetConfigurable ? currentDirectoryHost() : "",
+      directoryPort: directoryDynamicTargetConfigurable ? currentDirectoryPort() : 0,
+      silent: !!silent,
+    };
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+      state.pendingDirectoryParticipantsRequest = command;
+      return;
+    }
+    sendCommand(command);
+  }
+
   function applySensitiveRelayMasking(locked) {
     const fields = [
       ["relayHost", ui.relayHost],
       ["relayPort", ui.relayPort],
+      ["directoryHost", ui.directoryHost],
+      ["directoryPort", ui.directoryPort],
       ["wsToken", ui.wsToken],
     ];
     fields.forEach(([key, input]) => {
@@ -5302,11 +5448,15 @@
       return;
     }
     const normalizedLevel = normalizeLevel(level);
+    if (!shouldAppendLog(normalizedLevel)) {
+      return;
+    }
     notifyEmbeddedLog(text, normalizedLevel);
     const ts = new Date().toLocaleTimeString();
     const line = document.createElement("div");
     line.className = normalizedLevel;
-    line.textContent = `[${ts}] ${text}`;
+    const levelPrefix = logLevelExplicit ? `[${logLevelLabel(normalizedLevel)}] ` : "";
+    line.textContent = `[${ts}] ${levelPrefix}${text}`;
     ui.logBox.appendChild(line);
     ui.logBox.scrollTop = ui.logBox.scrollHeight;
   }

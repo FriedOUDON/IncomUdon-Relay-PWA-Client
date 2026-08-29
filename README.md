@@ -167,8 +167,15 @@ configured.
 
 Set `-directory-relay-udp-target` (or
 `INCOMUDON_DIRECTORY_RELAY_UDP_TARGET`) to the Relay's directory pull listener
-to enable on-demand refreshes. An authenticated browser WebSocket client can
-send `{ "type": "request_directory_participants" }`; the PWA server signs a
+to enable a server-managed on-demand refresh target. When directory receiving is
+enabled but this value is omitted, the Advanced Settings card instead exposes
+`Directory Host` and `Directory Port`; the browser stores those local values and
+uses them for one signed pull at a time. This does not alter the PWA server's
+registration target or heartbeat loop. A configured server target always takes
+precedence over browser-provided values.
+
+An authenticated browser WebSocket client can send
+`{ "type": "request_directory_participants" }`; the PWA server signs a
 short-lived UDP request, then forwards the Relay's refreshed `directory` and
 `directory_participants` events to its WebSocket clients. The protocol carries
 only `channelId`, `senderId`, `lastSeenAt`, and `talking` for each participant.

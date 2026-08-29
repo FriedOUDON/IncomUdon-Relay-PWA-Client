@@ -400,13 +400,34 @@ func (r *directoryReceiver) RequestParticipants() error {
 	if r == nil || r.conn == nil || r.relayTarget == nil {
 		return fmt.Errorf("relay directory pull is not configured")
 	}
+	return r.requestParticipantsTo(r.relayTarget)
+}
+
+// RequestParticipantsTo sends a one-shot authenticated pull to a browser-
+// supplied relay directory endpoint. It deliberately does not change the
+// receiver's configured target or registration loop.
+func (r *directoryReceiver) RequestParticipantsTo(host string, port int) error {
+	if r == nil || r.conn == nil {
+		return fmt.Errorf("relay directory pull is not configured")
+	}
+	target, err := resolveDirectoryRelayTarget(host, port)
+	if err != nil {
+		return err
+	}
+	return r.requestParticipantsTo(target)
+}
+
+func (r *directoryReceiver) requestParticipantsTo(target *net.UDPAddr) error {
+	if r == nil || r.conn == nil || target == nil {
+		return fmt.Errorf("relay directory pull is not configured")
+	}
 	now := time.Now()
 	request := directoryRequest{
 		Version:   directoryProtocolVersion,
 		IssuedAt:  now.Unix(),
 		ExpiresAt: now.Add(directoryRequestTTL).Unix(),
 	}
-	return r.sendControl(directoryEnvelopeRequest, request, request.ExpiresAt)
+	return r.sendControlTo(target, directoryEnvelopeRequest, request, request.ExpiresAt)
 }
 
 func (r *directoryReceiver) registrationLoop() {
@@ -448,6 +469,13 @@ func (r *directoryReceiver) sendControl(envelopeType string, payloadValue any, e
 	if r == nil || r.conn == nil || r.relayTarget == nil {
 		return fmt.Errorf("relay directory control target is not configured")
 	}
+	return r.sendControlTo(r.relayTarget, envelopeType, payloadValue, expiresAt)
+}
+
+func (r *directoryReceiver) sendControlTo(target *net.UDPAddr, envelopeType string, payloadValue any, expiresAt int64) error {
+	if r == nil || r.conn == nil || target == nil {
+		return fmt.Errorf("relay directory control target is not configured")
+	}
 	payload, err := json.Marshal(payloadValue)
 	if err != nil {
 		return err
@@ -467,10 +495,25 @@ func (r *directoryReceiver) sendControl(envelopeType string, payloadValue any, e
 	if len(packet) > directoryMaxDatagramBytes {
 		return fmt.Errorf("directory %s exceeds maximum datagram size", envelopeType)
 	}
-	if _, err := r.conn.WriteToUDP(packet, r.relayTarget); err != nil {
+	if _, err := r.conn.WriteToUDP(packet, target); err != nil {
 		return fmt.Errorf("send directory %s: %w", envelopeType, err)
 	}
 	return nil
+}
+
+func resolveDirectoryRelayTarget(host string, port int) (*net.UDPAddr, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return nil, fmt.Errorf("directory host is required")
+	}
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("directory port must be between 1 and 65535")
+	}
+	target, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		return nil, fmt.Errorf("resolve relay directory UDP target: %w", err)
+	}
+	return target, nil
 }
 
 func (r *directoryReceiver) acceptSequence(envelope directoryEnvelope, now int64) bool {

@@ -14,6 +14,7 @@
   data-fixed-relay-enabled="{{if .FixedRelayEnabled}}1{{else}}0{{end}}"
   data-fixed-relay-host="{{.FixedRelayHost}}"
   data-fixed-relay-port="{{.FixedRelayPort}}"
+  data-directory-dynamic-target-configurable="{{if .DirectoryDynamicTargetConfigurable}}1{{else}}0{{end}}"
   data-ws-token-required="{{if .WSTokenRequired}}1{{else}}0{{end}}"
   data-codec2-ready="{{if .Codec2Ready}}1{{else}}0{{end}}"
   data-opus-ready="{{if .OpusReady}}1{{else}}0{{end}}"
@@ -115,6 +116,16 @@
                   <span id="labelRelayPort">Relay Port</span>
                   <input id="relayPort" type="number" value="50000" min="1" max="65535">
                 </label>
+                {{if .DirectoryDynamicTargetConfigurable}}
+                <label>
+                  <span id="labelDirectoryHost">Directory Host</span>
+                  <input id="directoryHost" type="text" value="" autocomplete="off" spellcheck="false">
+                </label>
+                <label>
+                  <span id="labelDirectoryPort">Directory Port</span>
+                  <input id="directoryPort" type="number" value="51000" min="1" max="65535">
+                </label>
+                {{end}}
                 <label>
                   <span id="labelCryptoMode">Crypto Mode</span>
                   <select id="cryptoMode">

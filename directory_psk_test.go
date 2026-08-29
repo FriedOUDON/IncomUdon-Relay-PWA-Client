@@ -175,6 +175,54 @@ func TestDirectoryReceiverSendsAuthenticatedRegistration(t *testing.T) {
 	}
 }
 
+func TestDirectoryReceiverRequestsParticipantsAtDynamicTarget(t *testing.T) {
+	psk := []byte(strings.Repeat("t", directoryPSKBytes))
+	pskPath := filepath.Join(t.TempDir(), "directory.psk")
+	if err := os.WriteFile(pskPath, []byte(base64.RawURLEncoding.EncodeToString(psk)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	relay, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	receiver, err := newDirectoryReceiver(directoryReceiverConfig{
+		Enabled:       true,
+		ListenAddress: ":0",
+		PSKFile:       pskPath,
+	})
+	if err != nil {
+		t.Fatalf("newDirectoryReceiver() error = %v", err)
+	}
+	defer receiver.Close()
+	relayAddress := relay.LocalAddr().(*net.UDPAddr)
+	if err := receiver.RequestParticipantsTo(relayAddress.IP.String(), relayAddress.Port); err != nil {
+		t.Fatalf("RequestParticipantsTo() error = %v", err)
+	}
+	if err := relay.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, directoryMaxDatagramBytes)
+	n, _, err := relay.ReadFromUDP(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, payload, err := receiver.openPayload(buffer[:n], directoryEnvelopeRequest, time.Now())
+	if err != nil {
+		t.Fatalf("openPayload() error = %v", err)
+	}
+	var request directoryRequest
+	if err := decodeDirectoryJSON(payload, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Version != directoryProtocolVersion || request.ExpiresAt <= request.IssuedAt {
+		t.Fatalf("directory request = %#v", request)
+	}
+	if receiver.relayTarget != nil {
+		t.Fatalf("dynamic participant pull unexpectedly set relay target = %s", receiver.relayTarget)
+	}
+}
+
 func sealDirectoryEnvelopeForTest(t *testing.T, psk []byte, keyID string, epoch []byte, sequence uint64, expiresAt int64, payload []byte) directoryEnvelope {
 	return sealDirectoryEnvelopeForType(t, psk, keyID, epoch, sequence, expiresAt, payload, directoryEnvelopeSnapshot)
 }

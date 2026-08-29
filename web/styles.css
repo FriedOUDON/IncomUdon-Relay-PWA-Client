@@ -644,8 +644,16 @@ button[disabled] {
   line-height: 1.45;
 }
 
+.log .trace {
+  color: #7d7270;
+}
+
+.log .debug {
+  color: #176d7c;
+}
+
 .log .info {
-  color: #1f2a2f;
+  color: inherit;
 }
 
 .log .warn {
@@ -983,6 +991,107 @@ button[disabled] {
   margin: 0;
   font-family: "Avenir Next", "Helvetica Neue", sans-serif;
   font-size: 17px;
+}
+
+.multi-slot-participant-anchor {
+  position: relative;
+  min-width: 0;
+}
+
+.multi-slot-participant-anchor > .multi-slot-title {
+  cursor: help;
+}
+
+.multi-slot-title:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, white 28%);
+  outline-offset: 3px;
+}
+
+.multi-slot-participant-popover {
+  position: absolute;
+  z-index: 9;
+  top: calc(100% + 8px);
+  left: 0;
+  width: max-content;
+  min-width: min(300px, calc(100vw - 48px));
+  max-width: min(460px, calc(100vw - 48px));
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  box-shadow: 0 7px 20px rgba(26, 40, 46, 0.2);
+}
+
+.multi-slot-participant-popover[hidden] {
+  display: none;
+}
+
+.multi-slot-participant-heading {
+  margin: 0 0 7px;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.multi-slot-participant-status {
+  min-height: 17px;
+  margin: 0 0 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.multi-slot-participant-status.loading {
+  color: var(--muted);
+}
+
+.multi-slot-participant-status.failure {
+  color: #7b8184;
+}
+
+.multi-slot-participant-list {
+  display: grid;
+  max-height: 216px;
+  margin: 0;
+  overflow-y: auto;
+  border: 1px solid color-mix(in srgb, var(--line) 82%, white 18%);
+  border-radius: 7px;
+  background: #f8fafb;
+}
+
+.multi-slot-participant-list > div {
+  display: grid;
+  grid-template-columns: minmax(56px, auto) minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  padding: 7px 8px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 78%, white 22%);
+}
+
+.multi-slot-participant-list > div:first-child {
+  border-top: 0;
+}
+
+.multi-slot-participant-list dt {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.multi-slot-participant-list dt.talking {
+  color: var(--accent-deep);
+}
+
+.multi-slot-participant-list dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--ink);
+  font-family: "IBM Plex Mono", "Consolas", monospace;
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .multi-slot-head-controls {
