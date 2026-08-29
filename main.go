@@ -962,20 +962,26 @@ func handleClientCommand(
 
 	case "request_directory_participants":
 		if requestDirectoryParticipants == nil {
-			if !cmd.Silent {
-				enqueueJSON(serverEvent{Type: "status", Level: "warn", Message: "relay directory pull is not configured"})
+			level := "warn"
+			if cmd.Silent {
+				level = "debug"
 			}
+			enqueueJSON(serverEvent{Type: "status", Level: level, Message: "relay directory pull is not configured"})
 			return current, false
 		}
 		if err := requestDirectoryParticipants(cmd.DirectoryHost, cmd.DirectoryPort); err != nil {
-			if !cmd.Silent {
-				enqueueJSON(serverEvent{Type: "status", Level: "warn", Message: err.Error()})
+			level := "warn"
+			if cmd.Silent {
+				level = "debug"
 			}
+			enqueueJSON(serverEvent{Type: "status", Level: level, Message: fmt.Sprintf("directory participant pull failed: %v", err)})
 			return current, false
 		}
-		if !cmd.Silent {
-			enqueueJSON(serverEvent{Type: "status", Level: "info", Message: "directory participant pull requested"})
+		level := "info"
+		if cmd.Silent {
+			level = "debug"
 		}
+		enqueueJSON(serverEvent{Type: "status", Level: level, Message: "directory participant pull requested"})
 		return current, false
 
 	default:
