@@ -339,7 +339,7 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 func (s *relaySession) Start() {
 	s.emitEvent(serverEvent{
 		Type:      "status",
-		Level:     "info",
+		Level:     "debug",
 		Message:   fmt.Sprintf("UDP socket opened on %s", s.conn.LocalAddr()),
 		ChannelID: s.cfg.ChannelID,
 		SenderID:  s.cfg.SenderID,
@@ -349,27 +349,27 @@ func (s *relaySession) Start() {
 		if s.qosApplied {
 			s.emitEvent(serverEvent{
 				Type:    "status",
-				Level:   "info",
+				Level:   "debug",
 				Message: "Network QoS enabled (DSCP EF)",
 			})
 		}
 	} else {
 		s.emitEvent(serverEvent{
 			Type:    "status",
-			Level:   "info",
+			Level:   "debug",
 			Message: "Network QoS disabled",
 		})
 	}
 	if s.cfg.FecEnabled {
 		s.emitEvent(serverEvent{
 			Type:    "status",
-			Level:   "info",
+			Level:   "debug",
 			Message: "FEC enabled (TX/RX RS 2-loss parity)",
 		})
 	} else {
 		s.emitEvent(serverEvent{
 			Type:    "status",
-			Level:   "info",
+			Level:   "debug",
 			Message: "TX FEC disabled",
 		})
 	}
@@ -1078,7 +1078,7 @@ func (s *relaySession) acceptServerAddress(from *net.UDPAddr) bool {
 
 	s.emitEvent(serverEvent{
 		Type:      "status",
-		Level:     "info",
+		Level:     "debug",
 		Message:   message,
 		ChannelID: channelID,
 	})
@@ -1232,20 +1232,20 @@ func (s *relaySession) handleServerConfig(pkt parsedPacket) {
 	if timeoutSec == 0 {
 		s.emitEvent(serverEvent{
 			Type:    "status",
-			Level:   "info",
+			Level:   "debug",
 			Message: "Server TX timeout is disabled",
 		})
 		return
 	}
 	s.emitEvent(serverEvent{
 		Type:    "status",
-		Level:   "info",
+		Level:   "debug",
 		Message: fmt.Sprintf("Server TX timeout: %ds", timeoutSec),
 	})
 	if multiTalkEnabled {
 		s.emitEvent(serverEvent{
 			Type:    "status",
-			Level:   "info",
+			Level:   "debug",
 			Message: fmt.Sprintf("Server multi-talk enabled (max active talkers: %d)", maxActiveTalkers),
 		})
 	}
@@ -2071,7 +2071,7 @@ func libraryDisplayName(path string, fallback string) string {
 func startupStatusLevel(message string) string {
 	lower := strings.ToLower(strings.TrimSpace(message))
 	if strings.Contains(lower, "succeeded") {
-		return "info"
+		return "debug"
 	}
 	return "warn"
 }

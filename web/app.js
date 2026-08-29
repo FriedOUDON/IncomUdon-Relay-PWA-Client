@@ -1654,7 +1654,7 @@
       clearReconnectTimer();
       state.reconnectAttempt = 0;
       state.disconnectRequested = false;
-      appendLog(t("log_ws_opened"), "info");
+      appendLog(t("log_ws_opened"), "debug");
       state.micPermissionDenied = false;
       const safeSenderID = canonicalizeSenderIDField();
       const selectedTxCodec = sanitizeSelectedTxCodec();
@@ -1723,10 +1723,10 @@
             } else {
               appendLog(t("log_browser_opus_uplink_bitrate", {
                 bitrateKbps: formatBitrateKbps(effectiveUplinkBitrate),
-              }), "info");
+              }), "debug");
             }
           }
-          appendLog(t("log_browser_codec_opus"), "info");
+          appendLog(t("log_browser_codec_opus"), "debug");
         } else {
           if (state.opusEncoder) {
             state.opusEncoder.close();
@@ -2084,7 +2084,7 @@
         ),
         mode: event.codecMode,
         pcmOnly: event.pcmOnly ? 1 : 0,
-      }), "info");
+      }), "trace");
       return;
     }
 
@@ -2098,7 +2098,7 @@
     }
 
     if (event.type === "ready") {
-      appendLog(event.message || t("log_ready"), "info");
+      appendLog(event.message || t("log_ready"), normalizeLevel(event.level));
     }
   }
 

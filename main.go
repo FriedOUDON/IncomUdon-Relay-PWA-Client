@@ -762,7 +762,7 @@ func (a *appServer) handleWS(w http.ResponseWriter, r *http.Request) {
 		wsStats.setEnabled(enabled)
 	}
 
-	enqueueJSON(serverEvent{Type: "ready", Message: "websocket connected"})
+	enqueueJSON(serverEvent{Type: "ready", Level: "debug", Message: "websocket connected"})
 	if document := a.directoryStore.Current(); document != nil {
 		enqueueJSON(serverEvent{Type: "directory", Directory: document})
 	}
