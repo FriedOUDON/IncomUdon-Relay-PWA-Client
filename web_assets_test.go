@@ -67,6 +67,35 @@ func TestSelfSenderMuteWebControl(t *testing.T) {
 	}
 }
 
+func TestSettingsExportsOmitPasswordHashButImportsAcceptIt(t *testing.T) {
+	app, err := fs.ReadFile(webAssets, "web/app.js")
+	if err != nil {
+		t.Fatalf("read web/app.js: %v", err)
+	}
+	for _, snippet := range []string{
+		`"relayHost", "relayPort", "directoryHost", "directoryPort", "channelId", "senderId", "passwordHash",`,
+		`delete settings.passwordHash;`,
+		`const value = documentData.settings[key];`,
+	} {
+		if !strings.Contains(string(app), snippet) {
+			t.Fatalf("single-channel settings path is missing %q", snippet)
+		}
+	}
+
+	multi, err := fs.ReadFile(webAssets, "web/multi.js")
+	if err != nil {
+		t.Fatalf("read web/multi.js: %v", err)
+	}
+	for _, snippet := range []string{
+		`"relayHost", "relayPort", "directoryHost", "directoryPort", "channelId", "senderId", "passwordHash",`,
+		`delete settings.passwordHash;`,
+	} {
+		if !strings.Contains(string(multi), snippet) {
+			t.Fatalf("multi-channel settings path is missing %q", snippet)
+		}
+	}
+}
+
 func TestPacketDebugAssets(t *testing.T) {
 	index, err := fs.ReadFile(webAssets, "web/index.html")
 	if err != nil {

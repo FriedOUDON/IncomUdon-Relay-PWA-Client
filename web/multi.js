@@ -482,7 +482,11 @@
         broadcastShortcut: state.controls.broadcastShortcut,
         activeSettingsSlot: state.controls.activeSettingsSlot,
       },
-      slots: Array.from({ length: slotCount }, (_, index) => readSlotPortableSettings(index)),
+      slots: Array.from({ length: slotCount }, (_, index) => {
+        const settings = readSlotPortableSettings(index);
+        delete settings.passwordHash;
+        return settings;
+      }),
     };
     const blob = new Blob([JSON.stringify(documentData, null, 2)], { type: "application/json" });
     const href = URL.createObjectURL(blob);

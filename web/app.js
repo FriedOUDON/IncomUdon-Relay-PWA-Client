@@ -4500,6 +4500,7 @@
     });
     // Local cue/audio files live in IndexedDB and are deliberately not exported.
     delete settings.password;
+    delete settings.passwordHash;
     return settings;
   }
 
