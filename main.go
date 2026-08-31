@@ -61,6 +61,7 @@ type serverEvent struct {
 	Directory             *directoryDocument             `json:"directory,omitempty"`
 	DirectoryParticipants *directoryParticipantsDocument `json:"directoryParticipants,omitempty"`
 	PacketStats           *packetDebugStats              `json:"packetStats,omitempty"`
+	RelayLatency          *relayLatencyStatus            `json:"relayLatency,omitempty"`
 }
 
 type clientCommand struct {
@@ -912,6 +913,10 @@ func handleClientCommand(
 			onPCM:         enqueuePCM,
 			onOpus:        enqueueOpus,
 			onPacketStats: enqueuePacketStats,
+			onLatency: func(status relayLatencyStatus) {
+				statusCopy := status
+				enqueueJSON(serverEvent{Type: "relay_latency", RelayLatency: &statusCopy})
+			},
 		})
 		if err != nil {
 			enqueueJSON(serverEvent{Type: "status", Level: "error", Message: err.Error()})

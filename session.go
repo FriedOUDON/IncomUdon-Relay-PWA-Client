@@ -56,6 +56,25 @@ type sessionCallbacks struct {
 	onPCM         func([]byte)
 	onOpus        func([]byte)
 	onPacketStats func(packetDebugStats)
+	onLatency     func(relayLatencyStatus)
+}
+
+const (
+	relayPingIdleInterval      = 10 * time.Second
+	relayPingActiveInterval    = 5 * time.Second
+	relayPingResponseTimeout   = 30 * time.Second
+	relayPingSchedulerInterval = time.Second
+)
+
+// relayLatencyStatus intentionally contains only local timing information.
+// It does not expose relay addresses or packet contents to browsers.
+type relayLatencyStatus struct {
+	Available    bool `json:"available"`
+	Pending      bool `json:"pending"`
+	Unresponsive bool `json:"unresponsive"`
+	RTTMs        int  `json:"rttMs"`
+	JitterMs     int  `json:"jitterMs"`
+	IntervalMs   int  `json:"intervalMs"`
 }
 
 // packetDebugStats is deliberately aggregate-only: it exposes timings and
@@ -111,6 +130,12 @@ type packetDebugStats struct {
 	WebSocketWrittenFrames    uint64 `json:"webSocketWrittenFrames"`
 	WebSocketWrittenBytes     uint64 `json:"webSocketWrittenBytes"`
 	WebSocketWriteErrors      uint64 `json:"webSocketWriteErrors"`
+
+	RelayPingRTTMs          int    `json:"relayPingRttMs"`
+	RelayPingJitterMs       int    `json:"relayPingJitterMs"`
+	RelayPingPending        bool   `json:"relayPingPending"`
+	RelayPingTimeouts       uint64 `json:"relayPingTimeouts"`
+	RelayPingLastReplyAgeMs int64  `json:"relayPingLastReplyAgeMs"`
 }
 
 type peerCodecConfig struct {
@@ -164,6 +189,15 @@ type relaySession struct {
 	packetDebug            bool
 	packetStats            packetDebugStats
 	startedAt              time.Time
+	pingNonce              uint64
+	pingSentAt             time.Time
+	pingLastSentAt         time.Time
+	pingLastReplyAt        time.Time
+	pingRTTMs              int
+	pingJitterMs           int
+	pingPending            bool
+	pingUnresponsive       bool
+	pingTimeouts           uint64
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -204,6 +238,8 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		downlinkQueues:    make(map[uint32][][]byte),
 		unsupportedFrames: make(map[string]struct{}),
 		packetDebug:       cfg.PacketDebug,
+		pingRTTMs:         -1,
+		pingJitterMs:      -1,
 		startedAt:         time.Now(),
 		done:              make(chan struct{}),
 	}
@@ -517,12 +553,13 @@ func (s *relaySession) Start() {
 		s.emitError("failed to send keepalive: %v", err)
 	}
 
-	s.wg.Add(5)
+	s.wg.Add(6)
 	go s.readLoop()
 	go s.keepaliveLoop()
 	go s.joinRetryLoop()
 	go s.codecLoop()
 	go s.downlinkMixLoop()
+	go s.relayPingLoop()
 	if s.packetDebug && s.cb.onPacketStats != nil {
 		s.wg.Add(1)
 		go s.packetDebugLoop()
@@ -594,6 +631,15 @@ func (s *relaySession) packetDebugSnapshot() packetDebugStats {
 
 	snapshot := s.packetStats
 	snapshot.UptimeMs = uint64(time.Since(s.startedAt).Milliseconds())
+	snapshot.RelayPingRTTMs = s.pingRTTMs
+	snapshot.RelayPingJitterMs = s.pingJitterMs
+	snapshot.RelayPingPending = s.pingPending
+	snapshot.RelayPingTimeouts = s.pingTimeouts
+	if !s.pingLastReplyAt.IsZero() {
+		snapshot.RelayPingLastReplyAgeMs = time.Since(s.pingLastReplyAt).Milliseconds()
+	} else {
+		snapshot.RelayPingLastReplyAgeMs = -1
+	}
 	snapshot.DownlinkQueuedSenders = uint32(len(s.downlinkQueues))
 	snapshot.DownlinkQueuedFrames = 0
 	for _, queue := range s.downlinkQueues {
@@ -1002,6 +1048,166 @@ func (s *relaySession) keepaliveLoop() {
 	}
 }
 
+// relayPingLoop measures the UDP relay path independently of WebSocket state.
+// It deliberately uses a one-second scheduler only to evaluate elapsed
+// monotonic time; probes themselves are emitted at 5 seconds while this
+// session is sending or receiving, and 10 seconds while idle.
+func (s *relaySession) relayPingLoop() {
+	defer s.wg.Done()
+
+	s.updateRelayPing()
+	ticker := time.NewTicker(relayPingSchedulerInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			s.updateRelayPing()
+		}
+	}
+}
+
+func (s *relaySession) relayPingIntervalLocked() time.Duration {
+	// PTT covers an outgoing request before TALK_GRANT. activeTalkers and the
+	// downlink queue cover receive playout, including its final jitter frames.
+	if s.pttPressed || s.talkAllowed || len(s.activeTalkers) > 0 || len(s.downlinkQueues) > 0 {
+		return relayPingActiveInterval
+	}
+	return relayPingIdleInterval
+}
+
+func (s *relaySession) relayLatencyStatusLocked() relayLatencyStatus {
+	interval := s.relayPingIntervalLocked()
+	return relayLatencyStatus{
+		Available:    s.pingRTTMs >= 0,
+		Pending:      s.pingPending,
+		Unresponsive: s.pingUnresponsive,
+		RTTMs:        s.pingRTTMs,
+		JitterMs:     s.pingJitterMs,
+		IntervalMs:   int(interval.Milliseconds()),
+	}
+}
+
+func (s *relaySession) emitRelayLatency(status relayLatencyStatus) {
+	if s.cb.onLatency != nil {
+		s.cb.onLatency(status)
+	}
+}
+
+func (s *relaySession) updateRelayPing() {
+	now := time.Now()
+	var payload []byte
+	var status *relayLatencyStatus
+
+	s.mu.Lock()
+	if !s.serverLocked {
+		s.mu.Unlock()
+		return
+	}
+
+	if s.pingPending {
+		if now.Sub(s.pingSentAt) < relayPingResponseTimeout {
+			s.mu.Unlock()
+			return
+		}
+
+		// The relay missed a full response window. Mark the measurement stale,
+		// then immediately start a fresh probe instead of retaining old latency.
+		s.pingPending = false
+		s.pingUnresponsive = true
+		s.pingRTTMs = -1
+		s.pingJitterMs = -1
+		s.pingTimeouts++
+		s.pingSentAt = time.Time{}
+		s.pingLastSentAt = time.Time{}
+		timedOut := s.relayLatencyStatusLocked()
+		status = &timedOut
+	}
+
+	interval := s.relayPingIntervalLocked()
+	if !s.pingLastSentAt.IsZero() && now.Sub(s.pingLastSentAt) < interval {
+		s.mu.Unlock()
+		if status != nil {
+			s.emitRelayLatency(*status)
+		}
+		return
+	}
+
+	nonce := randomNonceBase()
+	if nonce == 0 {
+		nonce = 1
+	}
+	payload = make([]byte, 8)
+	binary.BigEndian.PutUint64(payload, nonce)
+	s.pingNonce = nonce
+	s.pingSentAt = now
+	s.pingLastSentAt = now
+	s.pingPending = true
+	started := s.relayLatencyStatusLocked()
+	s.mu.Unlock()
+
+	// A PING has the same small fixed payload as the PONG and is accepted only
+	// from a JOIN-registered endpoint by the relay.
+	if err := s.sendControlPacket(pktPing, payload); err != nil {
+		s.mu.Lock()
+		if s.pingPending && s.pingNonce == nonce {
+			s.pingPending = false
+		}
+		failed := s.relayLatencyStatusLocked()
+		s.mu.Unlock()
+		s.emitRelayLatency(failed)
+		return
+	}
+
+	if status != nil {
+		s.emitRelayLatency(*status)
+	}
+	s.emitRelayLatency(started)
+}
+
+func (s *relaySession) handlePingReply(pkt parsedPacket) {
+	if len(pkt.Payload) != 8 {
+		return
+	}
+	nonce := binary.BigEndian.Uint64(pkt.Payload)
+	now := time.Now()
+
+	s.mu.Lock()
+	if !s.pingPending || nonce == 0 || nonce != s.pingNonce || s.pingSentAt.IsZero() {
+		s.mu.Unlock()
+		return
+	}
+
+	rttMs := int(now.Sub(s.pingSentAt).Milliseconds())
+	if rttMs < 0 {
+		rttMs = 0
+	}
+	if rttMs > 60000 {
+		rttMs = 60000
+	}
+	sampleJitter := 0
+	if s.pingRTTMs >= 0 {
+		sampleJitter = rttMs - s.pingRTTMs
+		if sampleJitter < 0 {
+			sampleJitter = -sampleJitter
+		}
+	}
+	if s.pingJitterMs >= 0 {
+		s.pingJitterMs = (s.pingJitterMs*3 + sampleJitter) / 4
+	} else {
+		s.pingJitterMs = sampleJitter
+	}
+	s.pingRTTMs = rttMs
+	s.pingLastReplyAt = now
+	s.pingPending = false
+	s.pingUnresponsive = false
+	status := s.relayLatencyStatusLocked()
+	s.mu.Unlock()
+
+	s.emitRelayLatency(status)
+}
+
 func (s *relaySession) joinRetryLoop() {
 	defer s.wg.Done()
 
@@ -1147,6 +1353,8 @@ func (s *relaySession) handleDatagram(data []byte, from *net.UDPAddr) {
 	s.noteRelayRxPacket(pkt.Header.Type, len(data), pkt.Header.SenderID)
 
 	switch pkt.Header.Type {
+	case pktPong:
+		s.handlePingReply(pkt)
 	case pktTalkGrant, pktTalkRelease, pktTalkDeny:
 		s.handleTalkPacket(pkt)
 	case pktCodecConfig:

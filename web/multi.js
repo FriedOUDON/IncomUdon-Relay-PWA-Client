@@ -44,6 +44,10 @@
     multi_channel: "Channel",
     multi_sender: "Sender",
     multi_connection: "Connection",
+    multi_relay_latency: "Relay RTT",
+    multi_relay_latency_waiting: "Waiting for response",
+    multi_relay_latency_unresponsive: "No response",
+    multi_relay_latency_value: "{rtt} ms (J {jitter} ms)",
     multi_talker: "Talker",
     multi_offline: "Offline",
     multi_connecting: "Connecting",
@@ -1052,7 +1056,8 @@
     const channelPair = makeStatusPair(t("multi_channel"), "-");
     const senderPair = makeStatusPair(t("multi_sender"), "-");
     const connectionPair = makeStatusPair(t("multi_connection"), t("multi_offline"));
-    status.append(channelPair.row, senderPair.row, connectionPair.row);
+    const latencyPair = makeStatusPair(t("multi_relay_latency"), t("multi_relay_latency_waiting"));
+    status.append(channelPair.row, senderPair.row, connectionPair.row, latencyPair.row);
 
     const talkerFooter = document.createElement("div");
     talkerFooter.className = "multi-slot-talker";
@@ -1133,6 +1138,7 @@
       channelValue: channelPair.value,
       senderValue: senderPair.value,
       connectionValue: connectionPair.value,
+      latencyValue: latencyPair.value,
       talkerValue,
       packetDebugOutput,
       ptt,
@@ -1158,6 +1164,7 @@
       ready: false,
       connectionKind: "offline",
       reconnectAttempt: 0,
+      relayLatency: { available: false, pending: false, unresponsive: false, rttMs: -1, jitterMs: -1, intervalMs: 10000 },
       participantCache: null,
       participantRequestSequence: 0,
       participantRequestTimer: null,
@@ -1288,6 +1295,28 @@
     element.dataset.fullText = text;
   }
 
+  function normalizeRelayLatency(status) {
+    const source = status && typeof status === "object" ? status : {};
+    const rttMs = Number(source.rttMs);
+    const jitterMs = Number(source.jitterMs);
+    const available = !!source.available && Number.isFinite(rttMs) && rttMs >= 0;
+    return {
+      available,
+      pending: !!source.pending,
+      unresponsive: !!source.unresponsive,
+      rttMs: available ? Math.round(rttMs) : -1,
+      jitterMs: available && Number.isFinite(jitterMs) && jitterMs >= 0 ? Math.round(jitterMs) : -1,
+    };
+  }
+
+  function formatSlotRelayLatency(slot) {
+    const latency = normalizeRelayLatency(slot && slot.relayLatency);
+    if (latency.available) {
+      return t("multi_relay_latency_value", { rtt: latency.rttMs, jitter: Math.max(0, latency.jitterMs) });
+    }
+    return latency.unresponsive ? t("multi_relay_latency_unresponsive") : t("multi_relay_latency_waiting");
+  }
+
   function updateSlotView(slot) {
     const shortcut = state.controls.slotShortcuts[slot.index];
     const channel = slotChannelLabel(slot);
@@ -1332,6 +1361,9 @@
     }
     setStatusValue(slot.connectionValue, connectionText);
     slot.connectionValue.className = connectionClass;
+    const relayLatency = normalizeRelayLatency(slot.relayLatency);
+    setStatusValue(slot.latencyValue, formatSlotRelayLatency(slot));
+    slot.latencyValue.className = relayLatency.available ? "ok" : (relayLatency.unresponsive ? "error" : "warn");
     setStatusValue(slot.talkerValue, remoteTalkerText(slot));
     slot.ptt.disabled = !slot.connected || state.shortcutEditEnabled || slot.receiveOnly;
     slot.pttText.textContent = slot.receiveOnly
@@ -1781,6 +1813,7 @@
       slot.micVolume = Math.min(300, Math.max(0, Number(snapshot.micVolume) || 200));
       slot.connectionKind = typeof snapshot.connectionKind === "string" ? snapshot.connectionKind : (slot.connected ? "connected" : "offline");
       slot.reconnectAttempt = Math.max(0, Number(snapshot.reconnectAttempt) || 0);
+      slot.relayLatency = normalizeRelayLatency(snapshot.relayLatency);
       updateSlotView(slot);
       updateBroadcastView();
       queueReconcile();

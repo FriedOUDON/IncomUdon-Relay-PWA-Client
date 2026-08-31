@@ -29,6 +29,8 @@ const (
 	pktCodecConfig = 0x0B
 	pktFec         = 0x0C
 	pktServerCfg   = 0x0D
+	pktPing        = 0x0E
+	pktPong        = 0x0F
 )
 
 const (

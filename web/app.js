@@ -109,6 +109,7 @@
     clearLogBtn: document.getElementById("clearLogBtn"),
     connectionStatus: document.getElementById("connectionStatus"),
     talkerStatus: document.getElementById("talkerStatus"),
+    relayLatencyStatus: document.getElementById("relayLatencyStatus"),
     packetDebugCard: document.getElementById("packetDebugCard"),
     packetDebugOutput: document.getElementById("packetDebugOutput"),
     packetDebugReset: document.getElementById("packetDebugReset"),
@@ -206,6 +207,10 @@
     logout: "Logout",
     connection: "Connection",
     talker: "Talker",
+    relay_latency: "Relay RTT",
+    relay_latency_waiting: "Waiting for response",
+    relay_latency_unresponsive: "No response",
+    relay_latency_value: "{rtt} ms (jitter {jitter} ms)",
     hold_to_talk: "Hold to Talk (Space)",
     hold_to_talk_remaining: "Hold to Talk ({seconds}s left)",
     cue_sounds: "Cue Sounds",
@@ -254,6 +259,7 @@
     packet_debug_relay_tx: "Relay TX",
     packet_debug_mix: "Mix / decode",
     packet_debug_talkers: "RX talkers",
+    packet_debug_relay_latency: "Relay latency",
     status_connecting: "Connecting",
     status_offline: "Offline",
     status_error: "Error",
@@ -359,6 +365,14 @@
     packetDebugTimer: null,
     packetDebugLastSnapshot: null,
     serverPacketStats: null,
+    relayLatency: {
+      available: false,
+      pending: false,
+      unresponsive: false,
+      rttMs: -1,
+      jitterMs: -1,
+      intervalMs: 10000,
+    },
     audioDebugEnabled: readAudioDebugEnabled(),
     audioStats: {
       activity: Object.create(null),
@@ -742,6 +756,7 @@
       `${t("packet_debug_relay_tx")}: audio ${formatPacketDebugRate(serverTxRate, "pkt/s")} | total ${packetDebugNumber(server.relayTxAudioPackets)} | fec ${packetDebugNumber(server.relayTxFecPackets)} | control ${packetDebugNumber(server.relayTxControlPackets)} | errors ${packetDebugNumber(server.relayTxErrors)}`,
       `${t("packet_debug_mix")}: ${formatPacketDebugRate(serverMixRate)} | decoded ${packetDebugNumber(server.downlinkDecodedFrames)} | inputs ${packetDebugNumber(server.downlinkMixedInputs)} | queue ${packetDebugNumber(server.downlinkQueuedFrames)} frames/${packetDebugNumber(server.downlinkQueuedSenders)} senders | queue drop ${packetDebugNumber(server.downlinkQueueDrops)} | self mute ${packetDebugNumber(server.downlinkSelfMutedFrames)} | unsupported ${packetDebugNumber(server.unsupportedFrames)}`,
       `${t("packet_debug_talkers")}: ${formatPacketDebugTalkers(server.relayRxAudioBySender)}`,
+      `${t("packet_debug_relay_latency")}: ${formatRelayLatency(state.relayLatency)}`,
     ].join("\n");
   }
 
@@ -1265,6 +1280,7 @@
       micVolume: Number(state.micVolumePercent || micVolumeDefaultPercent),
       connectionKind: String((state.connectionView && state.connectionView.kind) || "offline"),
       reconnectAttempt: Number(state.reconnectAttempt || 0),
+      relayLatency: { ...state.relayLatency },
     };
   }
 
@@ -1927,6 +1943,11 @@
       return;
     }
 
+    if (event.type === "relay_latency") {
+      applyRelayLatency(event.relayLatency);
+      return;
+    }
+
     if (event.type === "connected") {
       state.connected = true;
       state.selfSenderId = Number(event.senderId || 0);
@@ -1996,6 +2017,7 @@
         port: event.relayPort,
         hideEndpoint: fixedRelayEnabled,
       });
+      applyRelayLatency({ available: false, pending: true, unresponsive: false, rttMs: -1, jitterMs: -1, intervalMs: 10000 });
       notifyEmbeddedSlotState();
       appendLog(t("log_connected_summary", {
         channel: formatDirectoryChannelLabel(Number(event.channelId || ui.channelId.value) || 0),
@@ -2204,6 +2226,7 @@
     state.downlinkCodec = "pcm";
     state.browserCodec = "pcm";
     state.downlinkOpusWarned = false;
+    applyRelayLatency(null);
     state.micPermissionDenied = false;
     if (state.ws) {
       state.ws.onclose = null;
@@ -4737,6 +4760,8 @@
     setText("logoutBtn", t("logout"));
     setText("labelConnection", t("connection"));
     setText("labelTalker", t("talker"));
+    setText("labelRelayLatency", t("relay_latency"));
+    updateRelayLatencyStatus();
     setText("headingPacketDebug", t("packet_debug"));
     setText("packetDebugReset", t("packet_debug_reset"));
     updatePttButtonLabel();
@@ -5441,6 +5466,46 @@
   function setConnectionStatus(text, level) {
     ui.connectionStatus.textContent = text;
     ui.connectionStatus.style.color = levelColor(level);
+  }
+
+  function normalizeRelayLatency(status) {
+    const source = status && typeof status === "object" ? status : {};
+    const rttMs = Number(source.rttMs);
+    const jitterMs = Number(source.jitterMs);
+    const available = !!source.available && Number.isFinite(rttMs) && rttMs >= 0;
+    return {
+      available,
+      pending: !!source.pending,
+      unresponsive: !!source.unresponsive,
+      rttMs: available ? Math.round(rttMs) : -1,
+      jitterMs: available && Number.isFinite(jitterMs) && jitterMs >= 0 ? Math.round(jitterMs) : -1,
+      intervalMs: Math.max(0, Number(source.intervalMs) || 0),
+    };
+  }
+
+  function formatRelayLatency(status) {
+    const latency = normalizeRelayLatency(status);
+    if (latency.available) {
+      return t("relay_latency_value", { rtt: latency.rttMs, jitter: Math.max(0, latency.jitterMs) });
+    }
+    return latency.unresponsive ? t("relay_latency_unresponsive") : t("relay_latency_waiting");
+  }
+
+  function updateRelayLatencyStatus() {
+    if (!ui.relayLatencyStatus) {
+      return;
+    }
+    const latency = normalizeRelayLatency(state.relayLatency);
+    ui.relayLatencyStatus.textContent = formatRelayLatency(latency);
+    ui.relayLatencyStatus.style.color = latency.available
+      ? "var(--ok)"
+      : (latency.unresponsive ? "var(--err)" : "var(--muted)");
+  }
+
+  function applyRelayLatency(status) {
+    state.relayLatency = normalizeRelayLatency(status);
+    updateRelayLatencyStatus();
+    notifyEmbeddedSlotState();
   }
 
   function levelColor(level) {

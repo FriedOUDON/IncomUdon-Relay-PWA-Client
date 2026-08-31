@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"testing"
 	"time"
 
@@ -137,5 +138,54 @@ func TestRelaySessionSelfMuteExcludesOnlyOwnSender(t *testing.T) {
 	session.SetSelfMuted(true)
 	if _, exists := session.downlinkQueues[selfSenderID]; exists {
 		t.Fatal("queued self sender frames were not discarded when self mute was enabled")
+	}
+}
+
+func TestRelayPingReplyUpdatesLatency(t *testing.T) {
+	statuses := make(chan relayLatencyStatus, 1)
+	now := time.Now()
+	session := &relaySession{
+		pingNonce:      0x0102030405060708,
+		pingSentAt:     now.Add(-17 * time.Millisecond),
+		pingPending:    true,
+		pingRTTMs:      -1,
+		pingJitterMs:   -1,
+		downlinkQueues: make(map[uint32][][]byte),
+		cb: sessionCallbacks{
+			onLatency: func(status relayLatencyStatus) {
+				statuses <- status
+			},
+		},
+	}
+	payload := make([]byte, 8)
+	binary.BigEndian.PutUint64(payload, session.pingNonce)
+
+	session.handlePingReply(parsedPacket{Payload: payload})
+
+	select {
+	case status := <-statuses:
+		if !status.Available || status.Pending || status.Unresponsive {
+			t.Fatalf("unexpected latency status: %#v", status)
+		}
+		if status.RTTMs < 0 || status.JitterMs < 0 {
+			t.Fatalf("missing latency measurement: %#v", status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("latency callback was not emitted")
+	}
+	if session.pingPending {
+		t.Fatal("matching PONG must clear the pending probe")
+	}
+}
+
+func TestRelayPingIntervalUsesActiveTraffic(t *testing.T) {
+	idle := &relaySession{downlinkQueues: make(map[uint32][][]byte)}
+	if got := idle.relayPingIntervalLocked(); got != relayPingIdleInterval {
+		t.Fatalf("idle interval = %v, want %v", got, relayPingIdleInterval)
+	}
+
+	active := &relaySession{pttPressed: true, downlinkQueues: make(map[uint32][][]byte)}
+	if got := active.relayPingIntervalLocked(); got != relayPingActiveInterval {
+		t.Fatalf("active interval = %v, want %v", got, relayPingActiveInterval)
 	}
 }
