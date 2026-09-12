@@ -155,7 +155,11 @@ func (c *cryptoContext) decrypt(ciphertext []byte, tag []byte, nonce uint64, aad
 func derivePasswordKey(password string, channelID uint32) []byte {
 	passwordHash := normalizePasswordHash(password)
 	if len(passwordHash) == 0 {
-		return make([]byte, sha256.Size)
+		// Empty passwords are normalized to 32 zero bytes, then still bound to
+		// the channel ID. Returning zeros directly would violate the common
+		// password_key derivation used by media, control authentication, and
+		// Directory v2.
+		passwordHash = make([]byte, sha256.Size)
 	}
 
 	salt := make([]byte, 4)

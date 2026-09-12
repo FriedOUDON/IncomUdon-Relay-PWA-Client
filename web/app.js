@@ -87,6 +87,8 @@
     senderId: document.getElementById("senderId"),
     password: document.getElementById("password"),
     cryptoMode: document.getElementById("cryptoMode"),
+    controlAuthEnabled: document.getElementById("controlAuthEnabled"),
+    controlKeyId: document.getElementById("controlKeyId"),
     codecMode: document.getElementById("codecMode"),
     browserCodec: document.getElementById("browserCodec"),
     wsToken: document.getElementById("wsToken"),
@@ -187,6 +189,8 @@
     password: "Password",
     password_unchanged: "(Unchanged)",
     crypto_mode: "Crypto Mode",
+    control_auth_enabled: "Control Authentication v1 (Relay support required)",
+    control_key_id: "Control Key ID",
     codec_mode: "Transmit Bitrate",
     browser_codec: "Browser Codec",
     ws_token: "WS Token",
@@ -258,6 +262,7 @@
     packet_debug_relay_rx: "Relay RX",
     packet_debug_relay_tx: "Relay TX",
     packet_debug_mix: "Mix / decode",
+    packet_debug_source_limit_drop: "source-limit drop",
     packet_debug_talkers: "RX talkers",
     packet_debug_relay_latency: "Relay latency",
     status_connecting: "Connecting",
@@ -754,7 +759,7 @@
       `${t("packet_debug_server_ws")}: queue ${packetDebugNumber(server.webSocketQueueDepth)}/48 | written ${formatPacketDebugRate(serverOutRate)} | queued pcm=${packetDebugNumber(server.webSocketQueuedPcmFrames)} opus=${packetDebugNumber(server.webSocketQueuedOpusFrames)} | drop ${packetDebugNumber(server.webSocketDroppedFrames)} | errors ${packetDebugNumber(server.webSocketWriteErrors)}`,
       `${t("packet_debug_relay_rx")}: ${formatPacketDebugRate(serverRxRate, "pkt/s")} | audio ${packetDebugNumber(server.relayRxAudioPackets)} | fec ${packetDebugNumber(server.relayRxFecPackets)} | ${formatPacketDebugBytes(packetDebugRate(server, previousServer, "relayRxBytes", elapsedSec))}/s | invalid ${packetDebugNumber(server.relayRxInvalidPackets)} rejected ${packetDebugNumber(server.relayRxRejectedPackets)}`,
       `${t("packet_debug_relay_tx")}: audio ${formatPacketDebugRate(serverTxRate, "pkt/s")} | total ${packetDebugNumber(server.relayTxAudioPackets)} | fec ${packetDebugNumber(server.relayTxFecPackets)} | control ${packetDebugNumber(server.relayTxControlPackets)} | errors ${packetDebugNumber(server.relayTxErrors)}`,
-      `${t("packet_debug_mix")}: ${formatPacketDebugRate(serverMixRate)} | decoded ${packetDebugNumber(server.downlinkDecodedFrames)} | inputs ${packetDebugNumber(server.downlinkMixedInputs)} | queue ${packetDebugNumber(server.downlinkQueuedFrames)} frames/${packetDebugNumber(server.downlinkQueuedSenders)} senders | queue drop ${packetDebugNumber(server.downlinkQueueDrops)} | self mute ${packetDebugNumber(server.downlinkSelfMutedFrames)} | unsupported ${packetDebugNumber(server.unsupportedFrames)}`,
+      `${t("packet_debug_mix")}: ${formatPacketDebugRate(serverMixRate)} | decoded ${packetDebugNumber(server.downlinkDecodedFrames)} | inputs ${packetDebugNumber(server.downlinkMixedInputs)} | queue ${packetDebugNumber(server.downlinkQueuedFrames)} frames/${packetDebugNumber(server.downlinkQueuedSenders)} senders | queue drop ${packetDebugNumber(server.downlinkQueueDrops)} | ${t("packet_debug_source_limit_drop")} ${packetDebugNumber(server.downlinkSourceLimitDrops)} | self mute ${packetDebugNumber(server.downlinkSelfMutedFrames)} | unsupported ${packetDebugNumber(server.unsupportedFrames)}`,
       `${t("packet_debug_talkers")}: ${formatPacketDebugTalkers(server.relayRxAudioBySender)}`,
       `${t("packet_debug_relay_latency")}: ${formatRelayLatency(state.relayLatency)}`,
     ].join("\n");
@@ -829,7 +834,7 @@
   const senderIDMax = 0x7fffffff;
   const portableSettingsKeys = [
     "relayHost", "relayPort", "directoryHost", "directoryPort", "channelId", "senderId", "passwordHash",
-    "cryptoMode", "codecMode", "browserCodec", "wsToken", "txCodec",
+    "cryptoMode", "controlAuthEnabled", "controlKeyId", "codecMode", "browserCodec", "wsToken", "txCodec",
     "micVolumePercent", "qosEnabled", "fecEnabled", "codec2Lib", "opusLib",
     "pcmOnly", "cuePttOnEnabled", "cuePttOffEnabled", "cueCarrierEnabled",
     "cuePttOnUrl", "cuePttOffUrl", "cueCarrierUrl", "audioTxSlotCount",
@@ -1778,6 +1783,8 @@
         senderId: safeSenderID,
         password: passwordToken,
         cryptoMode: ui.cryptoMode.value,
+        controlAuthEnabled: ui.controlAuthEnabled ? !!ui.controlAuthEnabled.checked : false,
+        controlKeyId: normalizeControlKeyId(ui.controlKeyId ? ui.controlKeyId.value : 1),
         codecMode: selectedCodecMode,
         txCodec: selectedTxCodec,
         selfMute: !!state.selfSenderMute,
@@ -2253,6 +2260,8 @@
       senderId: String(randomSenderID()),
       passwordHash: "",
       cryptoMode: "aes-gcm-v2",
+      controlAuthEnabled: false,
+      controlKeyId: "1",
       codecMode: initialOpusReady ? String(defaultOpusBitrate) : "1600",
       browserCodec: "opus",
       txCodec: initialOpusReady ? txCodecOpus : txCodecPCM,
@@ -2335,6 +2344,13 @@
     state.passwordHash = merged.passwordHash;
     ui.password.value = "";
     ui.cryptoMode.value = String(merged.cryptoMode);
+    if (ui.controlAuthEnabled) {
+      ui.controlAuthEnabled.checked = !!merged.controlAuthEnabled;
+    }
+    if (ui.controlKeyId) {
+      ui.controlKeyId.value = String(normalizeControlKeyId(merged.controlKeyId));
+    }
+    syncControlAuthSettings();
     ui.browserCodec.value = normalizeBrowserCodec(merged.browserCodec);
     if (ui.wsToken) {
       ui.wsToken.value = String(merged.wsToken || "");
@@ -2388,6 +2404,8 @@
       ui.senderId,
       ui.password,
       ui.cryptoMode,
+      ui.controlAuthEnabled,
+      ui.controlKeyId,
       ui.codecMode,
       ui.browserCodec,
       ui.wsToken,
@@ -2423,6 +2441,8 @@
       ui.senderId,
       ui.password,
       ui.cryptoMode,
+      ui.controlAuthEnabled,
+      ui.controlKeyId,
       ui.codecMode,
       ui.browserCodec,
       ui.wsToken,
@@ -2446,6 +2466,13 @@
         persistFormSettings();
       });
     }
+    [ui.cryptoMode, ui.controlAuthEnabled, ui.controlKeyId].forEach((element) => {
+      if (!element || element.dataset.controlAuthBound) {
+        return;
+      }
+      element.dataset.controlAuthBound = "1";
+      element.addEventListener("change", syncControlAuthSettings);
+    });
 
     if (ui.password && !ui.password.dataset.passwordUiBound) {
       ui.password.dataset.passwordUiBound = "1";
@@ -2618,6 +2645,8 @@
       senderId: ui.senderId.value,
       passwordHash,
       cryptoMode: ui.cryptoMode.value,
+      controlAuthEnabled: ui.controlAuthEnabled ? !!ui.controlAuthEnabled.checked : false,
+      controlKeyId: String(normalizeControlKeyId(ui.controlKeyId ? ui.controlKeyId.value : 1)),
       codecMode: ui.codecMode.value,
       browserCodec: ui.browserCodec.value,
       wsToken: currentWSToken(),
@@ -4741,6 +4770,8 @@
     setText("labelPassword", t("password"));
     setText("headingAdvancedSettings", t("advanced_settings"));
     setText("labelCryptoMode", t("crypto_mode"));
+    setText("labelControlAuthEnabled", t("control_auth_enabled"));
+    setText("labelControlKeyId", t("control_key_id"));
     setText("labelCodecMode", t("codec_mode"));
     setText("labelBrowserCodec", t("browser_codec"));
     setText("labelWsToken", t("ws_token"));
@@ -4975,6 +5006,27 @@
       return txCodecOpus;
     }
     return txCodecPCM;
+  }
+
+  function normalizeControlKeyId(value) {
+    const parsed = Number.parseInt(String(value || ""), 10);
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 0xffffffff) {
+      return 1;
+    }
+    return parsed;
+  }
+
+  function syncControlAuthSettings() {
+    if (!ui.controlAuthEnabled || !ui.controlKeyId) {
+      return;
+    }
+    const supported = ui.cryptoMode && ui.cryptoMode.value === "aes-gcm-v2";
+    if (!supported) {
+      ui.controlAuthEnabled.checked = false;
+    }
+    ui.controlAuthEnabled.disabled = !supported;
+    ui.controlKeyId.disabled = !supported || !ui.controlAuthEnabled.checked;
+    ui.controlKeyId.value = String(normalizeControlKeyId(ui.controlKeyId.value));
   }
 
   function nearestBitrateOption(options, value) {

@@ -110,6 +110,7 @@ Browser Opus requires `WebCodecs AudioEncoder` (uplink) and `WebCodecs AudioDeco
   remain encrypted and packet size is unchanged. Any modification to the
   packet type, channel ID, sender ID, sequence, flags, nonce, or key ID makes
   decryption fail.
+
 - `legacy-xor`: compatibility-only mode.
 
 `aes-gcm-v2` derives a separate media key and is intentionally incompatible
@@ -117,6 +118,15 @@ with `aes-gcm`. Update every participating native/PWA client, then select
 `aes-gcm-v2` for the channel. The Relay forwards v2 media packets without
 decrypting them. PTT/JOIN/LEAVE and other Relay control packets are outside
 the v2 media-AAD scope.
+
+### Control Authentication v1
+
+The Advanced Settings card can enable **Control Authentication v1** and select
+a non-zero Control Key ID (default `1`). It authenticates Relay control
+packets with a key separately derived from the configured channel password;
+media continues to use AES-GCM v2. The option is disabled by default and
+requires a Relay configured for Control Authentication v1. It is available
+only with `aes-gcm-v2`.
 
 ## Security Hardening (Public Deployment)
 
@@ -482,7 +492,8 @@ is incompatible.
   - For `codec2`/`pcm`: `450`, `700`, `1600`, `2400`, `3200`
   - For `opus`: `6000`, `8000`, `12000`, `16000`, `20000`, `64000`, `96000`, `128000`
 - `Network QoS (DSCP EF)`: `On` / `Off` (default `On`)
-- `TX FEC (RS 2-loss)`: `On` / `Off` (default `On`)
+- `TX FEC (RS 2-loss)`: `On` / `Off` (default `On`). Uses FEC v2 with
+  variable-length codec-frame metadata and a final short P/Q block at PTT release.
 - `TX Codec` options are automatically filtered by server runtime library availability.
   - `codec2` is shown only when `libcodec2` is available.
   - `opus` is shown only when `libopus` is available.
@@ -493,7 +504,11 @@ Behavior:
 - If server-side `libopus` cannot be loaded, `pwa_client` falls back to `pcm`.
 - If `TX Codec=opus` and `Browser Codec=opus`, browser uplink Opus bitrate is aligned to `Transmit Bitrate`.
 - In that same mode, browser Opus uplink packets are passed through to relay uplink (no server-side Opus re-encode).
-- When `TX FEC` is enabled, parity packets (`PKT_FEC`) are transmitted for uplink audio frames.
+- When `TX FEC` is enabled, FEC v2 parity packets (`PKT_FEC`) are transmitted
+  for uplink audio frames. Ordinary media is not held for a complete FEC block;
+  recovery is opportunistic and late reconstructions are discarded.
+- Every Version 1 UDP datagram is capped at 1200 bytes. Codec frames above the
+  1139-byte transmit ceiling are dropped rather than fragmented or queued.
 - QoS `On` requests DSCP EF marking on the server-side UDP socket (Linux runtime).
   - If the OS/network does not allow it, a warning is logged and communication continues.
 

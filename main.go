@@ -65,29 +65,31 @@ type serverEvent struct {
 }
 
 type clientCommand struct {
-	Type          string `json:"type"`
-	RelayHost     string `json:"relayHost,omitempty"`
-	RelayPort     int    `json:"relayPort,omitempty"`
-	RelayAddress  string `json:"relayAddress,omitempty"`
-	DirectoryHost string `json:"directoryHost,omitempty"`
-	DirectoryPort int    `json:"directoryPort,omitempty"`
-	ChannelID     uint32 `json:"channelId,omitempty"`
-	SenderID      uint32 `json:"senderId,omitempty"`
-	Password      string `json:"password,omitempty"`
-	CryptoMode    string `json:"cryptoMode,omitempty"`
-	CodecMode     int    `json:"codecMode,omitempty"`
-	TxCodec       string `json:"txCodec,omitempty"`
-	Codec2Lib     string `json:"codec2Lib,omitempty"`
-	OpusLib       string `json:"opusLib,omitempty"`
-	UplinkCodec   string `json:"uplinkCodec,omitempty"`
-	DownlinkCodec string `json:"downlinkCodec,omitempty"`
-	QosEnabled    *bool  `json:"qosEnabled,omitempty"`
-	FecEnabled    *bool  `json:"fecEnabled,omitempty"`
-	PCMOnly       *bool  `json:"pcmOnly,omitempty"`
-	SelfMute      *bool  `json:"selfMute,omitempty"`
-	PacketDebug   *bool  `json:"packetDebug,omitempty"`
-	Silent        bool   `json:"silent,omitempty"`
-	Pressed       *bool  `json:"pressed,omitempty"`
+	Type               string `json:"type"`
+	RelayHost          string `json:"relayHost,omitempty"`
+	RelayPort          int    `json:"relayPort,omitempty"`
+	RelayAddress       string `json:"relayAddress,omitempty"`
+	DirectoryHost      string `json:"directoryHost,omitempty"`
+	DirectoryPort      int    `json:"directoryPort,omitempty"`
+	ChannelID          uint32 `json:"channelId,omitempty"`
+	SenderID           uint32 `json:"senderId,omitempty"`
+	Password           string `json:"password,omitempty"`
+	CryptoMode         string `json:"cryptoMode,omitempty"`
+	ControlAuthEnabled *bool  `json:"controlAuthEnabled,omitempty"`
+	ControlKeyID       uint32 `json:"controlKeyId,omitempty"`
+	CodecMode          int    `json:"codecMode,omitempty"`
+	TxCodec            string `json:"txCodec,omitempty"`
+	Codec2Lib          string `json:"codec2Lib,omitempty"`
+	OpusLib            string `json:"opusLib,omitempty"`
+	UplinkCodec        string `json:"uplinkCodec,omitempty"`
+	DownlinkCodec      string `json:"downlinkCodec,omitempty"`
+	QosEnabled         *bool  `json:"qosEnabled,omitempty"`
+	FecEnabled         *bool  `json:"fecEnabled,omitempty"`
+	PCMOnly            *bool  `json:"pcmOnly,omitempty"`
+	SelfMute           *bool  `json:"selfMute,omitempty"`
+	PacketDebug        *bool  `json:"packetDebug,omitempty"`
+	Silent             bool   `json:"silent,omitempty"`
+	Pressed            *bool  `json:"pressed,omitempty"`
 }
 
 type wsMessage struct {
@@ -1059,6 +1061,17 @@ func buildSessionConfig(
 	if cmd.FecEnabled != nil {
 		fecEnabled = *cmd.FecEnabled
 	}
+	controlAuthEnabled := false
+	if cmd.ControlAuthEnabled != nil {
+		controlAuthEnabled = *cmd.ControlAuthEnabled
+	}
+	controlKeyID := cmd.ControlKeyID
+	if controlKeyID == 0 {
+		controlKeyID = 1
+	}
+	if controlAuthEnabled && mode != cryptoAESGCMV2 {
+		return sessionConfig{}, fmt.Errorf("control authentication requires cryptoMode=aes-gcm-v2")
+	}
 
 	txCodec := strings.ToLower(strings.TrimSpace(cmd.TxCodec))
 	switch txCodec {
@@ -1096,23 +1109,25 @@ func buildSessionConfig(
 	}
 
 	cfg := sessionConfig{
-		RelayHost:     host,
-		RelayPort:     port,
-		ChannelID:     cmd.ChannelID,
-		SenderID:      senderID,
-		Password:      cmd.Password,
-		CryptoMode:    mode,
-		CodecMode:     codecMode,
-		TxCodec:       txCodec,
-		PCMOnly:       pcmOnly,
-		SelfMute:      selfMute,
-		PacketDebug:   packetDebug,
-		QosEnabled:    qosEnabled,
-		FecEnabled:    fecEnabled,
-		Codec2LibPath: codec2LibPath,
-		OpusLibPath:   opusLibPath,
-		UplinkCodec:   cmd.UplinkCodec,
-		DownlinkCodec: cmd.DownlinkCodec,
+		RelayHost:          host,
+		RelayPort:          port,
+		ChannelID:          cmd.ChannelID,
+		SenderID:           senderID,
+		Password:           cmd.Password,
+		CryptoMode:         mode,
+		ControlAuthEnabled: controlAuthEnabled,
+		ControlKeyID:       controlKeyID,
+		CodecMode:          codecMode,
+		TxCodec:            txCodec,
+		PCMOnly:            pcmOnly,
+		SelfMute:           selfMute,
+		PacketDebug:        packetDebug,
+		QosEnabled:         qosEnabled,
+		FecEnabled:         fecEnabled,
+		Codec2LibPath:      codec2LibPath,
+		OpusLibPath:        opusLibPath,
+		UplinkCodec:        cmd.UplinkCodec,
+		DownlinkCodec:      cmd.DownlinkCodec,
 	}
 	return cfg, nil
 }

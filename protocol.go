@@ -10,27 +10,41 @@ const (
 	securityHeaderSize = 12
 	authTagSize        = 16
 
+	// Version 1 stays below the IPv6 minimum link MTU without relying on IP
+	// fragmentation. The larger receive limit only bounds untrusted payloads.
+	maxUDPDatagramBytes        = 1200
+	maxMediaFrameBytes         = 4096
+	maxTransmitMediaFrameBytes = 1139
+	maxMixTalkers              = 16
+
 	// packetFlagAESGCMV2HeaderAAD marks packets whose fixed and security
 	// headers are authenticated as AES-GCM additional authenticated data.
 	packetFlagAESGCMV2HeaderAAD uint16 = 1 << 0
+	packetFlagControlAuthV1     uint16 = 1 << 1
 )
 
 const (
-	pktAudio       = 0x01
-	pktPttOn       = 0x02
-	pktPttOff      = 0x03
-	pktKeepalive   = 0x04
-	pktJoin        = 0x05
-	pktLeave       = 0x06
-	pktTalkGrant   = 0x07
-	pktTalkRelease = 0x08
-	pktTalkDeny    = 0x09
-	pktKeyExchange = 0x0A
-	pktCodecConfig = 0x0B
-	pktFec         = 0x0C
-	pktServerCfg   = 0x0D
-	pktPing        = 0x0E
-	pktPong        = 0x0F
+	pktAudio             = 0x01
+	pktPttOn             = 0x02
+	pktPttOff            = 0x03
+	pktKeepalive         = 0x04
+	pktJoin              = 0x05
+	pktLeave             = 0x06
+	pktTalkGrant         = 0x07
+	pktTalkRelease       = 0x08
+	pktTalkDeny          = 0x09
+	pktKeyExchange       = 0x0A
+	pktCodecConfig       = 0x0B
+	pktFec               = 0x0C
+	pktServerCfg         = 0x0D
+	pktPing              = 0x0E
+	pktPong              = 0x0F
+	pktAuthHello         = 0x10
+	pktAuthChallenge     = 0x11
+	pktIdentityBegin     = 0x12
+	pktIdentityChallenge = 0x13
+	pktIdentityProof     = 0x14
+	pktIdentityDeny      = 0x15
 )
 
 const (

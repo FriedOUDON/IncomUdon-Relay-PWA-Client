@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	pathpkg "path"
 	"sort"
@@ -15,25 +16,27 @@ import (
 )
 
 type sessionConfig struct {
-	RelayHost         string
-	RelayPort         int
-	ForceRelayIPv4    bool
-	HideRelayEndpoint bool
-	ChannelID         uint32
-	SenderID          uint32
-	Password          string
-	CryptoMode        cryptoMode
-	CodecMode         int
-	TxCodec           string
-	PCMOnly           bool
-	SelfMute          bool
-	PacketDebug       bool
-	QosEnabled        bool
-	FecEnabled        bool
-	Codec2LibPath     string
-	OpusLibPath       string
-	UplinkCodec       string
-	DownlinkCodec     string
+	RelayHost          string
+	RelayPort          int
+	ForceRelayIPv4     bool
+	HideRelayEndpoint  bool
+	ChannelID          uint32
+	SenderID           uint32
+	Password           string
+	CryptoMode         cryptoMode
+	ControlAuthEnabled bool
+	ControlKeyID       uint32
+	CodecMode          int
+	TxCodec            string
+	PCMOnly            bool
+	SelfMute           bool
+	PacketDebug        bool
+	QosEnabled         bool
+	FecEnabled         bool
+	Codec2LibPath      string
+	OpusLibPath        string
+	UplinkCodec        string
+	DownlinkCodec      string
 }
 
 const (
@@ -106,14 +109,15 @@ type packetDebugStats struct {
 	RelayRxFecBytes        uint64            `json:"relayRxFecBytes"`
 	RelayRxAudioBySender   map[uint32]uint64 `json:"relayRxAudioBySender,omitempty"`
 
-	DownlinkDecodedFrames   uint64 `json:"downlinkDecodedFrames"`
-	DownlinkSelfMutedFrames uint64 `json:"downlinkSelfMutedFrames"`
-	DownlinkQueueDrops      uint64 `json:"downlinkQueueDrops"`
-	DownlinkMixedFrames     uint64 `json:"downlinkMixedFrames"`
-	DownlinkMixedInputs     uint64 `json:"downlinkMixedInputs"`
-	DownlinkQueuedFrames    uint64 `json:"downlinkQueuedFrames"`
-	DownlinkQueuedSenders   uint32 `json:"downlinkQueuedSenders"`
-	UnsupportedFrames       uint64 `json:"unsupportedFrames"`
+	DownlinkDecodedFrames    uint64 `json:"downlinkDecodedFrames"`
+	DownlinkSelfMutedFrames  uint64 `json:"downlinkSelfMutedFrames"`
+	DownlinkQueueDrops       uint64 `json:"downlinkQueueDrops"`
+	DownlinkMixedFrames      uint64 `json:"downlinkMixedFrames"`
+	DownlinkMixedInputs      uint64 `json:"downlinkMixedInputs"`
+	DownlinkQueuedFrames     uint64 `json:"downlinkQueuedFrames"`
+	DownlinkQueuedSenders    uint32 `json:"downlinkQueuedSenders"`
+	DownlinkSourceLimitDrops uint64 `json:"downlinkSourceLimitDrops"`
+	UnsupportedFrames        uint64 `json:"unsupportedFrames"`
 
 	BrowserDownlinkPCMFrames  uint64 `json:"browserDownlinkPcmFrames"`
 	BrowserDownlinkPCMBytes   uint64 `json:"browserDownlinkPcmBytes"`
@@ -139,10 +143,17 @@ type packetDebugStats struct {
 }
 
 type peerCodecConfig struct {
-	Mode    int
-	PCMOnly bool
-	CodecID uint8
+	Mode       int
+	PCMOnly    bool
+	CodecID    uint8
+	FECOptions uint8
 }
+
+const (
+	codecConfigFECExternalParity = 1 << 0
+	codecConfigFECOpusInband     = 1 << 1
+	codecConfigFECExternalV2     = 1 << 2
+)
 
 type relaySession struct {
 	cfg            sessionConfig
@@ -151,6 +162,7 @@ type relaySession struct {
 	relayAddrs     []*net.UDPAddr
 	relayAddrIndex int
 	crypto         *cryptoContext
+	controlAuth    *controlAuthContext
 	codec2         *codec2Engine
 	opusDecoder    *opusDecoderEngine
 	opusEncoder    *opusEncoderEngine
@@ -172,11 +184,14 @@ type relaySession struct {
 
 	joinRetriesLeft int
 	serverLocked    bool
+	authChallenge   []byte
+	authJoined      bool
 	pendingPCM      [][]byte
 	pendingOpus     [][]byte
 	txPCMBuffer     []byte
 	downlinkPCM     map[uint32][]byte
 	downlinkQueues  map[uint32][][]byte
+	mixGains        map[uint32]float64
 
 	peerCodec              map[uint32]peerCodecConfig
 	unsupportedFrames      map[string]struct{}
@@ -221,6 +236,18 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		_ = conn.Close()
 		return nil, fmt.Errorf("failed to init crypto: %w", err)
 	}
+	var controlAuth *controlAuthContext
+	if cfg.ControlAuthEnabled {
+		if cfg.CryptoMode != cryptoAESGCMV2 {
+			_ = conn.Close()
+			return nil, fmt.Errorf("control authentication requires cryptoMode=aes-gcm-v2")
+		}
+		controlAuth, err = newControlAuthContext(cfg.Password, cfg.ChannelID, cfg.ControlKeyID)
+		if err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("failed to initialize control authentication: %w", err)
+		}
+	}
 
 	s := &relaySession{
 		cfg:               cfg,
@@ -228,6 +255,7 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		relayAddr:         relayAddr,
 		relayAddrs:        relayAddrs,
 		crypto:            cryptoCtx,
+		controlAuth:       controlAuth,
 		fec:               newFECEncoder(cfg.FecEnabled),
 		cb:                cb,
 		joinRetriesLeft:   5,
@@ -236,6 +264,7 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		fecDecoders:       make(map[uint32]*fecDecoder),
 		downlinkPCM:       make(map[uint32][]byte),
 		downlinkQueues:    make(map[uint32][][]byte),
+		mixGains:          make(map[uint32]float64),
 		unsupportedFrames: make(map[string]struct{}),
 		packetDebug:       cfg.PacketDebug,
 		pingRTTMs:         -1,
@@ -520,7 +549,7 @@ func (s *relaySession) Start() {
 		s.emitEvent(serverEvent{
 			Type:    "status",
 			Level:   "debug",
-			Message: "FEC enabled (TX/RX RS 2-loss parity)",
+			Message: "External FEC v2 enabled (TX/RX RS 2-loss parity)",
 		})
 	} else {
 		s.emitEvent(serverEvent{
@@ -538,7 +567,11 @@ func (s *relaySession) Start() {
 		})
 	}
 
-	if err := s.sendJoin(); err != nil {
+	if s.controlAuth != nil {
+		if err := s.sendAuthHello(); err != nil {
+			s.emitError("failed to start control authentication: %v", err)
+		}
+	} else if err := s.completeJoin(); err != nil {
 		s.emitError("failed to send join: %v", err)
 	}
 	if s.cfg.CryptoMode == cryptoLegacyXor {
@@ -546,11 +579,13 @@ func (s *relaySession) Start() {
 			s.emitError("failed to send legacy handshake: %v", err)
 		}
 	}
-	if err := s.sendCodecConfig(); err != nil {
-		s.emitError("failed to send codec config: %v", err)
-	}
-	if err := s.sendKeepalive(); err != nil {
-		s.emitError("failed to send keepalive: %v", err)
+	if s.controlAuth == nil {
+		if err := s.sendCodecConfig(); err != nil {
+			s.emitError("failed to send codec config: %v", err)
+		}
+		if err := s.sendKeepalive(); err != nil {
+			s.emitError("failed to send keepalive: %v", err)
+		}
 	}
 
 	s.wg.Add(6)
@@ -586,6 +621,7 @@ func (s *relaySession) Close() {
 	s.txPCMBuffer = nil
 	s.downlinkPCM = nil
 	s.downlinkQueues = nil
+	s.mixGains = nil
 	s.activeTalkers = nil
 	s.fecDecoders = nil
 	s.mu.Unlock()
@@ -797,10 +833,16 @@ func (s *relaySession) HandleBrowserBinary(payload []byte) {
 
 func (s *relaySession) SetPTT(pressed bool) {
 	s.mu.Lock()
+	if pressed && s.controlAuth != nil && !s.authJoined {
+		s.mu.Unlock()
+		s.emitEvent(serverEvent{Type: "status", Level: "warn", Message: "PTT ignored: control authentication is not complete"})
+		return
+	}
 	if s.pttPressed == pressed {
 		s.mu.Unlock()
 		return
 	}
+	wasAllowed := s.talkAllowed
 	s.pttPressed = pressed
 	if pressed {
 		s.txPCMBuffer = nil
@@ -814,11 +856,11 @@ func (s *relaySession) SetPTT(pressed bool) {
 	}
 	fec := s.fec
 	s.mu.Unlock()
-	if fec != nil {
-		fec.Reset()
-	}
 
 	if pressed {
+		if fec != nil {
+			fec.Reset()
+		}
 		if err := s.sendCodecConfig(); err != nil {
 			s.emitError("failed to send codec config: %v", err)
 		}
@@ -826,10 +868,31 @@ func (s *relaySession) SetPTT(pressed bool) {
 			s.emitError("failed to send PTT_ON: %v", err)
 		}
 	} else {
+		if wasAllowed && fec != nil {
+			if err := s.flushOutboundFEC(fec); err != nil {
+				s.emitError("failed to flush final FEC block: %v", err)
+			}
+		}
 		if err := s.sendControlPacket(pktPttOff, nil); err != nil {
 			s.emitError("failed to send PTT_OFF: %v", err)
 		}
+		if fec != nil {
+			fec.Reset()
+		}
 	}
+}
+
+func (s *relaySession) flushOutboundFEC(fec *fecEncoder) error {
+	if fec == nil {
+		return nil
+	}
+	parity := fec.Flush()
+	if len(parity) == 0 {
+		return nil
+	}
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	return s.sendFECParityPacketsLocked(parity)
 }
 
 func (s *relaySession) UpdateCodec(codecMode int, pcmOnly bool) {
@@ -995,7 +1058,9 @@ func (s *relaySession) collectOutboundPCMFrames(pcm []byte) [][]byte {
 func (s *relaySession) readLoop() {
 	defer s.wg.Done()
 
-	buf := make([]byte, 4096)
+	// One extra byte lets us distinguish a valid 1200-byte datagram from an
+	// over-limit packet truncated by the UDP read buffer.
+	buf := make([]byte, maxUDPDatagramBytes+1)
 	for {
 		select {
 		case <-s.done:
@@ -1018,6 +1083,14 @@ func (s *relaySession) readLoop() {
 			}
 		}
 
+		if n > maxUDPDatagramBytes {
+			if s.packetDebug {
+				s.mu.Lock()
+				s.packetStats.RelayRxInvalidPackets++
+				s.mu.Unlock()
+			}
+			continue
+		}
 		datagram := make([]byte, n)
 		copy(datagram, buf[:n])
 		if s.packetDebug {
@@ -1041,6 +1114,9 @@ func (s *relaySession) keepaliveLoop() {
 		case <-s.done:
 			return
 		case <-ticker.C:
+			if !s.controlAuthReady() {
+				continue
+			}
 			if err := s.sendKeepalive(); err != nil {
 				s.emitError("failed to send keepalive: %v", err)
 			}
@@ -1101,7 +1177,7 @@ func (s *relaySession) updateRelayPing() {
 	var status *relayLatencyStatus
 
 	s.mu.Lock()
-	if !s.serverLocked {
+	if !s.serverLocked || (s.controlAuth != nil && !s.authJoined) {
 		s.mu.Unlock()
 		return
 	}
@@ -1220,7 +1296,9 @@ func (s *relaySession) joinRetryLoop() {
 			return
 		case <-ticker.C:
 			s.mu.Lock()
-			if s.serverLocked {
+			authenticated := s.controlAuth == nil || s.authJoined
+			serverLocked := s.serverLocked
+			if serverLocked && authenticated {
 				s.mu.Unlock()
 				return
 			}
@@ -1235,12 +1313,22 @@ func (s *relaySession) joinRetryLoop() {
 			}
 			s.joinRetriesLeft--
 			s.mu.Unlock()
-			from, to, changed := s.advanceRelayAddress()
-			if changed {
-				s.emitRelayAddressFallback(from, to, "no response to join")
+			if !serverLocked {
+				from, to, changed := s.advanceRelayAddress()
+				if changed {
+					s.emitRelayAddressFallback(from, to, "no response to join")
+				}
 			}
 
-			if err := s.sendJoin(); err != nil {
+			if s.controlAuth != nil {
+				if s.hasControlAuthChallenge() {
+					if err := s.completeJoin(); err != nil {
+						s.emitError("failed to retry authenticated join: %v", err)
+					}
+				} else if err := s.sendAuthHello(); err != nil {
+					s.emitError("failed to retry control authentication: %v", err)
+				}
+			} else if err := s.sendJoin(); err != nil {
 				s.emitError("failed to retry join: %v", err)
 			}
 		}
@@ -1258,6 +1346,9 @@ func (s *relaySession) codecLoop() {
 		case <-s.done:
 			return
 		case <-ticker.C:
+			if !s.controlAuthReady() {
+				continue
+			}
 			s.mu.Lock()
 			pttPressed := s.pttPressed
 			s.mu.Unlock()
@@ -1282,21 +1373,34 @@ func (s *relaySession) downlinkMixLoop() {
 		case <-s.done:
 			return
 		case <-ticker.C:
-			frames := make([][]byte, 0)
-
 			s.mu.Lock()
+			senders := make([]uint32, 0, len(s.downlinkQueues))
 			for senderID, queue := range s.downlinkQueues {
 				if len(queue) == 0 {
 					delete(s.downlinkQueues, senderID)
 					continue
 				}
-				frames = append(frames, queue[0])
+				senders = append(senders, senderID)
+			}
+			sort.Slice(senders, func(i, j int) bool { return senders[i] < senders[j] })
+			frames := make(map[uint32][]byte, min(len(senders), maxMixTalkers))
+			for index, senderID := range senders {
+				queue := s.downlinkQueues[senderID]
+				frame := queue[0]
 				if len(queue) == 1 {
 					delete(s.downlinkQueues, senderID)
 				} else {
 					s.downlinkQueues[senderID] = queue[1:]
 				}
+				if index >= maxMixTalkers {
+					if s.packetDebug {
+						s.packetStats.DownlinkSourceLimitDrops++
+					}
+					continue
+				}
+				frames[senderID] = frame
 			}
+			mixed := mixPCMFrames(frames, s.mixGains)
 			if s.packetDebug && len(frames) > 0 {
 				s.packetStats.DownlinkMixedFrames++
 				s.packetStats.DownlinkMixedInputs += uint64(len(frames))
@@ -1306,8 +1410,6 @@ func (s *relaySession) downlinkMixLoop() {
 			if len(frames) == 0 {
 				continue
 			}
-
-			mixed := mixPCMFrames(frames)
 			if len(mixed) == 0 {
 				continue
 			}
@@ -1317,6 +1419,14 @@ func (s *relaySession) downlinkMixLoop() {
 }
 
 func (s *relaySession) handleDatagram(data []byte, from *net.UDPAddr) {
+	if len(data) > maxUDPDatagramBytes {
+		if s.packetDebug {
+			s.mu.Lock()
+			s.packetStats.RelayRxInvalidPackets++
+			s.mu.Unlock()
+		}
+		return
+	}
 	pkt, ok := parsePacket(data)
 	if !ok {
 		if s.packetDebug {
@@ -1342,6 +1452,35 @@ func (s *relaySession) handleDatagram(data []byte, from *net.UDPAddr) {
 		}
 		return
 	}
+	if s.controlAuth != nil {
+		if !isAuthenticatedControlPacket(pkt.Header.Type) || !s.controlAuth.verifyRelayPacket(pkt) {
+			if s.packetDebug {
+				s.mu.Lock()
+				s.packetStats.RelayRxRejectedPackets++
+				s.mu.Unlock()
+			}
+			return
+		}
+		s.mu.Lock()
+		serverLocked := s.serverLocked
+		s.mu.Unlock()
+		if !serverLocked && pkt.Header.Type != pktAuthChallenge {
+			if s.packetDebug {
+				s.mu.Lock()
+				s.packetStats.RelayRxRejectedPackets++
+				s.mu.Unlock()
+			}
+			return
+		}
+		if !serverLocked && pkt.Header.Type == pktAuthChallenge && !validControlAuthChallenge(pkt.Payload, time.Now()) {
+			if s.packetDebug {
+				s.mu.Lock()
+				s.packetStats.RelayRxRejectedPackets++
+				s.mu.Unlock()
+			}
+			return
+		}
+	}
 	if !s.acceptServerAddress(from) {
 		if s.packetDebug {
 			s.mu.Lock()
@@ -1353,6 +1492,8 @@ func (s *relaySession) handleDatagram(data []byte, from *net.UDPAddr) {
 	s.noteRelayRxPacket(pkt.Header.Type, len(data), pkt.Header.SenderID)
 
 	switch pkt.Header.Type {
+	case pktAuthChallenge:
+		s.handleAuthChallenge(pkt)
 	case pktPong:
 		s.handlePingReply(pkt)
 	case pktTalkGrant, pktTalkRelease, pktTalkDeny:
@@ -1415,7 +1556,9 @@ func (s *relaySession) acceptServerAddress(from *net.UDPAddr) bool {
 	s.mu.Unlock()
 
 	log.Printf("Relay endpoint locked to %s (channel=%d sender=%d)", from, channelID, senderID)
-	s.emitConnected()
+	if s.controlAuth == nil {
+		s.emitConnected()
+	}
 	return true
 }
 
@@ -1516,15 +1659,29 @@ func (s *relaySession) handleCodecConfig(pkt parsedPacket) {
 		codecID = normalizeCodecTransportID(pkt.Payload[1], pcmOnly)
 		mode = normalizeCodecModeForTransport(int(binary.BigEndian.Uint16(pkt.Payload[2:4])), codecID, pcmOnly)
 	}
+	fecOptions := uint8(0)
+	if len(pkt.Payload) >= 5 {
+		candidate := pkt.Payload[4]
+		// External parity is valid only when the explicit v2 bit accompanies
+		// it. Invalid negotiation must not disable ordinary media decoding.
+		if candidate&codecConfigFECExternalParity != 0 && candidate&codecConfigFECExternalV2 == 0 {
+			candidate &^= codecConfigFECExternalParity
+		}
+		if codecID != codecTransportOpus {
+			candidate &^= codecConfigFECOpusInband
+		}
+		fecOptions = candidate
+	}
 
 	s.mu.Lock()
 	previous, hadPrevious := s.peerCodec[pkt.Header.SenderID]
 	s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{
-		Mode:    mode,
-		PCMOnly: pcmOnly,
-		CodecID: codecID,
+		Mode:       mode,
+		PCMOnly:    pcmOnly,
+		CodecID:    codecID,
+		FECOptions: fecOptions,
 	}
-	if hadPrevious && (previous.Mode != mode || previous.PCMOnly != pcmOnly || previous.CodecID != codecID) {
+	if hadPrevious && (previous.Mode != mode || previous.PCMOnly != pcmOnly || previous.CodecID != codecID || previous.FECOptions != fecOptions) {
 		delete(s.fecDecoders, pkt.Header.SenderID)
 	}
 	s.mu.Unlock()
@@ -1550,11 +1707,25 @@ func (s *relaySession) handleServerConfig(pkt parsedPacket) {
 			maxActiveTalkers = uint32(pkt.Payload[3])
 		}
 	}
+	if maxActiveTalkers > maxMixTalkers {
+		maxActiveTalkers = maxMixTalkers
+	}
+	if !multiTalkEnabled {
+		maxActiveTalkers = 1
+	}
 
 	s.mu.Lock()
+	wasAuthenticated := s.controlAuth != nil && !s.authJoined
+	if wasAuthenticated {
+		s.authJoined = true
+		s.authChallenge = nil
+	}
 	s.serverMultiTalkEnabled = multiTalkEnabled
 	s.serverMaxActiveTalkers = int(maxActiveTalkers)
 	s.mu.Unlock()
+	if wasAuthenticated {
+		s.emitConnected()
+	}
 
 	s.emitEvent(serverEvent{
 		Type:             "server_config",
@@ -1584,6 +1755,50 @@ func (s *relaySession) handleServerConfig(pkt parsedPacket) {
 	}
 }
 
+// handleAuthChallenge completes the cookie-bearing JOIN without exposing the
+// cookie to browser events or logs. The Relay has already authenticated this
+// packet before it reaches this handler.
+func (s *relaySession) handleAuthChallenge(pkt parsedPacket) {
+	if !validControlAuthChallenge(pkt.Payload, time.Now()) {
+		s.emitEvent(serverEvent{Type: "status", Level: "warn", Message: "control authentication challenge rejected: expired cookie"})
+		return
+	}
+
+	s.mu.Lock()
+	s.authChallenge = append(s.authChallenge[:0], pkt.Payload...)
+	s.mu.Unlock()
+	if err := s.completeJoin(); err != nil {
+		s.emitError("failed to complete control authentication: %v", err)
+		return
+	}
+	if err := s.sendCodecConfig(); err != nil {
+		s.emitError("failed to send codec config after control authentication: %v", err)
+	}
+	if err := s.sendKeepalive(); err != nil {
+		s.emitError("failed to send keepalive after control authentication: %v", err)
+	}
+}
+
+func (s *relaySession) controlAuthReady() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.controlAuth == nil || s.authJoined
+}
+
+func (s *relaySession) hasControlAuthChallenge() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return validControlAuthChallenge(s.authChallenge, time.Now())
+}
+
+func validControlAuthChallenge(payload []byte, now time.Time) bool {
+	if len(payload) != 20 {
+		return false
+	}
+	expiresAt := time.Unix(int64(binary.BigEndian.Uint32(payload[:4])), 0)
+	return expiresAt.After(now) && !expiresAt.After(now.Add(30*time.Second))
+}
+
 func (s *relaySession) handleHandshakePacket(pkt parsedPacket) {
 	payload := bytes.TrimSpace(pkt.Payload)
 	if bytes.Equal(payload, []byte("LEGACY")) {
@@ -1605,7 +1820,7 @@ func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
 	if len(frame) == 0 {
 		return
 	}
-	if hasSequence && s.fecReceiveEnabled() {
+	if hasSequence && s.fecReceiveEnabled(pkt.Header.SenderID) {
 		for _, recovered := range s.pushFECData(pkt.Header.SenderID, audioSeq, frame) {
 			s.handleCodecFrame(pkt.Header.SenderID, recovered.Data)
 		}
@@ -1615,19 +1830,18 @@ func (s *relaySession) handleAudioPacket(pkt parsedPacket) {
 }
 
 func (s *relaySession) handleFecPacket(pkt parsedPacket) {
-	if !s.fecReceiveEnabled() {
+	if !s.fecReceiveEnabled(pkt.Header.SenderID) {
 		return
 	}
 	plaintext, ok := s.decryptRealtimePayload(pkt)
-	if !ok || len(plaintext) < 4 {
+	if !ok {
 		return
 	}
-
-	blockStart := binary.BigEndian.Uint16(plaintext[0:2])
-	blockSize := plaintext[2]
-	parityIndex := plaintext[3]
-	parity := plaintext[4:]
-	for _, recovered := range s.pushFECParity(pkt.Header.SenderID, blockStart, blockSize, parityIndex, parity) {
+	parity, valid := parseFECV2Payload(plaintext)
+	if !valid {
+		return
+	}
+	for _, recovered := range s.pushFECParity(pkt.Header.SenderID, parity) {
 		s.handleCodecFrame(pkt.Header.SenderID, recovered.Data)
 	}
 }
@@ -1662,11 +1876,12 @@ func (s *relaySession) decryptRealtimePayload(pkt parsedPacket) ([]byte, bool) {
 	return decoded, true
 }
 
-func (s *relaySession) fecReceiveEnabled() bool {
+func (s *relaySession) fecReceiveEnabled(senderID uint32) bool {
 	s.mu.Lock()
 	enabled := s.cfg.FecEnabled
+	peer, knownPeer := s.peerCodec[senderID]
 	s.mu.Unlock()
-	return enabled
+	return enabled && knownPeer && peer.FECOptions&codecConfigFECExternalParity != 0 && peer.FECOptions&codecConfigFECExternalV2 != 0
 }
 
 func (s *relaySession) pushFECData(senderID uint32, audioSeq uint16, frame []byte) []fecDecodedFrame {
@@ -1677,12 +1892,12 @@ func (s *relaySession) pushFECData(senderID uint32, audioSeq uint16, frame []byt
 	return decoder.PushData(audioSeq, frame)
 }
 
-func (s *relaySession) pushFECParity(senderID uint32, blockStart uint16, blockSize uint8, parityIndex uint8, data []byte) []fecDecodedFrame {
+func (s *relaySession) pushFECParity(senderID uint32, parity fecParityPacket) []fecDecodedFrame {
 	decoder := s.fecDecoderFor(senderID)
 	if decoder == nil {
 		return nil
 	}
-	return decoder.PushParity(blockStart, blockSize, parityIndex, data)
+	return decoder.PushParity(parity)
 }
 
 func (s *relaySession) fecDecoderFor(senderID uint32) *fecDecoder {
@@ -1947,33 +2162,53 @@ func (s *relaySession) collectDownlinkPCMFrames(senderID uint32, frame []byte) [
 	return frames
 }
 
-func mixPCMFrames(frames [][]byte) []byte {
+// mixPCMFrames applies the v0.4 common mix rule. Each active source gets
+// 1/sqrt(N), with a single 20 ms linear ramp whenever the source count
+// changes. Integer accumulation and final clamping prevent wraparound.
+func mixPCMFrames(frames map[uint32][]byte, gains map[uint32]float64) []byte {
 	if len(frames) == 0 {
 		return nil
 	}
 
 	samplesPerFrame := pcmBytesPerFrame / 2
-	accum := make([]int, samplesPerFrame)
-	contributors := 0
-
-	for _, pcm := range frames {
+	contributors := make([]uint32, 0, len(frames))
+	for senderID, pcm := range frames {
 		if len(pcm) < pcmBytesPerFrame {
 			continue
 		}
-		contributors++
-		for i := 0; i < samplesPerFrame; i++ {
-			sample := int(int16(binary.LittleEndian.Uint16(pcm[i*2 : i*2+2])))
-			accum[i] += sample
+		contributors = append(contributors, senderID)
+	}
+	if len(contributors) == 0 {
+		return nil
+	}
+	sort.Slice(contributors, func(i, j int) bool { return contributors[i] < contributors[j] })
+
+	active := make(map[uint32]struct{}, len(contributors))
+	for _, senderID := range contributors {
+		active[senderID] = struct{}{}
+	}
+	for senderID := range gains {
+		if _, present := active[senderID]; !present {
+			delete(gains, senderID)
 		}
 	}
-
-	if contributors == 0 {
-		return nil
+	targetGain := 1.0 / math.Sqrt(float64(len(contributors)))
+	startGains := make(map[uint32]float64, len(contributors))
+	for _, senderID := range contributors {
+		startGains[senderID] = gains[senderID]
+		gains[senderID] = targetGain
 	}
 
 	mixed := make([]byte, pcmBytesPerFrame)
 	for i := 0; i < samplesPerFrame; i++ {
-		value := accum[i] / contributors
+		progress := float64(i+1) / float64(samplesPerFrame)
+		value := 0.0
+		for _, senderID := range contributors {
+			pcm := frames[senderID]
+			sample := float64(int16(binary.LittleEndian.Uint16(pcm[i*2 : i*2+2])))
+			gain := startGains[senderID] + (targetGain-startGains[senderID])*progress
+			value += sample * gain
+		}
 		if value > 32767 {
 			value = 32767
 		} else if value < -32768 {
@@ -1984,8 +2219,8 @@ func mixPCMFrames(frames [][]byte) []byte {
 	return mixed
 }
 
-func (s *relaySession) sendJoin() error {
-	err := s.sendControlPacket(pktJoin, nil)
+func (s *relaySession) sendControlWithRelayFallback(pktType uint8, payload []byte, operation string) error {
+	err := s.sendControlPacket(pktType, payload)
 	if err == nil {
 		return nil
 	}
@@ -1994,9 +2229,46 @@ func (s *relaySession) sendJoin() error {
 	if !changed {
 		return err
 	}
-	s.emitRelayAddressFallback(from, to, fmt.Sprintf("join send failed: %v", err))
-	if fallbackErr := s.sendControlPacket(pktJoin, nil); fallbackErr != nil {
-		return fmt.Errorf("%w; fallback join failed: %v", err, fallbackErr)
+	s.emitRelayAddressFallback(from, to, fmt.Sprintf("%s send failed: %v", operation, err))
+	if fallbackErr := s.sendControlPacket(pktType, payload); fallbackErr != nil {
+		return fmt.Errorf("%w; fallback %s failed: %v", err, operation, fallbackErr)
+	}
+	return nil
+}
+
+func (s *relaySession) sendAuthHello() error {
+	return s.sendControlWithRelayFallback(pktAuthHello, nil, "control authentication hello")
+}
+
+func (s *relaySession) sendJoin() error {
+	return s.sendJoinPayload(nil)
+}
+
+func (s *relaySession) sendJoinPayload(payload []byte) error {
+	return s.sendControlWithRelayFallback(pktJoin, payload, "join")
+}
+
+// completeJoin submits either a legacy empty JOIN or an authenticated JOIN
+// containing the Relay-issued, short-lived cookie. It deliberately does not
+// publish the cookie or its expiry to browser-visible diagnostics.
+func (s *relaySession) completeJoin() error {
+	var payload []byte
+	if s.controlAuth != nil {
+		s.mu.Lock()
+		if len(s.authChallenge) != 20 {
+			s.mu.Unlock()
+			return fmt.Errorf("control authentication challenge is unavailable")
+		}
+		expiresAt := time.Unix(int64(binary.BigEndian.Uint32(s.authChallenge[:4])), 0)
+		if !expiresAt.After(time.Now()) {
+			s.mu.Unlock()
+			return fmt.Errorf("control authentication challenge has expired")
+		}
+		payload = append([]byte(nil), s.authChallenge...)
+		s.mu.Unlock()
+	}
+	if err := s.sendJoinPayload(payload); err != nil {
+		return err
 	}
 	return nil
 }
@@ -2018,15 +2290,19 @@ func (s *relaySession) sendCodecConfig() error {
 	codecID := s.activeUplinkTransportCodecLocked()
 	pcmOnly := codecID == codecTransportPCM
 	codecMode := normalizeCodecModeForTransport(s.cfg.CodecMode, codecID, pcmOnly)
+	fecEnabled := s.cfg.FecEnabled
 	s.cfg.CodecMode = codecMode
 	s.mu.Unlock()
 
-	payload := make([]byte, 4)
+	payload := make([]byte, 5)
 	if pcmOnly {
 		payload[0] = 0x01
 	}
 	payload[1] = codecID
 	binary.BigEndian.PutUint16(payload[2:4], uint16(codecMode))
+	if fecEnabled {
+		payload[4] = codecConfigFECExternalParity | codecConfigFECExternalV2
+	}
 	return s.sendControlPacket(pktCodecConfig, payload)
 }
 
@@ -2047,6 +2323,7 @@ func (s *relaySession) sendControlPacket(pktType uint8, payload []byte) error {
 	senderID := s.cfg.SenderID
 	mode := s.cfg.CryptoMode
 	addr := s.relayAddr
+	controlAuth := s.controlAuth
 	s.mu.Unlock()
 
 	if addr == nil {
@@ -2054,10 +2331,15 @@ func (s *relaySession) sendControlPacket(pktType uint8, payload []byte) error {
 	}
 
 	var packet []byte
-	if mode == cryptoNoCrypto {
+	if controlAuth != nil {
+		packet = controlAuth.buildPacket(pktType, channelID, senderID, seq, payload)
+	} else if mode == cryptoNoCrypto {
 		packet = buildNoCryptoPacket(pktType, channelID, senderID, seq, payload)
 	} else {
 		packet = buildPlainSecurePacket(pktType, channelID, senderID, seq, payload)
+	}
+	if len(packet) > maxUDPDatagramBytes {
+		return fmt.Errorf("control datagram exceeds %d-byte MTU limit", maxUDPDatagramBytes)
 	}
 
 	_, err := s.conn.WriteToUDP(packet, addr)
@@ -2132,6 +2414,9 @@ func (s *relaySession) sendAudioFrame(frame []byte, sourceCodecID uint8) error {
 			audioFrame = encoded
 		}
 	}
+	if len(audioFrame) == 0 || len(audioFrame) > maxTransmitMediaFrameBytes {
+		return fmt.Errorf("encoded audio frame exceeds %d-byte transmit limit", maxTransmitMediaFrameBytes)
+	}
 
 	payload := make([]byte, 2+len(audioFrame))
 	binary.BigEndian.PutUint16(payload[:2], audioSeq)
@@ -2152,6 +2437,9 @@ func (s *relaySession) sendAudioFrame(frame []byte, sourceCodecID uint8) error {
 		}
 		packet = buildEncryptedPacket(pktAudio, channelID, senderID, seq, nonce, keyID, flags, ciphertext, tag)
 	}
+	if len(packet) > maxUDPDatagramBytes {
+		return fmt.Errorf("audio datagram exceeds %d-byte MTU limit", maxUDPDatagramBytes)
+	}
 
 	_, err := s.conn.WriteToUDP(packet, addr)
 	if err != nil {
@@ -2164,23 +2452,35 @@ func (s *relaySession) sendAudioFrame(frame []byte, sourceCodecID uint8) error {
 		return nil
 	}
 
-	parityPackets := fec.AddFrame(audioSeq, audioFrame)
+	return s.sendFECParityPacketsLocked(fec.AddFrame(audioSeq, audioFrame))
+}
+
+// sendFECParityPacketsLocked serializes FEC v2 P/Q blocks while sendMu is
+// held. It intentionally drops an oversize parity block rather than retaining
+// stale speech or allowing IP fragmentation.
+func (s *relaySession) sendFECParityPacketsLocked(parityPackets []fecParityPacket) error {
 	for _, parity := range parityPackets {
-		fecPayload := make([]byte, 4+len(parity.Data))
-		binary.BigEndian.PutUint16(fecPayload[0:2], parity.BlockStart)
-		fecPayload[2] = parity.BlockSize
-		fecPayload[3] = parity.ParityIndex
-		copy(fecPayload[4:], parity.Data)
+		fecPayload, ok := parity.MarshalPayload()
+		if !ok || len(parity.Data) > maxTransmitMediaFrameBytes {
+			return fmt.Errorf("invalid FEC v2 parity block")
+		}
 
 		s.mu.Lock()
 		fecSeq := s.seq
 		s.seq++
+		channelID := s.cfg.ChannelID
+		senderID := s.cfg.SenderID
+		mode := s.cfg.CryptoMode
 		fecKeyID := s.crypto.keyID
+		addr := s.relayAddr
 		fecNonce := uint64(0)
 		if mode != cryptoNoCrypto {
 			fecNonce = s.crypto.nextNonce()
 		}
 		s.mu.Unlock()
+		if addr == nil {
+			return fmt.Errorf("relay address is not set")
+		}
 
 		var fecPacket []byte
 		if mode == cryptoNoCrypto {
@@ -2191,20 +2491,21 @@ func (s *relaySession) sendAudioFrame(frame []byte, sourceCodecID uint8) error {
 				flags |= packetFlagAESGCMV2HeaderAAD
 			}
 			aad := securePacketAAD(pktFec, channelID, senderID, fecSeq, fecNonce, fecKeyID, flags)
-			ciphertext, tag, encErr := s.crypto.encrypt(fecPayload, fecNonce, aad)
-			if encErr != nil {
-				return encErr
+			ciphertext, tag, err := s.crypto.encrypt(fecPayload, fecNonce, aad)
+			if err != nil {
+				return err
 			}
 			fecPacket = buildEncryptedPacket(pktFec, channelID, senderID, fecSeq, fecNonce, fecKeyID, flags, ciphertext, tag)
 		}
-
+		if len(fecPacket) > maxUDPDatagramBytes {
+			return fmt.Errorf("FEC datagram exceeds %d-byte MTU limit", maxUDPDatagramBytes)
+		}
 		if _, err := s.conn.WriteToUDP(fecPacket, addr); err != nil {
 			s.noteRelayTx(pktFec, len(fecPacket), true)
 			return err
 		}
 		s.noteRelayTx(pktFec, len(fecPacket), false)
 	}
-
 	return nil
 }
 

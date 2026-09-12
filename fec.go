@@ -1,35 +1,108 @@
 package main
 
 import (
+	"encoding/binary"
 	"sort"
 	"sync"
 )
 
+const (
+	fecFormatVersionV2 = 2
+	fecBlockSize       = 6
+	// FEC parity arrives after the source block. With the standard 80 ms
+	// playout target, a reconstruction older than four nominal intervals is
+	// stale and must not be injected after newer speech.
+	fecRecoveryDeadlineFrames = 4
+)
+
+// fecParityPacket is the FEC v2 plaintext payload. FrameLengths allows parity
+// over variable-size codec frames without leaking padded bytes to the decoder.
 type fecParityPacket struct {
-	BlockStart  uint16
-	BlockSize   uint8
-	ParityIndex uint8
-	Data        []byte
+	BlockStart   uint16
+	BlockSize    uint8
+	ParityIndex  uint8
+	FrameLengths []uint16
+	Data         []byte
+}
+
+func (p fecParityPacket) MarshalPayload() ([]byte, bool) {
+	if p.BlockSize == 0 || p.BlockSize > fecBlockSize || p.ParityIndex > 1 || len(p.FrameLengths) != int(p.BlockSize) {
+		return nil, false
+	}
+	maxLength := 0
+	for _, length := range p.FrameLengths {
+		if length == 0 || int(length) > maxMediaFrameBytes {
+			return nil, false
+		}
+		if int(length) > maxLength {
+			maxLength = int(length)
+		}
+	}
+	if len(p.Data) != maxLength {
+		return nil, false
+	}
+
+	payload := make([]byte, 5+len(p.FrameLengths)*2+len(p.Data))
+	payload[0] = fecFormatVersionV2
+	binary.BigEndian.PutUint16(payload[1:3], p.BlockStart)
+	payload[3] = p.BlockSize
+	payload[4] = p.ParityIndex
+	for index, length := range p.FrameLengths {
+		binary.BigEndian.PutUint16(payload[5+index*2:7+index*2], length)
+	}
+	copy(payload[5+len(p.FrameLengths)*2:], p.Data)
+	return payload, true
+}
+
+func parseFECV2Payload(payload []byte) (fecParityPacket, bool) {
+	if len(payload) < 5 || payload[0] != fecFormatVersionV2 {
+		return fecParityPacket{}, false
+	}
+	blockSize := payload[3]
+	if blockSize == 0 || blockSize > fecBlockSize || payload[4] > 1 {
+		return fecParityPacket{}, false
+	}
+	metadataLength := 5 + int(blockSize)*2
+	if len(payload) < metadataLength {
+		return fecParityPacket{}, false
+	}
+
+	lengths := make([]uint16, blockSize)
+	maxLength := 0
+	for index := range lengths {
+		length := binary.BigEndian.Uint16(payload[5+index*2 : 7+index*2])
+		if length == 0 || int(length) > maxMediaFrameBytes {
+			return fecParityPacket{}, false
+		}
+		lengths[index] = length
+		if int(length) > maxLength {
+			maxLength = int(length)
+		}
+	}
+	if len(payload) != metadataLength+maxLength {
+		return fecParityPacket{}, false
+	}
+
+	return fecParityPacket{
+		BlockStart:   binary.BigEndian.Uint16(payload[1:3]),
+		BlockSize:    blockSize,
+		ParityIndex:  payload[4],
+		FrameLengths: lengths,
+		Data:         append([]byte(nil), payload[metadataLength:]...),
+	}, true
 }
 
 type fecEncoder struct {
 	mu sync.Mutex
 
-	enabled   bool
-	blockSize int
-	frameSize int
-
+	enabled    bool
 	blockStart uint16
-	inBlock    int
-	parityP    []byte
-	parityQ    []byte
+	nextSeq    uint16
+	frames     [][]byte
 }
 
 func newFECEncoder(enabled bool) *fecEncoder {
-	return &fecEncoder{
-		enabled:   enabled,
-		blockSize: 6,
-	}
+	return &fecEncoder{enabled: enabled}
 }
 
 func (f *fecEncoder) SetEnabled(enabled bool) {
@@ -54,84 +127,84 @@ func (f *fecEncoder) Reset() {
 	f.mu.Unlock()
 }
 
-func (f *fecEncoder) SetBlockSize(blockSize int) {
-	if blockSize <= 0 {
-		return
-	}
-	f.mu.Lock()
-	if f.blockSize == blockSize {
-		f.mu.Unlock()
-		return
-	}
-	f.blockSize = blockSize
-	f.resetLocked()
-	f.mu.Unlock()
-}
-
-func (f *fecEncoder) BlockSize() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.blockSize
-}
-
-func (f *fecEncoder) beginBlockLocked(blockStart uint16, frameSize int) {
-	f.blockStart = blockStart
-	f.inBlock = 0
-	f.frameSize = frameSize
-	f.parityP = make([]byte, frameSize)
-	f.parityQ = make([]byte, frameSize)
-}
-
+// AddFrame returns completed parity blocks. A sequence discontinuity closes the
+// previous block so it cannot be mixed with unrelated media.
 func (f *fecEncoder) AddFrame(audioSeq uint16, frame []byte) []fecParityPacket {
+	if len(frame) == 0 || len(frame) > maxTransmitMediaFrameBytes {
+		return nil
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
-
-	if !f.enabled || len(frame) == 0 || f.blockSize <= 0 {
+	if !f.enabled {
 		return nil
 	}
+
+	var out []fecParityPacket
+	if len(f.frames) > 0 && audioSeq != f.nextSeq {
+		out = append(out, f.emitLocked()...)
+	}
+	if len(f.frames) == 0 {
+		f.blockStart = audioSeq
+	}
+	f.frames = append(f.frames, append([]byte(nil), frame...))
+	f.nextSeq = audioSeq + 1
+	if len(f.frames) == fecBlockSize {
+		out = append(out, f.emitLocked()...)
+	}
+	return out
+}
+
+// Flush emits P and Q for a final short block. It is called before PTT_OFF so
+// the Relay still accepts the protected media stream.
+func (f *fecEncoder) Flush() []fecParityPacket {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.enabled {
+		return nil
+	}
+	return f.emitLocked()
+}
+
+func (f *fecEncoder) emitLocked() []fecParityPacket {
+	if len(f.frames) == 0 {
+		return nil
+	}
+
+	lengths := make([]uint16, len(f.frames))
+	maxLength := 0
+	for index, frame := range f.frames {
+		if len(frame) == 0 || len(frame) > maxTransmitMediaFrameBytes {
+			f.resetLocked()
+			return nil
+		}
+		lengths[index] = uint16(len(frame))
+		if len(frame) > maxLength {
+			maxLength = len(frame)
+		}
+	}
+
+	p := make([]byte, maxLength)
+	q := make([]byte, maxLength)
 	fecGFInit()
-
-	index := int(audioSeq % uint16(f.blockSize))
-	blockStart := audioSeq - uint16(index)
-	frameSize := len(frame)
-
-	if f.inBlock == 0 || frameSize != f.frameSize || blockStart != f.blockStart {
-		f.beginBlockLocked(blockStart, frameSize)
+	for index, frame := range f.frames {
+		fecXorBytes(p, frame)
+		fecXorMulBytes(q, frame, fecGFPow2(index))
 	}
 
-	fecXorBytes(f.parityP, frame)
-	fecXorMulBytes(f.parityQ, frame, fecGFPow2(index))
-
-	f.inBlock++
-	if f.inBlock < f.blockSize {
-		return nil
+	blockStart := f.blockStart
+	blockSize := uint8(len(f.frames))
+	f.resetLocked()
+	return []fecParityPacket{
+		{BlockStart: blockStart, BlockSize: blockSize, ParityIndex: 0, FrameLengths: append([]uint16(nil), lengths...), Data: p},
+		{BlockStart: blockStart, BlockSize: blockSize, ParityIndex: 1, FrameLengths: append([]uint16(nil), lengths...), Data: q},
 	}
-
-	p := fecParityPacket{
-		BlockStart:  f.blockStart,
-		BlockSize:   uint8(f.blockSize),
-		ParityIndex: 0,
-		Data:        append([]byte(nil), f.parityP...),
-	}
-	q := fecParityPacket{
-		BlockStart:  f.blockStart,
-		BlockSize:   uint8(f.blockSize),
-		ParityIndex: 1,
-		Data:        append([]byte(nil), f.parityQ...),
-	}
-
-	f.inBlock = 0
-	f.parityP = nil
-	f.parityQ = nil
-	return []fecParityPacket{p, q}
 }
 
 func (f *fecEncoder) resetLocked() {
-	f.frameSize = 0
 	f.blockStart = 0
-	f.inBlock = 0
-	f.parityP = nil
-	f.parityQ = nil
+	f.nextSeq = 0
+	f.frames = nil
 }
 
 var (
@@ -200,28 +273,33 @@ type fecDecodedFrame struct {
 
 type fecDecodeBlock struct {
 	start         uint16
-	blockSize     int
-	frameSize     int
+	lengths       []uint16
 	data          [][]byte
 	present       []bool
 	parity        [2][]byte
 	parityPresent [2]bool
 }
 
+// fecDecoder emits original frames immediately and keeps only a bounded cache
+// for opportunistic recovery. This avoids adding a six-frame delay to normal
+// speech merely because external FEC is enabled.
 type fecDecoder struct {
-	mu           sync.Mutex
-	enabled      bool
-	blockSize    int
-	blocks       map[uint16]*fecDecodeBlock
-	bypassBlocks map[uint16]bool
+	mu sync.Mutex
+
+	enabled   bool
+	blocks    map[uint16]*fecDecodeBlock
+	pending   map[uint16][]byte
+	emitted   map[uint16]struct{}
+	latest    uint16
+	hasLatest bool
 }
 
 func newFECDecoder(enabled bool) *fecDecoder {
 	return &fecDecoder{
-		enabled:      enabled,
-		blockSize:    6,
-		blocks:       make(map[uint16]*fecDecodeBlock),
-		bypassBlocks: make(map[uint16]bool),
+		enabled: enabled,
+		blocks:  make(map[uint16]*fecDecodeBlock),
+		pending: make(map[uint16][]byte),
+		emitted: make(map[uint16]struct{}),
 	}
 }
 
@@ -242,167 +320,153 @@ func (f *fecDecoder) Reset() {
 }
 
 func (f *fecDecoder) PushData(audioSeq uint16, frame []byte) []fecDecodedFrame {
-	if len(frame) == 0 {
+	if len(frame) == 0 || len(frame) > maxMediaFrameBytes {
 		return nil
 	}
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.enabled || f.blockSize <= 0 {
-		return nil
+	if !f.enabled {
+		return []fecDecodedFrame{{Seq: audioSeq, Data: append([]byte(nil), frame...)}}
 	}
 
-	index := int(audioSeq % uint16(f.blockSize))
-	blockStart := audioSeq - uint16(index)
-	out := f.flushBeforeLocked(blockStart)
-	f.clearBypassBeforeLocked(blockStart)
-	if f.bypassBlocks[blockStart] {
+	f.pending[audioSeq] = append([]byte(nil), frame...)
+	if !f.hasLatest || int16(audioSeq-f.latest) > 0 {
+		f.latest = audioSeq
+		f.hasLatest = true
+	}
+	var out []fecDecodedFrame
+	if _, alreadyEmitted := f.emitted[audioSeq]; !alreadyEmitted {
+		f.emitted[audioSeq] = struct{}{}
 		out = append(out, fecDecodedFrame{Seq: audioSeq, Data: append([]byte(nil), frame...)})
-		return append(out, f.trimLocked()...)
 	}
-	if block := f.blocks[blockStart]; block != nil && block.frameSize != len(frame) {
-		// Variable-sized frames cannot share a parity block. Preserve media rather
-		// than delaying it for parity that can never reconstruct this block.
-		out = append(out, f.takeBlockLocked(blockStart)...)
-		f.bypassBlocks[blockStart] = true
-		out = append(out, fecDecodedFrame{Seq: audioSeq, Data: append([]byte(nil), frame...)})
-		return append(out, f.trimLocked()...)
+
+	for _, block := range f.blocks {
+		index := fecBlockIndex(block, audioSeq)
+		if index < 0 {
+			continue
+		}
+		if len(frame) == int(block.lengths[index]) {
+			block.data[index] = append([]byte(nil), frame...)
+			block.present[index] = true
+			out = append(out, f.recoverLocked(block)...)
+		}
 	}
-	block := f.ensureBlockLocked(blockStart, len(frame))
-	if block == nil || index < 0 || index >= block.blockSize {
-		return out
-	}
-	block.data[index] = append(block.data[index][:0], frame...)
-	block.present[index] = true
-	out = append(out, f.tryOutputBlockLocked(blockStart)...)
-	return append(out, f.trimLocked()...)
+	f.trimLocked(audioSeq)
+	return sortFECFrames(out)
 }
 
-func (f *fecDecoder) PushParity(blockStart uint16, blockSize uint8, parityIndex uint8, data []byte) []fecDecodedFrame {
-	if len(data) == 0 || parityIndex > 1 {
-		return nil
-	}
-
+func (f *fecDecoder) PushParity(parity fecParityPacket) []fecDecodedFrame {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.enabled || int(blockSize) != f.blockSize || f.bypassBlocks[blockStart] {
+	if !f.enabled || parity.BlockSize == 0 || parity.BlockSize > fecBlockSize || parity.ParityIndex > 1 {
+		return nil
+	}
+	if _, valid := parity.MarshalPayload(); !valid {
 		return nil
 	}
 
-	block := f.ensureBlockLocked(blockStart, len(data))
-	if block == nil {
+	block, ok := f.blocks[parity.BlockStart]
+	if !ok {
+		block = &fecDecodeBlock{
+			start:   parity.BlockStart,
+			lengths: append([]uint16(nil), parity.FrameLengths...),
+			data:    make([][]byte, parity.BlockSize),
+			present: make([]bool, parity.BlockSize),
+		}
+		for index := range block.lengths {
+			seq := block.start + uint16(index)
+			if frame, exists := f.pending[seq]; exists && len(frame) == int(block.lengths[index]) {
+				block.data[index] = append([]byte(nil), frame...)
+				block.present[index] = true
+			}
+		}
+		f.blocks[block.start] = block
+	} else if !equalFECFrameLengths(block.lengths, parity.FrameLengths) {
 		return nil
 	}
-	block.parity[parityIndex] = append(block.parity[parityIndex][:0], data...)
-	block.parityPresent[parityIndex] = true
-	out := f.tryOutputBlockLocked(blockStart)
-	return append(out, f.trimLocked()...)
+
+	block.parity[parity.ParityIndex] = append([]byte(nil), parity.Data...)
+	block.parityPresent[parity.ParityIndex] = true
+	out := f.recoverLocked(block)
+	f.trimLocked(parity.BlockStart + uint16(parity.BlockSize))
+	return sortFECFrames(out)
 }
 
-// Flush emits received data when a speaker stops before a complete FEC block.
+// Flush returns only recoverable missing frames. Original frames were emitted
+// on arrival, so releasing a talker cannot replay an already rendered block.
 func (f *fecDecoder) Flush() []fecDecodedFrame {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	starts := f.sortedBlockStartsLocked()
-	out := make([]fecDecodedFrame, 0)
-	for _, start := range starts {
-		out = append(out, f.takeBlockLocked(start)...)
+	var out []fecDecodedFrame
+	for _, block := range f.blocks {
+		out = append(out, f.recoverLocked(block)...)
 	}
-	return out
+	f.resetLocked()
+	return sortFECFrames(out)
 }
 
 func (f *fecDecoder) resetLocked() {
 	f.blocks = make(map[uint16]*fecDecodeBlock)
-	f.bypassBlocks = make(map[uint16]bool)
+	f.pending = make(map[uint16][]byte)
+	f.emitted = make(map[uint16]struct{})
+	f.latest = 0
+	f.hasLatest = false
 }
 
-func (f *fecDecoder) ensureBlockLocked(blockStart uint16, frameSize int) *fecDecodeBlock {
-	if frameSize <= 0 {
+func (f *fecDecoder) recoverLocked(block *fecDecodeBlock) []fecDecodedFrame {
+	if block == nil || len(block.lengths) == 0 {
 		return nil
 	}
-	if block, ok := f.blocks[blockStart]; ok && block.frameSize != frameSize {
-		delete(f.blocks, blockStart)
-	}
-	if block, ok := f.blocks[blockStart]; ok {
-		return block
-	}
-
-	block := &fecDecodeBlock{
-		start:     blockStart,
-		blockSize: f.blockSize,
-		frameSize: frameSize,
-		data:      make([][]byte, f.blockSize),
-		present:   make([]bool, f.blockSize),
-	}
-	f.blocks[blockStart] = block
-	return block
-}
-
-func (f *fecDecoder) tryOutputBlockLocked(blockStart uint16) []fecDecodedFrame {
-	block := f.blocks[blockStart]
-	if block == nil {
-		return nil
-	}
-
-	missing := f.missingIndexesLocked(block)
-	switch len(missing) {
-	case 0:
-		return f.takeBlockLocked(blockStart)
-	case 1:
-		if !block.parityPresent[0] && !block.parityPresent[1] {
-			return nil
+	missing := make([]int, 0, len(block.lengths))
+	for index := range block.lengths {
+		if !block.present[index] {
+			missing = append(missing, index)
 		}
-	case 2:
-		if !block.parityPresent[0] || !block.parityPresent[1] {
-			return nil
+	}
+	if len(missing) == 0 || len(missing) > 2 || (!block.parityPresent[0] && !block.parityPresent[1]) || (len(missing) == 2 && (!block.parityPresent[0] || !block.parityPresent[1])) {
+		return nil
+	}
+
+	maxLength := 0
+	for _, length := range block.lengths {
+		if int(length) > maxLength {
+			maxLength = int(length)
 		}
-	default:
-		return nil
 	}
-
-	if !f.recoverLocked(block, missing) {
+	if maxLength == 0 {
 		return nil
-	}
-	return f.takeBlockLocked(blockStart)
-}
-
-func (f *fecDecoder) recoverLocked(block *fecDecodeBlock, missing []int) bool {
-	if block == nil || block.frameSize <= 0 {
-		return false
 	}
 	fecGFInit()
-
-	sumP := make([]byte, block.frameSize)
-	sumQ := make([]byte, block.frameSize)
-	for index := 0; index < block.blockSize; index++ {
+	sumP := make([]byte, maxLength)
+	sumQ := make([]byte, maxLength)
+	for index, frame := range block.data {
 		if !block.present[index] {
 			continue
 		}
-		fecXorBytes(sumP, block.data[index])
-		fecXorMulBytes(sumQ, block.data[index], fecGFPow2(index))
+		fecXorBytes(sumP, frame)
+		fecXorMulBytes(sumQ, frame, fecGFPow2(index))
 	}
 
+	recovered := make(map[int][]byte, len(missing))
 	switch len(missing) {
 	case 1:
 		index := missing[0]
-		recovered := make([]byte, block.frameSize)
+		frame := make([]byte, maxLength)
 		if block.parityPresent[0] {
-			copy(recovered, block.parity[0])
-			fecXorBytes(recovered, sumP)
+			copy(frame, block.parity[0])
+			fecXorBytes(frame, sumP)
 		} else {
-			copy(recovered, block.parity[1])
-			fecXorBytes(recovered, sumQ)
+			copy(frame, block.parity[1])
+			fecXorBytes(frame, sumQ)
 			coefficient := fecGFPow2(index)
-			for i := range recovered {
-				recovered[i] = fecGFDiv(recovered[i], coefficient)
+			for offset := range frame {
+				frame[offset] = fecGFDiv(frame[offset], coefficient)
 			}
 		}
-		block.data[index] = recovered
-		block.present[index] = true
-		return true
+		recovered[index] = frame[:block.lengths[index]]
 	case 2:
-		first := missing[0]
-		second := missing[1]
+		first, second := missing[0], missing[1]
 		s := append([]byte(nil), block.parity[0]...)
 		fecXorBytes(s, sumP)
 		t := append([]byte(nil), block.parity[1]...)
@@ -411,98 +475,83 @@ func (f *fecDecoder) recoverLocked(block *fecDecodeBlock, missing []int) bool {
 		secondCoefficient := fecGFPow2(second)
 		denominator := firstCoefficient ^ secondCoefficient
 		if denominator == 0 {
-			return false
+			return nil
 		}
-		firstData := make([]byte, block.frameSize)
-		for i := range firstData {
-			numerator := t[i] ^ fecGFMul(s[i], secondCoefficient)
-			firstData[i] = fecGFDiv(numerator, denominator)
+		firstFrame := make([]byte, maxLength)
+		for offset := range firstFrame {
+			numerator := t[offset] ^ fecGFMul(s[offset], secondCoefficient)
+			firstFrame[offset] = fecGFDiv(numerator, denominator)
 		}
-		secondData := append([]byte(nil), firstData...)
-		fecXorBytes(secondData, s)
-		block.data[first] = firstData
-		block.data[second] = secondData
-		block.present[first] = true
-		block.present[second] = true
-		return true
-	default:
-		return false
+		secondFrame := append([]byte(nil), firstFrame...)
+		fecXorBytes(secondFrame, s)
+		recovered[first] = firstFrame[:block.lengths[first]]
+		recovered[second] = secondFrame[:block.lengths[second]]
 	}
-}
 
-func (f *fecDecoder) missingIndexesLocked(block *fecDecodeBlock) []int {
-	missing := make([]int, 0, block.blockSize)
-	for index := 0; index < block.blockSize; index++ {
-		if !block.present[index] {
-			missing = append(missing, index)
-		}
-	}
-	return missing
-}
-
-func (f *fecDecoder) takeBlockLocked(blockStart uint16) []fecDecodedFrame {
-	block := f.blocks[blockStart]
-	if block == nil {
-		return nil
-	}
-	delete(f.blocks, blockStart)
-
-	out := make([]fecDecodedFrame, 0, block.blockSize)
-	for index := 0; index < block.blockSize; index++ {
-		if !block.present[index] || len(block.data[index]) == 0 {
+	out := make([]fecDecodedFrame, 0, len(recovered))
+	for index, frame := range recovered {
+		block.data[index] = append([]byte(nil), frame...)
+		block.present[index] = true
+		seq := block.start + uint16(index)
+		if f.hasLatest && int16(f.latest-seq) > fecRecoveryDeadlineFrames {
 			continue
 		}
-		out = append(out, fecDecodedFrame{
-			Seq:  block.start + uint16(index),
-			Data: append([]byte(nil), block.data[index]...),
-		})
+		if _, alreadyEmitted := f.emitted[seq]; alreadyEmitted {
+			continue
+		}
+		f.emitted[seq] = struct{}{}
+		out = append(out, fecDecodedFrame{Seq: seq, Data: append([]byte(nil), frame...)})
 	}
 	return out
 }
 
-func (f *fecDecoder) flushBeforeLocked(blockStart uint16) []fecDecodedFrame {
-	starts := f.sortedBlockStartsLocked()
-	out := make([]fecDecodedFrame, 0)
-	for _, start := range starts {
-		if fecSeqBefore(start, blockStart) {
-			out = append(out, f.takeBlockLocked(start)...)
+func (f *fecDecoder) trimLocked(reference uint16) {
+	const maxCachedSequences = 96
+	for sequence := range f.pending {
+		if int16(reference-sequence) > maxCachedSequences {
+			delete(f.pending, sequence)
 		}
 	}
-	return out
-}
-
-func (f *fecDecoder) clearBypassBeforeLocked(blockStart uint16) {
-	for start := range f.bypassBlocks {
-		if fecSeqBefore(start, blockStart) {
-			delete(f.bypassBlocks, start)
+	for sequence := range f.emitted {
+		if int16(reference-sequence) > maxCachedSequences {
+			delete(f.emitted, sequence)
 		}
 	}
-}
-
-func (f *fecDecoder) trimLocked() []fecDecodedFrame {
-	const maxBufferedBlocks = 24
-	starts := f.sortedBlockStartsLocked()
-	out := make([]fecDecodedFrame, 0)
-	for len(starts) > maxBufferedBlocks {
-		out = append(out, f.takeBlockLocked(starts[0])...)
-		starts = starts[1:]
-	}
-	return out
-}
-
-func (f *fecDecoder) sortedBlockStartsLocked() []uint16 {
-	starts := make([]uint16, 0, len(f.blocks))
 	for start := range f.blocks {
-		starts = append(starts, start)
+		if int16(reference-start) > maxCachedSequences {
+			delete(f.blocks, start)
+		}
 	}
-	sort.Slice(starts, func(i, j int) bool {
-		return fecSeqBefore(starts[i], starts[j])
-	})
-	return starts
 }
 
-func fecSeqBefore(first, second uint16) bool {
-	return first != second && int16(second-first) > 0
+func fecBlockIndex(block *fecDecodeBlock, sequence uint16) int {
+	if block == nil {
+		return -1
+	}
+	index := int(uint16(sequence - block.start))
+	if index >= len(block.lengths) {
+		return -1
+	}
+	return index
+}
+
+func equalFECFrameLengths(first, second []uint16) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for index := range first {
+		if first[index] != second[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func sortFECFrames(frames []fecDecodedFrame) []fecDecodedFrame {
+	sort.Slice(frames, func(i, j int) bool {
+		return int16(frames[i].Seq-frames[j].Seq) < 0
+	})
+	return frames
 }
 
 func fecGFDiv(a, b byte) byte {
