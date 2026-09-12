@@ -2,15 +2,15 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"testing"
 )
 
-func TestAESGCMV2AuthenticatesPacketHeaderWithoutSizeGrowth(t *testing.T) {
+func TestAESGCMV2AuthenticatesPacketHeader(t *testing.T) {
 	const (
 		channelID = uint32(1234)
 		senderID  = uint32(5678)
 		seq       = uint16(42)
-		nonce     = uint64(0x0102030405060708)
 	)
 
 	plaintext := []byte{0x00, 0x2A, 0x11, 0x22, 0x33, 0x44}
@@ -19,13 +19,14 @@ func TestAESGCMV2AuthenticatesPacketHeaderWithoutSizeGrowth(t *testing.T) {
 		t.Fatalf("newCryptoContext(v2): %v", err)
 	}
 
-	flags := packetFlagAESGCMV2HeaderAAD
-	aad := securePacketAAD(pktAudio, channelID, senderID, seq, nonce, v2.keyID, flags)
-	ciphertext, tag, err := v2.encrypt(plaintext, nonce, aad)
+	base := [12]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+	counter := uint32(42)
+	aad := buildAESGCMV2Packet(pktAudio, channelID, senderID, seq, base, counter, nil, nil)[:36]
+	ciphertext, tag, err := v2.encryptV2(plaintext, base, counter, aad)
 	if err != nil {
 		t.Fatalf("encrypt(v2): %v", err)
 	}
-	v2Packet := buildEncryptedPacket(pktAudio, channelID, senderID, seq, nonce, v2.keyID, flags, ciphertext, tag)
+	v2Packet := buildAESGCMV2Packet(pktAudio, channelID, senderID, seq, base, counter, ciphertext, tag)
 
 	parsed, ok := parsePacket(v2Packet)
 	if !ok {
@@ -34,7 +35,7 @@ func TestAESGCMV2AuthenticatesPacketHeaderWithoutSizeGrowth(t *testing.T) {
 	if !bytes.Equal(parsed.AAD, aad) {
 		t.Fatal("parsed packet AAD does not match the authenticated prefix")
 	}
-	decoded, err := v2.decrypt(parsed.Payload, parsed.Tag, parsed.Sec.Nonce, parsed.AAD)
+	decoded, err := v2.decryptV2(parsed.Payload, parsed.Tag, parsed.Sec.MediaNonceBase, parsed.Sec.MediaCounter, parsed.AAD)
 	if err != nil {
 		t.Fatalf("decrypt(v2): %v", err)
 	}
@@ -42,17 +43,44 @@ func TestAESGCMV2AuthenticatesPacketHeaderWithoutSizeGrowth(t *testing.T) {
 		t.Fatalf("plaintext mismatch: got %x want %x", decoded, plaintext)
 	}
 
-	legacy, err := newCryptoContext(cryptoAESGCM, "test-password", channelID)
-	if err != nil {
-		t.Fatalf("newCryptoContext(legacy): %v", err)
+	if len(v2Packet) != 36+len(plaintext)+authTagSize {
+		t.Fatalf("unexpected v2 packet size: %d", len(v2Packet))
 	}
-	legacyCiphertext, legacyTag, err := legacy.encrypt(plaintext, nonce, nil)
+}
+
+func TestPasswordKDFV1Vectors(t *testing.T) {
+	key, err := derivePasswordKey("test-password", 1234)
 	if err != nil {
-		t.Fatalf("encrypt(legacy): %v", err)
+		t.Fatal(err)
 	}
-	legacyPacket := buildEncryptedPacket(pktAudio, channelID, senderID, seq, nonce, legacy.keyID, 0, legacyCiphertext, legacyTag)
-	if len(v2Packet) != len(legacyPacket) {
-		t.Fatalf("v2 packet changed wire size: got %d want %d", len(v2Packet), len(legacyPacket))
+	want, _ := hex.DecodeString("bcad701cf1a05f957d93aad27ea055a7d76f2d2650c89ab5bcb0790182854e4b")
+	if !bytes.Equal(key, want) {
+		t.Fatalf("argon2id password key = %x", key)
+	}
+	raw, err := derivePasswordKey("secret:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", 1234)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawWant, _ := hex.DecodeString("a9c66a38294d3cb8e802cbde780c20fed61b8ef2663d44f6a1a8dab634566365")
+	if !bytes.Equal(raw, rawWant) {
+		t.Fatalf("raw-secret password key = %x", raw)
+	}
+	if _, err := derivePasswordKey("sha256:0011", 1234); err == nil {
+		t.Fatal("sha256: credential was accepted")
+	}
+}
+
+func TestMediaReplayWindow(t *testing.T) {
+	s := &relaySession{mediaReplay: make(map[uint32]mediaReplayState)}
+	base := [12]byte{1}
+	if !s.acceptMediaCounter(1, base, 100) || !s.acceptMediaCounter(1, base, 99) || s.acceptMediaCounter(1, base, 99) {
+		t.Fatal("replay window acceptance is incorrect")
+	}
+	if s.acceptMediaCounter(1, base, 36) {
+		t.Fatal("stale counter was accepted")
+	}
+	if !s.acceptMediaCounter(1, base, 101) {
+		t.Fatal("new counter was rejected")
 	}
 }
 
@@ -61,20 +89,20 @@ func TestAESGCMV2RejectsHeaderTampering(t *testing.T) {
 		channelID = uint32(1234)
 		senderID  = uint32(5678)
 		seq       = uint16(42)
-		nonce     = uint64(99)
 	)
 
 	ctx, err := newCryptoContext(cryptoAESGCMV2, "test-password", channelID)
 	if err != nil {
 		t.Fatalf("newCryptoContext(v2): %v", err)
 	}
-	flags := packetFlagAESGCMV2HeaderAAD
-	aad := securePacketAAD(pktAudio, channelID, senderID, seq, nonce, ctx.keyID, flags)
-	ciphertext, tag, err := ctx.encrypt([]byte("audio"), nonce, aad)
+	base := [12]byte{1}
+	counter := uint32(99)
+	aad := buildAESGCMV2Packet(pktAudio, channelID, senderID, seq, base, counter, nil, nil)[:36]
+	ciphertext, tag, err := ctx.encryptV2([]byte("audio"), base, counter, aad)
 	if err != nil {
 		t.Fatalf("encrypt(v2): %v", err)
 	}
-	packet := buildEncryptedPacket(pktAudio, channelID, senderID, seq, nonce, ctx.keyID, flags, ciphertext, tag)
+	packet := buildAESGCMV2Packet(pktAudio, channelID, senderID, seq, base, counter, ciphertext, tag)
 
 	// Channel ID is within the AAD. Changing one byte must invalidate the tag.
 	packet[4] ^= 0x01
@@ -82,10 +110,10 @@ func TestAESGCMV2RejectsHeaderTampering(t *testing.T) {
 	if !ok {
 		t.Fatal("parsePacket(tampered) failed")
 	}
-	if _, err := ctx.decrypt(parsed.Payload, parsed.Tag, parsed.Sec.Nonce, parsed.AAD); err == nil {
+	if _, err := ctx.decryptV2(parsed.Payload, parsed.Tag, parsed.Sec.MediaNonceBase, parsed.Sec.MediaCounter, parsed.AAD); err == nil {
 		t.Fatal("tampered v2 header was accepted")
 	}
-	if _, err := ctx.decrypt(parsed.Payload, parsed.Tag, parsed.Sec.Nonce, nil); err == nil {
+	if _, err := ctx.decryptV2(parsed.Payload, parsed.Tag, parsed.Sec.MediaNonceBase, parsed.Sec.MediaCounter, nil); err == nil {
 		t.Fatal("v2 packet was accepted without its authenticated header")
 	}
 }

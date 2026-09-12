@@ -17,7 +17,7 @@ func TestControlAuthV1Vector(t *testing.T) {
 
 	packet := ctx.buildPacket(pktPttOn, 100, 1002, 42, nil)
 	wantHeader := decodeControlAuthHex(t, "0102001c00000064000003ea002a0002123456780000000200000001")
-	wantTag := decodeControlAuthHex(t, "209b1ece9e4488001af2f659034b6626")
+	wantTag := decodeControlAuthHex(t, "f4df8ba41610f2a6f4a592620e51130a")
 	if len(packet) != len(wantHeader)+len(wantTag) {
 		t.Fatalf("packet length = %d, want %d", len(packet), len(wantHeader)+len(wantTag))
 	}

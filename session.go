@@ -143,10 +143,11 @@ type packetDebugStats struct {
 }
 
 type peerCodecConfig struct {
-	Mode       int
-	PCMOnly    bool
-	CodecID    uint8
-	FECOptions uint8
+	Mode           int
+	PCMOnly        bool
+	CodecID        uint8
+	FECOptions     uint8
+	MediaNonceBase [12]byte
 }
 
 const (
@@ -195,6 +196,9 @@ type relaySession struct {
 
 	peerCodec              map[uint32]peerCodecConfig
 	unsupportedFrames      map[string]struct{}
+	mediaReplay            map[uint32]mediaReplayState
+	lastCodecConfig        [5]byte
+	hasCodecConfig         bool
 	startupWarnings        []string
 	qosApplied             bool
 	uplinkOpusWarned       bool
@@ -220,6 +224,11 @@ type relaySession struct {
 }
 
 func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, error) {
+	if cfg.CryptoMode == cryptoAESGCMV2 {
+		// AES-GCM v2 establishes its accepted media nonce base through an
+		// authenticated CODEC_CONFIG; it is never valid without Control Auth.
+		cfg.ControlAuthEnabled = true
+	}
 	relayAddrs, err := resolveRelayUDPAddrs(context.Background(), cfg.RelayHost, cfg.RelayPort, cfg.ForceRelayIPv4)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve relay address: %w", err)
@@ -231,7 +240,15 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		return nil, fmt.Errorf("failed to open udp socket: %w", err)
 	}
 
-	cryptoCtx, err := newCryptoContext(cfg.CryptoMode, cfg.Password, cfg.ChannelID)
+	var passwordKey []byte
+	if cfg.CryptoMode != cryptoNoCrypto {
+		passwordKey, err = derivePasswordKey(cfg.Password, cfg.ChannelID)
+		if err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("failed to derive channel credential: %w", err)
+		}
+	}
+	cryptoCtx, err := newCryptoContextFromPasswordKey(cfg.CryptoMode, passwordKey)
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("failed to init crypto: %w", err)
@@ -242,7 +259,7 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 			_ = conn.Close()
 			return nil, fmt.Errorf("control authentication requires cryptoMode=aes-gcm-v2")
 		}
-		controlAuth, err = newControlAuthContext(cfg.Password, cfg.ChannelID, cfg.ControlKeyID)
+		controlAuth, err = newControlAuthContextFromPasswordKey(passwordKey, cfg.ControlKeyID)
 		if err != nil {
 			_ = conn.Close()
 			return nil, fmt.Errorf("failed to initialize control authentication: %w", err)
@@ -266,6 +283,7 @@ func newRelaySession(cfg sessionConfig, cb sessionCallbacks) (*relaySession, err
 		downlinkQueues:    make(map[uint32][][]byte),
 		mixGains:          make(map[uint32]float64),
 		unsupportedFrames: make(map[string]struct{}),
+		mediaReplay:       make(map[uint32]mediaReplayState),
 		packetDebug:       cfg.PacketDebug,
 		pingRTTMs:         -1,
 		pingJitterMs:      -1,
@@ -1452,7 +1470,7 @@ func (s *relaySession) handleDatagram(data []byte, from *net.UDPAddr) {
 		}
 		return
 	}
-	if s.controlAuth != nil {
+	if s.controlAuth != nil && pkt.Header.Type != pktAudio && pkt.Header.Type != pktFec {
 		if !isAuthenticatedControlPacket(pkt.Header.Type) || !s.controlAuth.verifyRelayPacket(pkt) {
 			if s.packetDebug {
 				s.mu.Lock()
@@ -1652,6 +1670,16 @@ func (s *relaySession) handleCodecConfig(pkt parsedPacket) {
 	if len(pkt.Payload) < 3 {
 		return
 	}
+	var mediaBase [12]byte
+	if s.cfg.CryptoMode == cryptoAESGCMV2 {
+		if len(pkt.Payload) != 17 || !pkt.HasSecurity || pkt.Header.Flags != packetFlagControlAuthV1 {
+			return
+		}
+		copy(mediaBase[:], pkt.Payload[5:17])
+		if mediaBase == ([12]byte{}) {
+			return
+		}
+	}
 	pcmOnly := (pkt.Payload[0] & 0x01) != 0
 	codecID := normalizeCodecTransportID(codecTransportCodec2, pcmOnly)
 	mode := normalizeCodecModeForTransport(int(binary.BigEndian.Uint16(pkt.Payload[1:3])), codecID, pcmOnly)
@@ -1676,14 +1704,16 @@ func (s *relaySession) handleCodecConfig(pkt parsedPacket) {
 	s.mu.Lock()
 	previous, hadPrevious := s.peerCodec[pkt.Header.SenderID]
 	s.peerCodec[pkt.Header.SenderID] = peerCodecConfig{
-		Mode:       mode,
-		PCMOnly:    pcmOnly,
-		CodecID:    codecID,
-		FECOptions: fecOptions,
+		Mode:           mode,
+		PCMOnly:        pcmOnly,
+		CodecID:        codecID,
+		FECOptions:     fecOptions,
+		MediaNonceBase: mediaBase,
 	}
-	if hadPrevious && (previous.Mode != mode || previous.PCMOnly != pcmOnly || previous.CodecID != codecID || previous.FECOptions != fecOptions) {
+	if hadPrevious && (previous.Mode != mode || previous.PCMOnly != pcmOnly || previous.CodecID != codecID || previous.FECOptions != fecOptions || previous.MediaNonceBase != mediaBase) {
 		delete(s.fecDecoders, pkt.Header.SenderID)
 	}
+	delete(s.mediaReplay, pkt.Header.SenderID)
 	s.mu.Unlock()
 
 	s.emitEvent(serverEvent{
@@ -1860,10 +1890,23 @@ func (s *relaySession) decryptRealtimePayload(pkt parsedPacket) ([]byte, bool) {
 
 	var aad []byte
 	if mode == cryptoAESGCMV2 {
-		if pkt.Header.Flags&packetFlagAESGCMV2HeaderAAD == 0 || len(pkt.AAD) != fixedHeaderSize+securityHeaderSize {
+		if pkt.Header.Flags != packetFlagAESGCMV2HeaderAAD || pkt.Header.HeaderLen != fixedHeaderSize+20 || len(pkt.AAD) != fixedHeaderSize+20 || pkt.Sec.KeyID != 2 {
 			return nil, false
 		}
-		aad = pkt.AAD
+		s.mu.Lock()
+		peer, known := s.peerCodec[pkt.Header.SenderID]
+		s.mu.Unlock()
+		if !known || peer.MediaNonceBase != pkt.Sec.MediaNonceBase {
+			return nil, false
+		}
+		decoded, err := s.crypto.decryptV2(pkt.Payload, pkt.Tag, pkt.Sec.MediaNonceBase, pkt.Sec.MediaCounter, pkt.AAD)
+		if err != nil {
+			return nil, false
+		}
+		if !s.acceptMediaCounter(pkt.Header.SenderID, pkt.Sec.MediaNonceBase, pkt.Sec.MediaCounter) {
+			return nil, false
+		}
+		return decoded, true
 	} else if pkt.Header.Flags&packetFlagAESGCMV2HeaderAAD != 0 {
 		// Do not silently downgrade a v2 packet into a legacy AAD-free check.
 		return nil, false
@@ -2292,9 +2335,23 @@ func (s *relaySession) sendCodecConfig() error {
 	codecMode := normalizeCodecModeForTransport(s.cfg.CodecMode, codecID, pcmOnly)
 	fecEnabled := s.cfg.FecEnabled
 	s.cfg.CodecMode = codecMode
+	configKey := [5]byte{0, codecID, byte(codecMode >> 8), byte(codecMode), 0}
+	if pcmOnly {
+		configKey[0] = 1
+	}
+	if fecEnabled {
+		configKey[4] = codecConfigFECExternalParity | codecConfigFECExternalV2
+	}
+	rotateMedia := s.cfg.CryptoMode == cryptoAESGCMV2 && s.hasCodecConfig && s.lastCodecConfig != configKey
+	s.lastCodecConfig, s.hasCodecConfig = configKey, true
 	s.mu.Unlock()
+	if rotateMedia {
+		if err := s.crypto.rotateMediaBase(); err != nil {
+			return fmt.Errorf("rotate AES-GCM v2 media session: %w", err)
+		}
+	}
 
-	payload := make([]byte, 5)
+	payload := make([]byte, 17)
 	if pcmOnly {
 		payload[0] = 0x01
 	}
@@ -2302,6 +2359,9 @@ func (s *relaySession) sendCodecConfig() error {
 	binary.BigEndian.PutUint16(payload[2:4], uint16(codecMode))
 	if fecEnabled {
 		payload[4] = codecConfigFECExternalParity | codecConfigFECExternalV2
+	}
+	if s.cfg.CryptoMode == cryptoAESGCMV2 {
+		copy(payload[5:17], s.crypto.mediaBase[:])
 	}
 	return s.sendControlPacket(pktCodecConfig, payload)
 }
@@ -2373,10 +2433,6 @@ func (s *relaySession) sendAudioFrame(frame []byte, sourceCodecID uint8) error {
 	codec := s.codec2
 	opusEncoder := s.opusEncoder
 	transportCodec := s.activeUplinkTransportCodecLocked()
-	nonce := uint64(0)
-	if mode != cryptoNoCrypto {
-		nonce = s.crypto.nextNonce()
-	}
 	s.mu.Unlock()
 
 	if addr == nil {
@@ -2426,16 +2482,25 @@ func (s *relaySession) sendAudioFrame(frame []byte, sourceCodecID uint8) error {
 	if mode == cryptoNoCrypto {
 		packet = buildNoCryptoPacket(pktAudio, channelID, senderID, seq, payload)
 	} else {
-		flags := uint16(0)
 		if mode == cryptoAESGCMV2 {
-			flags |= packetFlagAESGCMV2HeaderAAD
+			base, counter, err := s.crypto.nextMediaCounter()
+			if err != nil {
+				return err
+			}
+			aad := buildAESGCMV2Packet(pktAudio, channelID, senderID, seq, base, counter, nil, nil)[:fixedHeaderSize+20]
+			ciphertext, tag, err := s.crypto.encryptV2(payload, base, counter, aad)
+			if err != nil {
+				return err
+			}
+			packet = buildAESGCMV2Packet(pktAudio, channelID, senderID, seq, base, counter, ciphertext, tag)
+		} else {
+			nonce := s.crypto.nextNonce()
+			ciphertext, tag, err := s.crypto.encrypt(payload, nonce, nil)
+			if err != nil {
+				return err
+			}
+			packet = buildEncryptedPacket(pktAudio, channelID, senderID, seq, nonce, keyID, 0, ciphertext, tag)
 		}
-		aad := securePacketAAD(pktAudio, channelID, senderID, seq, nonce, keyID, flags)
-		ciphertext, tag, err := s.crypto.encrypt(payload, nonce, aad)
-		if err != nil {
-			return err
-		}
-		packet = buildEncryptedPacket(pktAudio, channelID, senderID, seq, nonce, keyID, flags, ciphertext, tag)
 	}
 	if len(packet) > maxUDPDatagramBytes {
 		return fmt.Errorf("audio datagram exceeds %d-byte MTU limit", maxUDPDatagramBytes)
@@ -2473,10 +2538,6 @@ func (s *relaySession) sendFECParityPacketsLocked(parityPackets []fecParityPacke
 		mode := s.cfg.CryptoMode
 		fecKeyID := s.crypto.keyID
 		addr := s.relayAddr
-		fecNonce := uint64(0)
-		if mode != cryptoNoCrypto {
-			fecNonce = s.crypto.nextNonce()
-		}
 		s.mu.Unlock()
 		if addr == nil {
 			return fmt.Errorf("relay address is not set")
@@ -2486,16 +2547,25 @@ func (s *relaySession) sendFECParityPacketsLocked(parityPackets []fecParityPacke
 		if mode == cryptoNoCrypto {
 			fecPacket = buildNoCryptoPacket(pktFec, channelID, senderID, fecSeq, fecPayload)
 		} else {
-			flags := uint16(0)
 			if mode == cryptoAESGCMV2 {
-				flags |= packetFlagAESGCMV2HeaderAAD
+				base, counter, err := s.crypto.nextMediaCounter()
+				if err != nil {
+					return err
+				}
+				aad := buildAESGCMV2Packet(pktFec, channelID, senderID, fecSeq, base, counter, nil, nil)[:fixedHeaderSize+20]
+				ciphertext, tag, err := s.crypto.encryptV2(fecPayload, base, counter, aad)
+				if err != nil {
+					return err
+				}
+				fecPacket = buildAESGCMV2Packet(pktFec, channelID, senderID, fecSeq, base, counter, ciphertext, tag)
+			} else {
+				nonce := s.crypto.nextNonce()
+				ciphertext, tag, err := s.crypto.encrypt(fecPayload, nonce, nil)
+				if err != nil {
+					return err
+				}
+				fecPacket = buildEncryptedPacket(pktFec, channelID, senderID, fecSeq, nonce, fecKeyID, 0, ciphertext, tag)
 			}
-			aad := securePacketAAD(pktFec, channelID, senderID, fecSeq, fecNonce, fecKeyID, flags)
-			ciphertext, tag, err := s.crypto.encrypt(fecPayload, fecNonce, aad)
-			if err != nil {
-				return err
-			}
-			fecPacket = buildEncryptedPacket(pktFec, channelID, senderID, fecSeq, fecNonce, fecKeyID, flags, ciphertext, tag)
 		}
 		if len(fecPacket) > maxUDPDatagramBytes {
 			return fmt.Errorf("FEC datagram exceeds %d-byte MTU limit", maxUDPDatagramBytes)

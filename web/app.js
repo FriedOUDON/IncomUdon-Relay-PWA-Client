@@ -2260,7 +2260,7 @@
       senderId: String(randomSenderID()),
       passwordHash: "",
       cryptoMode: "aes-gcm-v2",
-      controlAuthEnabled: false,
+      controlAuthEnabled: true,
       controlKeyId: "1",
       codecMode: initialOpusReady ? String(defaultOpusBitrate) : "1600",
       browserCodec: "opus",
@@ -5024,8 +5024,12 @@
     if (!supported) {
       ui.controlAuthEnabled.checked = false;
     }
-    ui.controlAuthEnabled.disabled = !supported;
-    ui.controlKeyId.disabled = !supported || !ui.controlAuthEnabled.checked;
+    if (supported) {
+      // v0.5 requires Control Authentication v1 for AES-GCM v2 media.
+      ui.controlAuthEnabled.checked = true;
+    }
+    ui.controlAuthEnabled.disabled = supported;
+    ui.controlKeyId.disabled = !supported;
     ui.controlKeyId.value = String(normalizeControlKeyId(ui.controlKeyId.value));
   }
 

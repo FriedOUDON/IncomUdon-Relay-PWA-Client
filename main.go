@@ -1029,7 +1029,7 @@ func buildSessionConfig(
 		return sessionConfig{}, fmt.Errorf("channelId must be greater than 0")
 	}
 
-	mode := cryptoAESGCM
+	mode := cryptoAESGCMV2
 	if strings.TrimSpace(cmd.CryptoMode) != "" {
 		parsed, ok := parseCryptoMode(strings.TrimSpace(cmd.CryptoMode))
 		if !ok {
@@ -1061,7 +1061,7 @@ func buildSessionConfig(
 	if cmd.FecEnabled != nil {
 		fecEnabled = *cmd.FecEnabled
 	}
-	controlAuthEnabled := false
+	controlAuthEnabled := mode == cryptoAESGCMV2
 	if cmd.ControlAuthEnabled != nil {
 		controlAuthEnabled = *cmd.ControlAuthEnabled
 	}
@@ -1071,6 +1071,9 @@ func buildSessionConfig(
 	}
 	if controlAuthEnabled && mode != cryptoAESGCMV2 {
 		return sessionConfig{}, fmt.Errorf("control authentication requires cryptoMode=aes-gcm-v2")
+	}
+	if mode == cryptoAESGCMV2 {
+		controlAuthEnabled = true
 	}
 
 	txCodec := strings.ToLower(strings.TrimSpace(cmd.TxCodec))

@@ -31,6 +31,14 @@ type controlAuthContext struct {
 }
 
 func newControlAuthContext(password string, channelID uint32, keyID uint32) (*controlAuthContext, error) {
+	passwordKey, err := derivePasswordKey(password, channelID)
+	if err != nil {
+		return nil, err
+	}
+	return newControlAuthContextFromPasswordKey(passwordKey, keyID)
+}
+
+func newControlAuthContextFromPasswordKey(passwordKey []byte, keyID uint32) (*controlAuthContext, error) {
 	if keyID == 0 {
 		return nil, fmt.Errorf("control authentication key ID must be non-zero")
 	}
@@ -42,7 +50,6 @@ func newControlAuthContext(password string, channelID uint32, keyID uint32) (*co
 	if sessionID == 0 {
 		sessionID = 1
 	}
-	passwordKey := derivePasswordKey(password, channelID)
 	return &controlAuthContext{
 		key:             hkdfSHA256(passwordKey, nil, []byte("incomudon-control-auth-v1"), sha256.Size),
 		keyID:           keyID,

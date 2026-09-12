@@ -6,7 +6,7 @@ import (
 )
 
 func TestVersion1MTULimits(t *testing.T) {
-	if maxUDPDatagramBytes != 1200 || maxTransmitMediaFrameBytes != 1139 || maxMediaFrameBytes != 4096 {
+	if maxUDPDatagramBytes != 1200 || maxTransmitMediaFrameBytes != 1131 || maxMediaFrameBytes != 4096 {
 		t.Fatalf("unexpected MTU constants: datagram=%d tx=%d rx=%d", maxUDPDatagramBytes, maxTransmitMediaFrameBytes, maxMediaFrameBytes)
 	}
 
@@ -16,15 +16,15 @@ func TestVersion1MTULimits(t *testing.T) {
 	}
 	frame := bytes.Repeat([]byte{0x55}, maxTransmitMediaFrameBytes)
 	payload := append([]byte{0, 1}, frame...)
-	flags := packetFlagAESGCMV2HeaderAAD
-	aad := securePacketAAD(pktAudio, 100, 1001, 1, 1, ctx.keyID, flags)
-	ciphertext, tag, err := ctx.encrypt(payload, 1, aad)
+	base := [12]byte{1}
+	aad := buildAESGCMV2Packet(pktAudio, 100, 1001, 1, base, 1, nil, nil)[:36]
+	ciphertext, tag, err := ctx.encryptV2(payload, base, 1, aad)
 	if err != nil {
 		t.Fatalf("encrypt audio: %v", err)
 	}
-	packet := buildEncryptedPacket(pktAudio, 100, 1001, 1, 1, ctx.keyID, flags, ciphertext, tag)
-	if len(packet) != 1185 {
-		t.Fatalf("max audio datagram = %d, want 1185", len(packet))
+	packet := buildAESGCMV2Packet(pktAudio, 100, 1001, 1, base, 1, ciphertext, tag)
+	if len(packet) != 36+len(payload)+authTagSize {
+		t.Fatalf("max audio datagram = %d", len(packet))
 	}
 	if len(packet) > maxUDPDatagramBytes {
 		t.Fatalf("max audio datagram exceeds limit: %d", len(packet))
@@ -34,21 +34,21 @@ func TestVersion1MTULimits(t *testing.T) {
 		BlockStart:   1,
 		BlockSize:    6,
 		ParityIndex:  0,
-		FrameLengths: []uint16{1139, 1139, 1139, 1139, 1139, 1139},
+		FrameLengths: []uint16{1131, 1131, 1131, 1131, 1131, 1131},
 		Data:         bytes.Repeat([]byte{0xaa}, maxTransmitMediaFrameBytes),
 	}
 	fecPayload, ok := parity.MarshalPayload()
 	if !ok {
 		t.Fatal("failed to marshal maximum FEC parity")
 	}
-	fecAAD := securePacketAAD(pktFec, 100, 1001, 2, 2, ctx.keyID, flags)
-	fecCiphertext, fecTag, err := ctx.encrypt(fecPayload, 2, fecAAD)
+	fecAAD := buildAESGCMV2Packet(pktFec, 100, 1001, 2, base, 2, nil, nil)[:36]
+	fecCiphertext, fecTag, err := ctx.encryptV2(fecPayload, base, 2, fecAAD)
 	if err != nil {
 		t.Fatalf("encrypt FEC: %v", err)
 	}
-	fecPacket := buildEncryptedPacket(pktFec, 100, 1001, 2, 2, ctx.keyID, flags, fecCiphertext, fecTag)
-	if len(fecPacket) != maxUDPDatagramBytes {
-		t.Fatalf("max FEC datagram = %d, want %d", len(fecPacket), maxUDPDatagramBytes)
+	fecPacket := buildAESGCMV2Packet(pktFec, 100, 1001, 2, base, 2, fecCiphertext, fecTag)
+	if len(fecPacket) > maxUDPDatagramBytes {
+		t.Fatalf("max FEC datagram = %d exceeds MTU", len(fecPacket))
 	}
 }
 

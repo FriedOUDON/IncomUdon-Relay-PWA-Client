@@ -14,7 +14,7 @@ const (
 	// fragmentation. The larger receive limit only bounds untrusted payloads.
 	maxUDPDatagramBytes        = 1200
 	maxMediaFrameBytes         = 4096
-	maxTransmitMediaFrameBytes = 1139
+	maxTransmitMediaFrameBytes = 1131
 	maxMixTalkers              = 16
 
 	// packetFlagAESGCMV2HeaderAAD marks packets whose fixed and security
@@ -72,8 +72,10 @@ type packetHeader struct {
 }
 
 type securityHeader struct {
-	Nonce uint64
-	KeyID uint32
+	Nonce          uint64
+	MediaNonceBase [12]byte
+	MediaCounter   uint32
+	KeyID          uint32
 }
 
 type parsedPacket struct {
@@ -103,7 +105,8 @@ func parsePacket(data []byte) (parsedPacket, bool) {
 	fixedUsed := legacyHeaderSize
 
 	if header.HeaderLen == fixedHeaderSize ||
-		header.HeaderLen == fixedHeaderSize+securityHeaderSize {
+		header.HeaderLen == fixedHeaderSize+securityHeaderSize ||
+		header.HeaderLen == fixedHeaderSize+20 {
 		if len(data) < fixedHeaderSize {
 			return parsedPacket{}, false
 		}
@@ -116,7 +119,16 @@ func parsePacket(data []byte) (parsedPacket, bool) {
 		return parsedPacket{}, false
 	}
 
-	if int(header.HeaderLen) >= fixedUsed+securityHeaderSize {
+	if (header.Type == pktAudio || header.Type == pktFec) && header.Flags&packetFlagAESGCMV2HeaderAAD != 0 {
+		if header.HeaderLen != fixedHeaderSize+20 || len(data) < fixedHeaderSize+20+authTagSize {
+			return parsedPacket{}, false
+		}
+		sec := securityHeader{MediaCounter: binary.BigEndian.Uint32(data[28:32]), KeyID: binary.BigEndian.Uint32(data[32:36])}
+		copy(sec.MediaNonceBase[:], data[16:28])
+		return parseSecurePacket(data, header, sec, fixedHeaderSize+20)
+	}
+
+	if int(header.HeaderLen) == fixedHeaderSize+securityHeaderSize {
 		if len(data) < offset+securityHeaderSize+authTagSize {
 			return parsedPacket{}, false
 		}
@@ -125,27 +137,7 @@ func parsePacket(data []byte) (parsedPacket, bool) {
 			Nonce: binary.BigEndian.Uint64(data[offset : offset+8]),
 			KeyID: binary.BigEndian.Uint32(data[offset+8 : offset+12]),
 		}
-		offset += securityHeaderSize
-
-		payloadLen := len(data) - offset - authTagSize
-		if payloadLen < 0 {
-			return parsedPacket{}, false
-		}
-
-		payload := make([]byte, payloadLen)
-		copy(payload, data[offset:offset+payloadLen])
-
-		tag := make([]byte, authTagSize)
-		copy(tag, data[offset+payloadLen:])
-
-		return parsedPacket{
-			Header:      header,
-			Sec:         sec,
-			AAD:         append([]byte(nil), data[:offset]...),
-			Payload:     payload,
-			Tag:         tag,
-			HasSecurity: true,
-		}, true
+		return parseSecurePacket(data, header, sec, offset+securityHeaderSize)
 	}
 
 	if int(header.HeaderLen) != fixedUsed {
@@ -160,6 +152,14 @@ func parsePacket(data []byte) (parsedPacket, bool) {
 		Payload:     payload,
 		HasSecurity: false,
 	}, true
+}
+
+func parseSecurePacket(data []byte, header packetHeader, sec securityHeader, offset int) (parsedPacket, bool) {
+	payloadLen := len(data) - offset - authTagSize
+	if payloadLen < 0 {
+		return parsedPacket{}, false
+	}
+	return parsedPacket{Header: header, Sec: sec, AAD: append([]byte(nil), data[:offset]...), Payload: append([]byte(nil), data[offset:offset+payloadLen]...), Tag: append([]byte(nil), data[offset+payloadLen:]...), HasSecurity: true}, true
 }
 
 func readTalkerPayload(payload []byte, fallback uint32) uint32 {
@@ -215,6 +215,22 @@ func buildEncryptedPacket(pktType uint8, channelID uint32, senderID uint32, seq 
 	packet := buildSecurePacketPrefix(pktType, channelID, senderID, seq, nonce, keyID, flags)
 	packet = append(packet, ciphertext...)
 	packet = append(packet, tag...)
+	return packet
+}
+
+func buildAESGCMV2Packet(pktType uint8, channelID uint32, senderID uint32, seq uint16, base [12]byte, counter uint32, ciphertext []byte, tag []byte) []byte {
+	packet := make([]byte, fixedHeaderSize+20+len(ciphertext)+len(tag))
+	packet[0], packet[1] = protocolVersion, pktType
+	binary.BigEndian.PutUint16(packet[2:4], fixedHeaderSize+20)
+	binary.BigEndian.PutUint32(packet[4:8], channelID)
+	binary.BigEndian.PutUint32(packet[8:12], senderID)
+	binary.BigEndian.PutUint16(packet[12:14], seq)
+	binary.BigEndian.PutUint16(packet[14:16], packetFlagAESGCMV2HeaderAAD)
+	copy(packet[16:28], base[:])
+	binary.BigEndian.PutUint32(packet[28:32], counter)
+	binary.BigEndian.PutUint32(packet[32:36], 2)
+	copy(packet[36:], ciphertext)
+	copy(packet[36+len(ciphertext):], tag)
 	return packet
 }
 

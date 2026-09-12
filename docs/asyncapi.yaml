@@ -79,7 +79,7 @@ components:
             channelId: 1
             senderId: 123456789
             password: ""
-            cryptoMode: aes-gcm
+            cryptoMode: aes-gcm-v2
             codecMode: 1600
             txCodec: codec2
             uplinkCodec: opus
@@ -124,7 +124,7 @@ components:
             relayPort: 50000
             channelId: 1
             senderId: 123456789
-            cryptoMode: aes-gcm
+            cryptoMode: aes-gcm-v2
             codecMode: 1600
             txCodec: codec2
             fecEnabled: true
@@ -232,7 +232,7 @@ components:
           type: string
         cryptoMode:
           type: string
-          enum: [aes-gcm, legacy-xor, no-crypto]
+          enum: [aes-gcm-v2, aes-gcm, legacy-xor, no-crypto]
         codecMode:
           type: integer
         txCodec:
